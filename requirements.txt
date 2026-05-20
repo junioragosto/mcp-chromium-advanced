@@ -1,0 +1,8 @@
+fastapi
+fastmcp
+httpx
+psutil
+PyQt5
+selenium
+undetected-chromedriver
+uvicorn

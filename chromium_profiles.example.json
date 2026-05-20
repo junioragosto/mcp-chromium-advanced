@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "paths": {
+    "chromium_dir": "/absolute/path/to/chromium-or-chrome",
+    "chromedriver_path": "/absolute/path/to/chromedriver",
+    "user_data_root": "/absolute/path/to/user-data",
+    "bookmarks_template_path": "/absolute/path/to/bookmarks_template.html",
+    "fingerprint_zip_path": "/absolute/path/to/fingerprint-extension.zip",
+    "start_script_path": ""
+  },
+  "app": {
+    "minimize_to_tray_on_close": true,
+    "language": "en"
+  },
+  "mcp": {
+    "enabled": true,
+    "transport": "streamable-http",
+    "host": "127.0.0.1",
+    "port": 28888,
+    "worker_port": 28889,
+    "path": "/mcp",
+    "log_level": "info",
+    "idle_timeout_seconds": 60
+  },
+  "profiles": [
+    {
+      "profile_name": "Profile 1",
+      "account": "account-label@example.com",
+      "keepalive_enabled": false,
+      "notes": "Example entry only. Remove before real use.",
+      "last_launch_at": "",
+      "last_keepalive_at": "",
+      "last_keepalive_status": "never",
+      "last_keepalive_message": "",
+      "last_keepalive_details": {}
+    }
+  ],
+  "keepalive": {
+    "enabled_sites": {
+      "chatgpt": true,
+      "gmail": true,
+      "google": true
+    },
+    "schedule_time": "09:00",
+    "headless": false,
+    "page_timeout_seconds": 45,
+    "between_profiles_seconds": 5,
+    "settle_seconds": 3,
+    "site_dwell_seconds": 6,
+    "chatgpt_prompt": "",
+    "chatgpt_conversation_hint": "",
+    "google_query": "profile keepalive",
+    "last_run_at": "",
+    "last_run_finished_at": "",
+    "last_run_status": "never",
+    "last_run_message": "",
+    "last_run_source": "",
+    "last_run_profile_count": 0,
+    "last_run_details": [],
+    "last_scheduled_run_date": ""
+  }
+}
