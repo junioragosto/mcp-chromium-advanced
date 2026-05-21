@@ -343,6 +343,50 @@ def normalize_profile_entry(entry: Dict) -> Dict:
     return normalized
 
 
+def merge_profile_entries(existing: Dict, incoming: Dict) -> Dict:
+    merged = normalize_profile_entry(existing)
+    candidate = normalize_profile_entry(incoming)
+
+    for key in (
+        "account",
+        "notes",
+        "last_launch_at",
+        "last_keepalive_at",
+        "last_keepalive_message",
+    ):
+        if candidate.get(key):
+            merged[key] = candidate[key]
+
+    if candidate.get("keepalive_enabled"):
+        merged["keepalive_enabled"] = True
+
+    if candidate.get("last_keepalive_status") and candidate.get("last_keepalive_status") != "never":
+        merged["last_keepalive_status"] = candidate["last_keepalive_status"]
+
+    if candidate.get("last_keepalive_details"):
+        merged["last_keepalive_details"] = candidate["last_keepalive_details"]
+
+    return merged
+
+
+def dedupe_profile_entries(entries: List[Dict]) -> List[Dict]:
+    merged_by_name: Dict[str, Dict] = {}
+    ordered_names: List[str] = []
+
+    for item in entries:
+        normalized = normalize_profile_entry(item)
+        profile_name = normalized.get("profile_name", "")
+        if not profile_name:
+            continue
+        if profile_name not in merged_by_name:
+            merged_by_name[profile_name] = normalized
+            ordered_names.append(profile_name)
+            continue
+        merged_by_name[profile_name] = merge_profile_entries(merged_by_name[profile_name], normalized)
+
+    return [merged_by_name[name] for name in ordered_names]
+
+
 def profile_sort_key(profile_name: str):
     match = re.match(r"^Profile\s+(\d+)$", profile_name or "")
     if match:
@@ -421,11 +465,11 @@ def normalize_config(config: Optional[Dict]) -> Dict:
 
     profiles = loaded.get("profiles", [])
     if isinstance(profiles, list):
-        normalized["profiles"] = [
+        normalized["profiles"] = dedupe_profile_entries([
             normalize_profile_entry(item)
             for item in profiles
             if isinstance(item, dict) and str(item.get("profile_name", "")).strip()
-        ]
+        ])
 
     normalized["profiles"] = sort_profiles(normalized["profiles"])
     normalized["app"]["language"] = normalize_language_code(normalized["app"].get("language", detect_default_language()))

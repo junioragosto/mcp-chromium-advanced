@@ -1004,12 +1004,6 @@ class ChromiumManagerWindow(QMainWindow):
             return
 
         profile_name = next_profile_name(self.config)
-        try:
-            ensure_profile_directory(user_data_root, profile_name)
-        except Exception as exc:
-            QMessageBox.critical(self, self.tr("error_create_failed_title"), self.trf("error_create_profile_dir", error=exc))
-            return
-
         new_profile = {
             "profile_name": profile_name,
             "account": "",
@@ -1021,6 +1015,12 @@ class ChromiumManagerWindow(QMainWindow):
             return
 
         new_profile.update(dialog.get_data())
+        try:
+            ensure_profile_directory(user_data_root, profile_name)
+        except Exception as exc:
+            QMessageBox.critical(self, self.tr("error_create_failed_title"), self.trf("error_create_profile_dir", error=exc))
+            return
+
         self.config["profiles"].append(new_profile)
         self.config = save_app_config(self.config, self.config_path)
         try:

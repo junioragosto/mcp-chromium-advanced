@@ -509,7 +509,13 @@ def main() -> None:
         worker_port=int(args.worker_port or 28889),
         idle_timeout_seconds=int(args.idle_timeout_seconds or 60),
     )
-    uvicorn.run(app, host=str(args.host or "127.0.0.1"), port=int(args.port or 28888), log_level=str(args.log_level or "info"))
+    uvicorn.run(
+        app,
+        host=str(args.host or "127.0.0.1"),
+        port=int(args.port or 28888),
+        log_level=str(args.log_level or "info"),
+        log_config=None,
+    )
 
 
 if __name__ == "__main__":
