@@ -90,6 +90,12 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         return {"session_id": session_id, **browser_session.get_current_url()}
 
     @server.tool
+    def get_session_capabilities(session_id: str) -> dict:
+        """Return the feature capabilities exposed by the current browser session."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.get_capabilities()}
+
+    @server.tool
     def get_page_text(session_id: str) -> dict:
         """Extract visible page text from the current document body."""
         browser_session = session_manager.resolve_session(session_id)
@@ -100,6 +106,45 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         """Return the current page HTML source."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.get_page_html()}
+
+    @server.tool
+    def browser_snapshot(
+        session_id: str,
+        target: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        depth: int = 0,
+        boxes: bool = False,
+        filename: str = "",
+    ) -> dict:
+        """Capture an AI-friendly accessibility snapshot of the page or a target subtree."""
+        browser_session = session_manager.resolve_session(session_id)
+        resolved_depth = int(depth) if int(depth) > 0 else None
+        return {
+            "session_id": session_id,
+            **browser_session.snapshot(target=target, by=by, depth=resolved_depth, boxes=bool(boxes), filename=filename),
+        }
+
+    @server.tool
+    def browser_list_candidates(
+        session_id: str,
+        target: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        text_filter: str = "",
+        limit: int = 25,
+        include_boxes: bool = True,
+    ) -> dict:
+        """List actionable candidate elements from the page or a target subtree."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.list_candidates(
+                target=target,
+                by=by,
+                text_filter=text_filter,
+                limit=int(limit),
+                include_boxes=bool(include_boxes),
+            ),
+        }
 
     @server.tool
     def inspect_elements(
@@ -117,6 +162,12 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         """Describe the currently focused element."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.get_active_element()}
+
+    @server.tool
+    def browser_get_interaction_context(session_id: str) -> dict:
+        """Return the current page, focus, modal, tab, and snapshot context for agent reasoning."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.get_interaction_context()}
 
     @server.tool
     def wait_for(
@@ -142,6 +193,28 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         return {"session_id": session_id, **browser_session.click(selector, by, int(timeout_seconds))}
 
     @server.tool
+    def click_target(
+        session_id: str,
+        target: str,
+        element: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        double_click: bool = False,
+    ) -> dict:
+        """Click a snapshot ref target, or fall back to a direct selector target when needed."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.click_target(
+                target=target,
+                element=element,
+                by=by,
+                timeout_seconds=int(timeout_seconds),
+                double_click=bool(double_click),
+            ),
+        }
+
+    @server.tool
     def type_text(
         session_id: str,
         selector: str,
@@ -156,6 +229,58 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         return {
             "session_id": session_id,
             **browser_session.type_text(selector, text, by, bool(clear_first), bool(submit), int(timeout_seconds)),
+        }
+
+    @server.tool
+    def type_target(
+        session_id: str,
+        target: str,
+        text: str,
+        element: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        clear_first: bool = True,
+        submit: bool = False,
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    ) -> dict:
+        """Type into a snapshot ref target, or fall back to a direct selector target when needed."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.type_target(
+                target=target,
+                text=text,
+                element=element,
+                by=by,
+                clear_first=bool(clear_first),
+                submit=bool(submit),
+                timeout_seconds=int(timeout_seconds),
+            ),
+        }
+
+    @server.tool
+    def type_target_and_verify(
+        session_id: str,
+        target: str,
+        text: str,
+        element: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        clear_first: bool = True,
+        submit: bool = False,
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    ) -> dict:
+        """Type into a target and immediately verify that the resulting value matches the requested text."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.type_target_and_verify(
+                target=target,
+                text=text,
+                element=element,
+                by=by,
+                clear_first=bool(clear_first),
+                submit=bool(submit),
+                timeout_seconds=int(timeout_seconds),
+            ),
         }
 
     @server.tool
@@ -179,6 +304,180 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         """Run JavaScript in the current page and return a JSON-serializable result when possible."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.run_script(script)}
+
+    @server.tool
+    def browser_verify_text(session_id: str, text: str) -> dict:
+        """Verify that text is visible on the current page."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.verify_text(text)}
+
+    @server.tool
+    def browser_verify_dialog(session_id: str, accessible_name: str = "", text: str = "") -> dict:
+        """Verify that a visible dialog/modal is open, optionally matching accessible name or text."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.verify_dialog(accessible_name=accessible_name, text=text)}
+
+    @server.tool
+    def browser_verify_active_element(
+        session_id: str,
+        target: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        element: str = "",
+    ) -> dict:
+        """Verify the currently focused element, or verify that focus is on a specific target."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.verify_active_element(target=target, by=by, element=element),
+        }
+
+    @server.tool
+    def browser_verify_target_value(
+        session_id: str,
+        target: str,
+        expected_value: str,
+        element: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+    ) -> dict:
+        """Verify the current value of an input-like target."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.verify_target_value(
+                target=target,
+                expected_value=expected_value,
+                element=element,
+                by=by,
+            ),
+        }
+
+    @server.tool
+    def browser_describe_target(
+        session_id: str,
+        target: str,
+        element: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        include_box: bool = True,
+    ) -> dict:
+        """Describe a target ref or selector, including visibility and optional bounding box."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.describe_target(target=target, element=element, by=by, include_box=bool(include_box)),
+        }
+
+    @server.tool
+    def browser_diagnose_target(
+        session_id: str,
+        target: str,
+        element: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        text_filter: str = "",
+        limit: int = 10,
+    ) -> dict:
+        """Diagnose why a target may not be interactable, including related candidates and current page context."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.diagnose_target(
+                target=target,
+                element=element,
+                by=by,
+                text_filter=text_filter,
+                limit=int(limit),
+            ),
+        }
+
+    @server.tool
+    def browser_verify_element(
+        session_id: str,
+        role: str,
+        accessible_name: str,
+    ) -> dict:
+        """Verify that an element with the given role and accessible name is visible."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.verify_element(role=role, accessible_name=accessible_name),
+        }
+
+    @server.tool
+    def browser_verify_target_visible(
+        session_id: str,
+        target: str,
+        element: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+    ) -> dict:
+        """Verify that a target ref or selector is visible."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.verify_target_visible(target=target, element=element, by=by),
+        }
+
+    @server.tool
+    def browser_highlight_target(
+        session_id: str,
+        target: str,
+        element: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        style: str = "",
+    ) -> dict:
+        """Show a persistent highlight overlay for a target ref or selector."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.highlight_target(target=target, element=element, by=by, style=style),
+        }
+
+    @server.tool
+    def browser_clear_highlights(session_id: str) -> dict:
+        """Clear highlight overlays created earlier in the session."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.clear_highlights()}
+
+    @server.tool
+    def browser_mouse_move_xy(session_id: str, x: float, y: float) -> dict:
+        """Move the mouse to viewport coordinates."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.mouse_move_xy(float(x), float(y))}
+
+    @server.tool
+    def browser_mouse_click_xy(
+        session_id: str,
+        x: float,
+        y: float,
+        button: Literal["left", "right", "middle"] = "left",
+        click_count: int = 1,
+        delay_ms: int = 0,
+    ) -> dict:
+        """Click at viewport coordinates as a vision-style fallback."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.mouse_click_xy(
+                float(x),
+                float(y),
+                button=str(button),
+                click_count=int(click_count),
+                delay_ms=int(delay_ms),
+            ),
+        }
+
+    @server.tool
+    def browser_mouse_drag_xy(
+        session_id: str,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+    ) -> dict:
+        """Drag the mouse from one viewport coordinate to another."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.mouse_drag_xy(float(start_x), float(start_y), float(end_x), float(end_y)),
+        }
 
     @server.tool
     def screenshot(session_id: str, filename: str = "") -> dict:
