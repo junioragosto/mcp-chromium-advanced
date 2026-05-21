@@ -245,6 +245,12 @@ def build_default_config() -> Dict:
             "minimize_to_tray_on_close": True,
             "language": detect_default_language(),
             "browser_engine": DEFAULT_BROWSER_ENGINE,
+            "window_bounds": {
+                "x": -1,
+                "y": -1,
+                "width": 860,
+                "height": 680,
+            },
         },
         "mcp": {
             "enabled": True,
@@ -468,6 +474,14 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["app"]["language"] = str(loaded_app.get("language")).strip()
         if "browser_engine" in loaded_app and loaded_app.get("browser_engine") is not None:
             normalized["app"]["browser_engine"] = normalize_browser_engine_name(str(loaded_app.get("browser_engine")).strip())
+        window_bounds = loaded_app.get("window_bounds", {})
+        if isinstance(window_bounds, dict):
+            for key in ("x", "y", "width", "height"):
+                if key in window_bounds:
+                    try:
+                        normalized["app"]["window_bounds"][key] = int(window_bounds.get(key))
+                    except Exception:
+                        pass
 
     loaded_mcp = loaded.get("mcp", {})
     if isinstance(loaded_mcp, dict):

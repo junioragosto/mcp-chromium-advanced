@@ -1,4 +1,6 @@
 import argparse
+import ctypes
+from ctypes import wintypes
 import datetime
 import json
 import multiprocessing
@@ -15,7 +17,7 @@ from typing import Dict, List, Optional
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from PyQt5.QtCore import QProcess, QThread, QTimer, Qt, QTime, pyqtSignal
+from PyQt5.QtCore import QLockFile, QProcess, QThread, QTimer, Qt, QTime, pyqtSignal
 from PyQt5.QtGui import QColor, QGuiApplication, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
@@ -90,11 +92,61 @@ MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
 LANGUAGE_OPTIONS = load_language_options()
 I18N = load_translations()
+WINDOW_STATE_SAVE_DELAY_MS = 400
+ERROR_ALREADY_EXISTS = 183
+SINGLE_INSTANCE_MUTEX_NAME = "Local\\ChromiumProfileManagerGuiSingleton"
 
 
 def get_resource_path(*parts) -> str:
     base_dir = get_project_root()
     return os.path.join(base_dir, *parts)
+
+
+def show_single_instance_message() -> None:
+    if getattr(sys, "stderr", None):
+        try:
+            sys.stderr.write("Chromium Profile Manager is already running.\n")
+        except Exception:
+            pass
+
+
+def acquire_single_instance_guard():
+    if SYSTEM_TYPE == "Windows":
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX_NAME)
+        if not handle:
+            raise ctypes.WinError()
+        last_error = kernel32.GetLastError()
+        if last_error == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return None
+        return ("win32-mutex", handle)
+
+    lock_path = os.path.join(get_state_storage_dir(), "gui.lock")
+    gui_lock = QLockFile(lock_path)
+    gui_lock.setStaleLockTime(0)
+    if not gui_lock.tryLock(100):
+        return None
+    return ("qt-lock", gui_lock)
+
+
+def release_single_instance_guard(guard) -> None:
+    if not guard:
+        return
+    guard_type, guard_handle = guard
+    if guard_type == "win32-mutex":
+        try:
+            ctypes.windll.kernel32.CloseHandle(guard_handle)
+        except Exception:
+            pass
+        return
+    if guard_type == "qt-lock":
+        try:
+            guard_handle.unlock()
+        except Exception:
+            pass
 
 
 def get_app_icon() -> QIcon:
@@ -329,10 +381,15 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_cache: Dict = {}
         self.mcp_restart_pending = False
         self.mcp_stop_requested = False
+        self.window_state_dirty = False
 
         self.setWindowTitle(self.tr("window_title"))
-        self.resize(860, 680)
+        bounds = self.config.get("app", {}).get("window_bounds", {})
+        initial_width = max(720, int(bounds.get("width", 860) or 860))
+        initial_height = max(560, int(bounds.get("height", 680) or 680))
+        self.resize(initial_width, initial_height)
         self.init_ui()
+        self.restore_window_bounds()
         self.fit_window_to_screen()
         self.retranslate_ui()
         self.setup_tray_icon()
@@ -353,6 +410,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_watchdog_timer = QTimer(self)
         self.mcp_watchdog_timer.timeout.connect(self.on_mcp_watchdog_timer)
         self.mcp_watchdog_timer.start(MCP_WATCHDOG_INTERVAL_MS)
+
+        self.window_state_timer = QTimer(self)
+        self.window_state_timer.setSingleShot(True)
+        self.window_state_timer.timeout.connect(self.persist_window_bounds)
 
     def _current_screen_available_geometry(self):
         screen = self.screen()
@@ -387,9 +448,38 @@ class ChromiumManagerWindow(QMainWindow):
             y = max(available.top(), available.bottom() - self.height())
         self.move(x, y)
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.fit_window_to_screen()
+    def restore_window_bounds(self):
+        bounds = self.config.get("app", {}).get("window_bounds", {})
+        if not isinstance(bounds, dict):
+            return
+        width = max(720, int(bounds.get("width", self.width()) or self.width()))
+        height = max(560, int(bounds.get("height", self.height()) or self.height()))
+        x = int(bounds.get("x", -1) or -1)
+        y = int(bounds.get("y", -1) or -1)
+        self.resize(width, height)
+        if x >= 0 and y >= 0:
+            self.move(x, y)
+
+    def schedule_window_bounds_save(self):
+        if self.isMinimized() or self.isFullScreen() or self.isMaximized():
+            return
+        self.window_state_dirty = True
+        self.window_state_timer.start(WINDOW_STATE_SAVE_DELAY_MS)
+
+    def persist_window_bounds(self):
+        if not self.window_state_dirty:
+            return
+        if self.isMinimized() or self.isFullScreen() or self.isMaximized():
+            return
+        self.window_state_dirty = False
+        self.config.setdefault("app", {})
+        self.config["app"]["window_bounds"] = {
+            "x": int(self.x()),
+            "y": int(self.y()),
+            "width": int(self.width()),
+            "height": int(self.height()),
+        }
+        self.config = save_app_config(self.config, self.config_path)
 
     def tr(self, key: str, fallback: str = "") -> str:
         lang = self.current_language if getattr(self, "current_language", "") in I18N else "en"
@@ -1975,11 +2065,20 @@ class ChromiumManagerWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.fit_window_to_screen()
         self.update_tray_actions()
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self.update_tray_actions()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self.schedule_window_bounds_save()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.schedule_window_bounds_save()
 
     def closeEvent(self, event):
         if not self.force_exit_requested and self.should_minimize_to_tray_on_close():
@@ -1994,6 +2093,7 @@ class ChromiumManagerWindow(QMainWindow):
             return
 
         self.force_exit_requested = False
+        self.persist_window_bounds()
         self.stop_mcp_service(update_checkbox=False)
         if self.tray_icon:
             self.tray_icon.hide()
@@ -2149,7 +2249,14 @@ def main():
         worker_main()
         return
 
+    single_instance_guard = acquire_single_instance_guard()
+    if not single_instance_guard:
+        show_single_instance_message()
+        raise SystemExit(0)
+
     app = QApplication(sys.argv)
+    app._single_instance_guard = single_instance_guard
+    app.aboutToQuit.connect(lambda: release_single_instance_guard(getattr(app, "_single_instance_guard", None)))
     app_icon = get_app_icon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
