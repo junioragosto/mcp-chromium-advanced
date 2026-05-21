@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import platform
+import psutil
 import shutil
 import socket
 import subprocess
@@ -95,6 +96,8 @@ I18N = load_translations()
 WINDOW_STATE_SAVE_DELAY_MS = 400
 ERROR_ALREADY_EXISTS = 183
 SINGLE_INSTANCE_MUTEX_NAME = "Local\\ChromiumProfileManagerGuiSingleton"
+MCP_DAEMON_EXE_NAME = "ChromiumMcpDaemon.exe"
+MCP_WORKER_EXE_NAME = "ChromiumMcpWorker.exe"
 
 
 def get_resource_path(*parts) -> str:
@@ -147,6 +150,56 @@ def release_single_instance_guard(guard) -> None:
             guard_handle.unlock()
         except Exception:
             pass
+
+
+def iter_project_mcp_processes() -> List[psutil.Process]:
+    results: List[psutil.Process] = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "exe"]):
+        try:
+            name = str(proc.info.get("name") or "")
+            cmdline_items = [str(item) for item in (proc.info.get("cmdline") or [])]
+            cmdline_text = " ".join(cmdline_items)
+            exe_path = str(proc.info.get("exe") or "")
+            if name in {MCP_DAEMON_EXE_NAME, MCP_WORKER_EXE_NAME}:
+                results.append(proc)
+                continue
+            if name.lower() in {"python.exe", "pythonw.exe"} and (
+                "chromium_advanced.mcp_daemon" in cmdline_text
+                or "chromium_advanced.mcp_server" in cmdline_text
+                or "--run-mcp-daemon" in cmdline_text
+                or "--run-mcp-worker" in cmdline_text
+            ):
+                results.append(proc)
+                continue
+            if exe_path and os.path.basename(exe_path) in {MCP_DAEMON_EXE_NAME, MCP_WORKER_EXE_NAME}:
+                results.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return results
+
+
+def terminate_project_mcp_processes(exclude_pid: Optional[int] = None, timeout_seconds: float = 3.0) -> List[int]:
+    terminated: List[int] = []
+    processes = [proc for proc in iter_project_mcp_processes() if proc.pid != exclude_pid]
+    if not processes:
+        return terminated
+
+    for proc in processes:
+        try:
+            proc.terminate()
+            terminated.append(proc.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    gone, alive = psutil.wait_procs(processes, timeout=timeout_seconds)
+    if alive:
+        for proc in alive:
+            try:
+                proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        psutil.wait_procs(alive, timeout=timeout_seconds)
+    return terminated
 
 
 def get_app_icon() -> QIcon:
@@ -377,6 +430,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.pending_log_lines: List[str] = []
         self.pending_mcp_log_lines: List[str] = []
         self.mcp_process: Optional[QProcess] = None
+        self.mcp_owned_process = False
         self.mcp_startup_applied = False
         self.mcp_status_cache: Dict = {}
         self.mcp_restart_pending = False
@@ -1710,13 +1764,6 @@ class ChromiumManagerWindow(QMainWindow):
         port = int(settings.get("port", 28888))
         return host, port
 
-    def has_external_mcp_daemon(self) -> bool:
-        status = self.query_mcp_status()
-        if status:
-            return True
-        host, port = self.get_mcp_connect_host_port()
-        return can_connect(host, port)
-
     def is_mcp_expected_enabled(self) -> bool:
         return bool(self.config.get("mcp", {}).get("enabled", False))
 
@@ -1739,7 +1786,7 @@ class ChromiumManagerWindow(QMainWindow):
         )
 
         daemon_status = self.query_mcp_status()
-        if daemon_status:
+        if daemon_status and (self.mcp_owned_process or (self.mcp_process is not None and self.mcp_process.state() != QProcess.NotRunning)):
             worker_state = str(daemon_status.get("worker_state", "stopped"))
             worker_pid = daemon_status.get("worker_pid")
             active_requests = int(daemon_status.get("active_proxy_requests", 0) or 0)
@@ -1761,6 +1808,12 @@ class ChromiumManagerWindow(QMainWindow):
                 self.mcp_status_detail_label.setText(
                     self.trf("mcp_status_detail_guarding", reason=(daemon_status.get("last_stop_reason") or "-"))
                 )
+            self.refresh_bottom_stats()
+            return
+
+        if daemon_status:
+            self.mcp_status_label.setText(self.tr("mcp_state_stopped"))
+            self.mcp_status_detail_label.setText(self.tr("mcp_status_detail_stopped"))
             self.refresh_bottom_stats()
             return
 
@@ -1846,17 +1899,21 @@ class ChromiumManagerWindow(QMainWindow):
 
     def start_mcp_service(self):
         self.save_mcp_settings()
-        if self.has_external_mcp_daemon():
-            self.append_mcp_log(self.tr("log_mcp_external_reused"), prefix="MCP")
-            self.refresh_mcp_status_ui()
-            return
         self.ensure_mcp_process()
         if self.mcp_process.state() != QProcess.NotRunning:
             self.refresh_mcp_status_ui()
             return
 
+        terminated_pids = terminate_project_mcp_processes(exclude_pid=os.getpid())
+        if terminated_pids:
+            self.append_mcp_log(
+                self.trf("log_mcp_cleanup_stale", pid_text=", ".join(str(pid) for pid in terminated_pids)),
+                prefix="MCP",
+            )
+
         self.mcp_restart_pending = False
         self.mcp_stop_requested = False
+        self.mcp_owned_process = True
         self.append_mcp_log(self.tr("log_mcp_prepare_start"))
         program = sys.executable
         if getattr(sys, "frozen", False):
@@ -1869,6 +1926,8 @@ class ChromiumManagerWindow(QMainWindow):
 
     def stop_mcp_service(self, update_checkbox: bool = True):
         if self.mcp_process is None or self.mcp_process.state() == QProcess.NotRunning:
+            self.cleanup_mcp_process_residue()
+            self.mcp_owned_process = False
             if update_checkbox:
                 self.mcp_service_checkbox.blockSignals(True)
                 self.mcp_service_checkbox.setChecked(False)
@@ -1888,6 +1947,8 @@ class ChromiumManagerWindow(QMainWindow):
             self.mcp_service_checkbox.blockSignals(True)
             self.mcp_service_checkbox.setChecked(False)
             self.mcp_service_checkbox.blockSignals(False)
+        self.cleanup_mcp_process_residue()
+        self.mcp_owned_process = False
         self.mcp_status_cache = {}
         self.refresh_mcp_status_ui()
 
@@ -1926,10 +1987,8 @@ class ChromiumManagerWindow(QMainWindow):
         status_text = self.tr("process_exit_normal") if exit_status == QProcess.NormalExit else self.tr("process_exit_abnormal")
         self.mcp_status_cache = {}
         self.append_mcp_log(self.trf("log_mcp_finished", status_text=status_text, exit_code=exit_code))
-        external_ready = self.has_external_mcp_daemon()
-        should_restart = ((self.is_mcp_expected_enabled() and not self.mcp_stop_requested) or self.mcp_restart_pending) and not external_ready
-        if external_ready:
-            self.append_mcp_log(self.tr("log_mcp_external_reused"), prefix="MCP")
+        should_restart = (self.is_mcp_expected_enabled() and not self.mcp_stop_requested) or self.mcp_restart_pending
+        self.mcp_owned_process = False
         self.refresh_mcp_status_ui()
         if should_restart:
             self.mcp_restart_pending = False
@@ -1939,6 +1998,14 @@ class ChromiumManagerWindow(QMainWindow):
         self.append_mcp_log(self.trf("log_mcp_error", error=error), prefix="MCP-ERR")
         self.refresh_mcp_status_ui()
 
+    def cleanup_mcp_process_residue(self):
+        terminated_pids = terminate_project_mcp_processes(exclude_pid=os.getpid())
+        if terminated_pids:
+            self.append_mcp_log(
+                self.trf("log_mcp_cleanup_stale", pid_text=", ".join(str(pid) for pid in terminated_pids)),
+                prefix="MCP",
+            )
+
     def on_mcp_watchdog_timer(self):
         self.refresh_mcp_status_ui()
         if not self.is_mcp_expected_enabled():
@@ -1946,8 +2013,6 @@ class ChromiumManagerWindow(QMainWindow):
         host, port = self.get_mcp_connect_host_port()
         process_state = self.mcp_process.state() if self.mcp_process is not None else QProcess.NotRunning
         if process_state == QProcess.NotRunning:
-            if self.has_external_mcp_daemon():
-                return
             self.append_mcp_log(self.tr("log_mcp_watchdog_not_running"), prefix="MCP-WARN")
             self.start_mcp_service()
             return

@@ -177,6 +177,7 @@
   "log_mcp_prepare_start": "准备启动 MCP 守护进程。",
   "log_mcp_prepare_stop": "准备停止 MCP 守护进程。",
   "log_mcp_external_reused": "检测到配置端口上已有 MCP 守护进程，已直接复用，不再启动新的子进程。",
+  "log_mcp_cleanup_stale": "启动或停止 MCP 之前，已清理遗留的 MCP 相关进程: {pid_text}。",
   "log_mcp_force_kill": "MCP 守护进程未在超时内退出，执行强制结束。",
   "log_mcp_finished": "MCP 守护进程已结束: {status_text}, exit_code={exit_code}",
   "log_mcp_error": "MCP 守护进程错误: {error}",

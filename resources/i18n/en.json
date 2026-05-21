@@ -177,6 +177,7 @@
   "log_mcp_prepare_start": "Preparing to start the MCP daemon.",
   "log_mcp_prepare_stop": "Preparing to stop the MCP daemon.",
   "log_mcp_external_reused": "Detected an existing MCP daemon on the configured port and reused it instead of starting a new child process.",
+  "log_mcp_cleanup_stale": "Cleaned up leftover MCP-related processes before starting/stopping MCP: {pid_text}.",
   "log_mcp_force_kill": "The MCP daemon did not exit in time. Forcing shutdown.",
   "log_mcp_finished": "MCP daemon exited: {status_text}, exit_code={exit_code}",
   "log_mcp_error": "MCP daemon error: {error}",
