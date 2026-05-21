@@ -5,8 +5,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from chromium_advanced.browser_engines.factory import create_browser_engine, resolve_browser_engine_name
 from chromium_advanced.chromium_profile_lib import (
-    create_driver_for_profile,
     ensure_profile_bookmarks_initialized,
     find_running_chromium_processes,
     get_lock_path,
@@ -19,31 +19,23 @@ from chromium_advanced.chromium_profile_lib import (
 class SessionRecord:
     session_id: str
     profile_name: str
+    engine_name: str
     created_at: float
     last_used_at: float
-    driver: object
+    browser_session: object
 
     def to_summary(self) -> Dict:
-        current_url = ""
-        title = ""
-        alive = True
-        try:
-            current_url = str(getattr(self.driver, "current_url", "") or "")
-        except Exception:
-            alive = False
-        try:
-            title = str(getattr(self.driver, "title", "") or "")
-        except Exception:
-            alive = False
+        summary = self.browser_session.get_summary()
 
         return {
             "session_id": self.session_id,
             "profile_name": self.profile_name,
+            "engine_name": self.engine_name,
             "created_at": self.created_at,
             "last_used_at": self.last_used_at,
-            "current_url": current_url,
-            "title": title,
-            "alive": alive,
+            "current_url": summary.current_url,
+            "title": summary.title,
+            "alive": summary.alive,
         }
 
 
@@ -74,8 +66,13 @@ class SessionManager:
 
     def list_profiles(self) -> List[Dict]:
         config = normalize_config(self._load_config())
-        active_sessions = {session.profile_name: session for session in self._sessions_by_id.values()}
         busy_status = self.get_server_status()
+        with self._lock:
+            active_sessions = {
+                session.profile_name: session
+                for session in self._sessions_by_id.values()
+                if self._is_session_alive(session.browser_session)
+            }
         results: List[Dict] = []
         for item in config.get("profiles", []):
             profile_name = item.get("profile_name", "")
@@ -116,17 +113,25 @@ class SessionManager:
 
     def list_sessions(self) -> List[Dict]:
         with self._lock:
-            dead_session_ids = [sid for sid, session in self._sessions_by_id.items() if not self._is_driver_alive(session.driver)]
+            dead_session_ids = [
+                sid
+                for sid, session in self._sessions_by_id.items()
+                if not self._is_session_alive(session.browser_session)
+            ]
             for session_id in dead_session_ids:
-                self._remove_session_locked(session_id, close_driver=False)
+                self._remove_session_locked(session_id, close_session=False)
 
             return [session.to_summary() for session in self._sessions_by_id.values()]
 
     def get_server_status(self) -> Dict:
         with self._lock:
-            dead_session_ids = [sid for sid, session in self._sessions_by_id.items() if not self._is_driver_alive(session.driver)]
+            dead_session_ids = [
+                sid
+                for sid, session in self._sessions_by_id.items()
+                if not self._is_session_alive(session.browser_session)
+            ]
             for session_id in dead_session_ids:
-                self._remove_session_locked(session_id, close_driver=False)
+                self._remove_session_locked(session_id, close_session=False)
 
             active_sessions = [session.to_summary() for session in self._sessions_by_id.values()]
             external_busy = self._get_external_busy_details()
@@ -196,6 +201,7 @@ class SessionManager:
             return {
                 "state": "idle",
                 "busy": False,
+                "default_engine_name": resolve_browser_engine_name(self._load_config()),
                 "owner_profile_name": "",
                 "owner_session_id": "",
                 "started_at": 0,
@@ -207,48 +213,57 @@ class SessionManager:
                 "message": "server is idle",
             }
 
-    def can_start_session(self, profile_name: str) -> Dict:
+    def can_start_session(self, profile_name: str, engine_name: str = "") -> Dict:
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             raise ValueError("profile_name is required")
 
         status = self.get_server_status()
-        allowed = (not status.get("busy")) or status.get("owner_profile_name") == profile_name
+        owner_profile_name = str(status.get("owner_profile_name", "") or "")
+        owner_session_id = str(status.get("owner_session_id", "") or "")
+        same_profile_owned = bool(owner_profile_name) and owner_profile_name == profile_name
+        allowed = not bool(status.get("busy"))
         return {
             "allowed": bool(allowed),
             "profile_name": profile_name,
+            "engine_name": resolve_browser_engine_name(self._load_config(), engine_name),
+            "reusable": bool(same_profile_owned and owner_session_id),
+            "reusable_session_id": owner_session_id if same_profile_owned else "",
             "status": status,
         }
 
-    def start_session(self, profile_name: str, reuse_existing: bool = False) -> Dict:
+    def start_session(self, profile_name: str, reuse_existing: bool = False, engine_name: str = "") -> Dict:
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             raise ValueError("profile_name is required")
+        config = self._load_config()
+        resolved_engine_name = resolve_browser_engine_name(config, engine_name)
 
         with self._lock:
             if reuse_existing:
                 existing_session_id = self._session_id_by_profile.get(profile_name)
                 if existing_session_id:
                     session = self._sessions_by_id.get(existing_session_id)
-                    if session and self._is_driver_alive(session.driver):
+                    if session and session.engine_name == resolved_engine_name and self._is_session_alive(session.browser_session):
                         session.last_used_at = time.time()
                         return {
                             "session_id": session.session_id,
                             "profile_name": session.profile_name,
+                            "engine_name": session.engine_name,
                             "reused": True,
                         }
                     if existing_session_id:
-                        self._remove_session_locked(existing_session_id, close_driver=True)
+                        self._remove_session_locked(existing_session_id, close_session=True)
             else:
                 existing_session_id = self._session_id_by_profile.get(profile_name)
                 if existing_session_id:
                     session = self._sessions_by_id.get(existing_session_id)
-                    if session and self._is_driver_alive(session.driver):
+                    if session and self._is_session_alive(session.browser_session):
                         raise RuntimeError(
                             f"profile already has an active session: {profile_name} ({session.session_id})"
                         )
                     if existing_session_id:
-                        self._remove_session_locked(existing_session_id, close_driver=True)
+                        self._remove_session_locked(existing_session_id, close_session=True)
 
             busy_status = self.get_server_status()
             if busy_status.get("busy") and busy_status.get("owner_profile_name") != profile_name:
@@ -270,17 +285,18 @@ class SessionManager:
             self._starting_started_at = time.time()
 
         try:
-            config = self._load_config()
             ensure_profile_bookmarks_initialized(config, profile_name)
-            driver = create_driver_for_profile(config, profile_name)
+            engine = create_browser_engine(resolved_engine_name)
+            browser_session = engine.create_session(config, profile_name)
             session_id = f"session-{uuid.uuid4().hex[:12]}"
             now = time.time()
             session = SessionRecord(
                 session_id=session_id,
                 profile_name=profile_name,
+                engine_name=resolved_engine_name,
                 created_at=now,
                 last_used_at=now,
-                driver=driver,
+                browser_session=browser_session,
             )
             with self._lock:
                 self._sessions_by_id[session_id] = session
@@ -288,6 +304,7 @@ class SessionManager:
             return {
                 "session_id": session_id,
                 "profile_name": profile_name,
+                "engine_name": resolved_engine_name,
                 "reused": False,
             }
         finally:
@@ -305,8 +322,8 @@ class SessionManager:
             session = self._sessions_by_id.get(session_id)
             if not session:
                 raise ValueError(f"session not found: {session_id}")
-            if not self._is_driver_alive(session.driver):
-                self._remove_session_locked(session_id, close_driver=False)
+            if not self._is_session_alive(session.browser_session):
+                self._remove_session_locked(session_id, close_session=False)
                 raise RuntimeError(f"session is no longer alive: {session_id}")
             session.last_used_at = time.time()
             return session
@@ -320,10 +337,11 @@ class SessionManager:
                     "closed": False,
                     "message": "session not found",
                 }
-            self._remove_session_locked(session.session_id, close_driver=True)
+            self._remove_session_locked(session.session_id, close_session=True)
             return {
                 "session_id": session.session_id,
                 "profile_name": session.profile_name,
+                "engine_name": session.engine_name,
                 "closed": True,
             }
 
@@ -333,23 +351,22 @@ class SessionManager:
             results = [self.close_session(session_id) for session_id in session_ids]
             return {"closed_count": sum(1 for item in results if item.get("closed")), "results": results}
 
-    def resolve_driver(self, session_id: str):
-        return self.get_session(session_id).driver
+    def resolve_session(self, session_id: str):
+        return self.get_session(session_id).browser_session
 
-    def _remove_session_locked(self, session_id: str, close_driver: bool) -> None:
+    def _remove_session_locked(self, session_id: str, close_session: bool) -> None:
         session = self._sessions_by_id.pop(session_id, None)
         if not session:
             return
         self._session_id_by_profile.pop(session.profile_name, None)
-        if close_driver:
+        if close_session:
             try:
-                session.driver.quit()
+                session.browser_session.close()
             except Exception:
                 pass
 
-    def _is_driver_alive(self, driver) -> bool:
+    def _is_session_alive(self, browser_session) -> bool:
         try:
-            _ = driver.current_url
-            return True
+            return bool(browser_session.get_summary().alive)
         except Exception:
             return False

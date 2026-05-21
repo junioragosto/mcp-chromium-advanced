@@ -72,6 +72,8 @@ from chromium_advanced.chromium_profile_lib import (
     update_profile_launch_time,
     run_keepalive_job,
 )
+from chromium_advanced.browser_engines.constants import BROWSER_ENGINE_OPTIONS, DEFAULT_BROWSER_ENGINE
+from chromium_advanced.browser_engines.factory import normalize_browser_engine_name
 from chromium_advanced.i18n import load_language_options, load_translations
 
 
@@ -599,11 +601,13 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_endpoint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.mcp_worker_endpoint_label = QLabel("-")
         self.mcp_worker_endpoint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.mcp_default_engine_label = QLabel("-")
         self.mcp_status_detail_label = QLabel()
         self.mcp_status_detail_label.setWordWrap(True)
         self.mcp_status_layout.addRow(self.tr("mcp_state"), self.mcp_status_label)
         self.mcp_status_layout.addRow(self.tr("mcp_endpoint"), self.mcp_endpoint_label)
-        self.mcp_status_layout.addRow("Worker", self.mcp_worker_endpoint_label)
+        self.mcp_status_layout.addRow(self.tr("mcp_worker"), self.mcp_worker_endpoint_label)
+        self.mcp_status_layout.addRow(self.tr("mcp_default_engine"), self.mcp_default_engine_label)
         self.mcp_status_layout.addRow(self.tr("mcp_detail"), self.mcp_status_detail_label)
         self.mcp_log_layout.addWidget(self.mcp_status_group)
 
@@ -683,6 +687,12 @@ class ChromiumManagerWindow(QMainWindow):
             self.language_combo.addItem(label, code)
         self.language_combo.currentIndexChanged.connect(self.on_language_changed)
         self.form_layout.addRow(self.tr("language"), self.language_combo)
+
+        self.browser_engine_combo = QComboBox()
+        for engine_name in BROWSER_ENGINE_OPTIONS:
+            self.browser_engine_combo.addItem(engine_name, engine_name)
+        self.browser_engine_combo.currentIndexChanged.connect(self.on_browser_engine_changed)
+        self.form_layout.addRow(self.tr("browser_engine"), self.browser_engine_combo)
         self.config_layout.addWidget(self.form_group)
 
         self.mcp_group = QGroupBox()
@@ -1164,6 +1174,9 @@ class ChromiumManagerWindow(QMainWindow):
     def launch_profile_by_name(self, profile_name: str):
         if not profile_name:
             return
+        engine_name = normalize_browser_engine_name(
+            self.config.get("app", {}).get("browser_engine", DEFAULT_BROWSER_ENGINE)
+        )
         try:
             if ensure_profile_bookmarks_initialized(self.config, profile_name):
                 self.append_log(self.trf("log_profile_bookmarks_synced", profile_name=profile_name))
@@ -1185,6 +1198,7 @@ class ChromiumManagerWindow(QMainWindow):
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
         details = stdout or stderr or f"returncode={result.returncode}"
+        details = f"engine={engine_name}; {details}"
         self.append_log(self.trf("log_profile_launched", profile_name=profile_name, details=details))
         if result.returncode != 0:
             QMessageBox.warning(self, self.tr("warn_launch_return_title"), details)
@@ -1321,7 +1335,8 @@ class ChromiumManagerWindow(QMainWindow):
             line_edit.setText(str(paths.get(key, "")))
 
     def load_app_settings_to_ui(self):
-        language = normalize_language_code(self.config.get("app", {}).get("language", detect_default_language()))
+        app_settings = self.config.get("app", {})
+        language = normalize_language_code(app_settings.get("language", detect_default_language()))
         self.current_language = language
         if hasattr(self, "language_combo"):
             self.language_combo.blockSignals(True)
@@ -1330,6 +1345,14 @@ class ChromiumManagerWindow(QMainWindow):
                     self.language_combo.setCurrentIndex(index)
                     break
             self.language_combo.blockSignals(False)
+        if hasattr(self, "browser_engine_combo"):
+            current_engine = normalize_browser_engine_name(app_settings.get("browser_engine", DEFAULT_BROWSER_ENGINE))
+            self.browser_engine_combo.blockSignals(True)
+            for index in range(self.browser_engine_combo.count()):
+                if self.browser_engine_combo.itemData(index) == current_engine:
+                    self.browser_engine_combo.setCurrentIndex(index)
+                    break
+            self.browser_engine_combo.blockSignals(False)
 
     def on_language_changed(self):
         if not hasattr(self, "language_combo"):
@@ -1342,6 +1365,23 @@ class ChromiumManagerWindow(QMainWindow):
         self.config["app"]["language"] = language
         self.config = save_app_config(self.config, self.config_path)
         self.retranslate_ui()
+
+    def on_browser_engine_changed(self):
+        if not hasattr(self, "browser_engine_combo"):
+            return
+        engine_name = normalize_browser_engine_name(
+            self.browser_engine_combo.currentData() or DEFAULT_BROWSER_ENGINE
+        )
+        current_engine = normalize_browser_engine_name(
+            self.config.get("app", {}).get("browser_engine", DEFAULT_BROWSER_ENGINE)
+        )
+        if engine_name == current_engine:
+            return
+        self.config.setdefault("app", {})
+        self.config["app"]["browser_engine"] = engine_name
+        self.config = save_app_config(self.config, self.config_path)
+        self.refresh_mcp_status_ui()
+        self.append_log(f"Browser engine saved: {engine_name}")
 
     def retranslate_ui(self):
         self.setWindowTitle(self.tr("window_title"))
@@ -1408,6 +1448,7 @@ class ChromiumManagerWindow(QMainWindow):
             self.form_layout.labelForField(self.path_editors[key].parentWidget()).setText(self.tr(title_key))
             self.path_browse_buttons[key].setText(self.tr("browse"))
         self.form_layout.labelForField(self.language_combo).setText(self.tr("language"))
+        self.form_layout.labelForField(self.browser_engine_combo).setText(self.tr("browser_engine"))
 
         self.settings_layout.labelForField(self.keepalive_headless).setText(self.tr("headless"))
         self.settings_layout.labelForField(self.site_scope_hint).setText(self.tr("site_label"))
@@ -1430,6 +1471,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_layout.labelForField(self.mcp_status_label).setText(self.tr("mcp_state"))
         self.mcp_status_layout.labelForField(self.mcp_endpoint_label).setText(self.tr("mcp_endpoint"))
         self.mcp_status_layout.labelForField(self.mcp_worker_endpoint_label).setText(self.tr("mcp_worker"))
+        self.mcp_status_layout.labelForField(self.mcp_default_engine_label).setText(self.tr("mcp_default_engine"))
         self.mcp_status_layout.labelForField(self.mcp_status_detail_label).setText(self.tr("mcp_detail"))
 
         self.mcp_layout.labelForField(self.mcp_log_level_combo).setText(self.tr("mcp_log_level"))
@@ -1466,6 +1508,10 @@ class ChromiumManagerWindow(QMainWindow):
     def save_path_settings(self):
         for key, line_edit in self.path_editors.items():
             self.config["paths"][key] = line_edit.text().strip()
+        self.config.setdefault("app", {})
+        self.config["app"]["browser_engine"] = normalize_browser_engine_name(
+            self.browser_engine_combo.currentData() or DEFAULT_BROWSER_ENGINE
+        )
         self.config = save_app_config(self.config, self.config_path)
         self.refresh_table()
         self.append_log(self.tr("log_base_config_saved"))
@@ -1560,6 +1606,9 @@ class ChromiumManagerWindow(QMainWindow):
     def refresh_mcp_status_ui(self):
         self.mcp_endpoint_label.setText(self.get_mcp_endpoint())
         self.mcp_worker_endpoint_label.setText(self.get_mcp_worker_endpoint())
+        self.mcp_default_engine_label.setText(
+            normalize_browser_engine_name(self.config.get("app", {}).get("browser_engine", DEFAULT_BROWSER_ENGINE))
+        )
 
         daemon_status = self.query_mcp_status()
         if daemon_status:
@@ -2024,8 +2073,11 @@ class ChromiumManagerWindow(QMainWindow):
 
         if persist_ui_settings:
             self.save_keepalive_settings()
+        engine_name = normalize_browser_engine_name(
+            self.config.get("app", {}).get("browser_engine", DEFAULT_BROWSER_ENGINE)
+        )
         self.keepalive_log_prefix = describe_keepalive_source(source, [item for item in selected_profiles if item])
-        self.append_log(self.tr("log_keepalive_started"), prefix=self.keepalive_log_prefix)
+        self.append_log(f"{self.tr('log_keepalive_started')} (engine={engine_name})", prefix=self.keepalive_log_prefix)
         self.keepalive_target_profiles = [item for item in selected_profiles if item]
         self.keepalive_running_profile_name = self.keepalive_target_profiles[0] if len(self.keepalive_target_profiles) == 1 else ""
         self.keepalive_stop_requested = False

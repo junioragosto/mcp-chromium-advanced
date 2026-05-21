@@ -34,7 +34,7 @@ Responsibilities:
 - run keepalive jobs
 - show status, logs, and MCP state
 
-### Core Library Layer
+### Shared Core Layer
 
 Main file:
 
@@ -47,10 +47,23 @@ Responsibilities:
 - profile directory management
 - bookmark template initialization
 - Chromium launch logic
-- Selenium and `undetected_chromedriver` integration
 - keepalive helpers and shared browser automation utilities
 
 This module is the shared core used by both the GUI and the MCP side.
+
+### Browser Engine Layer
+
+Main directory:
+
+- `chromium_advanced/browser_engines/`
+
+Responsibilities:
+
+- define a shared browser session interface for MCP operations
+- provide `selenium_uc` and `patchright` engine implementations
+- keep profile/session ownership outside the engine layer
+- allow the GUI and MCP worker to select an execution backend without changing profile creation logic
+- keep keepalive separate for now so engine migration can happen incrementally
 
 ### MCP Service Layer
 
@@ -67,6 +80,7 @@ Responsibilities:
 - claim and release sessions
 - prevent unsafe concurrent use
 - keep the daemon stable while allowing the worker to start on demand
+- route session creation through the selected browser engine
 
 ### Packaging Layer
 

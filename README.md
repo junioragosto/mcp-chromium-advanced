@@ -8,17 +8,19 @@ MCP Chromium Advanced is a desktop GUI and MCP service for managing real Chromiu
 
 This project is best understood as a real Chromium identity manager plus an MCP browser service. Instead of creating a fresh disposable automation browser for every task, it is designed to let AI workflows safely reuse existing logged-in browser profiles.
 
-From a first-contact perspective, there are five key ideas:
+From a first-contact perspective, there are six key ideas:
 
 1. It solves the "real login state" problem.
    The project lets GUI-managed Chromium profiles be exposed to MCP clients so automation can reuse cookies, local storage, extensions, bookmarks, and site permissions.
 2. It is organized into three layers.
    The GUI manages configuration and profiles, the daemon provides a stable MCP endpoint, and the worker starts on demand to control a real browser session.
-3. It is designed around safe profile ownership.
+3. It supports multiple browser execution engines.
+   Shared profile and session ownership stay the same, while the execution backend can use either Selenium plus `undetected_chromedriver` or Patchright.
+4. It is designed around safe profile ownership.
    Session checks prevent multiple tasks, threads, or keepalive jobs from silently fighting over the same logged-in browser identity.
-4. It attaches automation to real Chromium profiles.
-   The browser is launched with the actual `user-data-dir` and `profile-directory`, then Selenium connects through `undetected_chromedriver`.
-5. It includes keepalive workflows in addition to MCP control.
+5. It attaches automation to real Chromium profiles.
+   The browser is launched with the actual `user-data-dir` and `profile-directory`, then the selected execution engine connects to that persistent profile.
+6. It includes keepalive workflows in addition to MCP control.
    The GUI can run scheduled or manual keepalive tasks against real logged-in profiles for sites such as ChatGPT, Gmail, and Google.
 
 The public user entry point is:
@@ -33,12 +35,13 @@ python run_gui.py
 
 ## How it works
 
-The browser automation layer is based on:
+The browser automation layer supports:
 
 - Selenium: [https://www.selenium.dev/](https://www.selenium.dev/)
 - undetected-chromedriver: [https://github.com/ultrafunkamsterdam/undetected-chromedriver](https://github.com/ultrafunkamsterdam/undetected-chromedriver)
+- Patchright: [https://github.com/Kaliiiiiiiiii-Vinyzu/patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
 
-The project starts Chromium with a real `user-data-dir` and `profile-directory`, then attaches Selenium through `undetected_chromedriver`. This allows the worker to reuse real cookies, sessions, local storage, extensions, and other persistent browser state.
+The project starts Chromium with a real `user-data-dir` and `profile-directory`, then attaches the selected browser engine to that profile. This allows the worker to reuse real cookies, sessions, local storage, extensions, and other persistent browser state.
 
 If you use a fingerprint plugin, the project can also load `my-fingerprint`:
 
@@ -56,6 +59,7 @@ On top of that browser layer, the MCP service adds:
 - Manage multiple Chromium profiles from one GUI
 - Expose real browser identities to MCP clients
 - Prevent conflicting sessions across threads or tasks
+- Switch the default browser engine in the GUI configuration
 - Start the browser worker only when needed
 - Release resources automatically after idle timeout
 - Run keepalive jobs against real logged-in profiles
@@ -137,6 +141,8 @@ Important fields:
   Optional path related to `my-fingerprint`
 - `app.language`
   UI language code such as `en`, `ja`, or `zh`
+- `app.browser_engine`
+  Default browser execution backend, currently `selenium_uc` or `patchright`
 - `launch.*`
   Browser launch defaults used by the built-in Python launcher, such as `new_window`, `start_maximized`, `load_fingerprint_extension`, `check_url`, and `extra_args`
 - `mcp.host`, `mcp.port`, `mcp.worker_port`, `mcp.path`
@@ -161,6 +167,29 @@ Typical MCP flow:
 5. `start_profile_session(profile_name)`
 6. perform browser actions
 7. `close_profile_session(session_id)`
+
+Engine-aware callers may also pass an explicit engine when starting a session. If omitted, the configured GUI default engine is used.
+
+## Engine Notes
+
+### Shared behavior
+
+- Profile creation, deletion, syncing, bookmarks, and session ownership are shared across all engines
+- GUI and MCP session flow stay the same regardless of engine
+- Real `user-data-dir` plus `profile-directory` remain the source of truth
+
+### Selenium plus undetected-chromedriver
+
+- Currently the most mature path in the project
+- Also powers the existing keepalive workflows
+- Uses the shared `launch.*` defaults for direct profile launch
+
+### Patchright
+
+- Already supports real persistent profile sessions through the MCP/session layer
+- Uses a smaller validated startup argument set than Selenium for compatibility
+- Intended for sites where a Playwright-compatible execution model is more reliable
+- Keepalive is not routed through Patchright yet in this stage
 
 ## Cross-platform notes
 

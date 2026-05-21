@@ -9,6 +9,7 @@ dependencies = [
   "fastmcp",
   "fastapi",
   "httpx",
+  "patchright",
   "psutil",
   "PyQt5",
   "selenium",

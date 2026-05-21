@@ -37,3 +37,5 @@ chromium_profiles.local.json
 
 tmp/
 tmp_*/
+
+demo/

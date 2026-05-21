@@ -9,7 +9,8 @@
   },
   "app": {
     "minimize_to_tray_on_close": true,
-    "language": "en"
+    "language": "en",
+    "browser_engine": "selenium_uc"
   },
   "mcp": {
     "enabled": true,

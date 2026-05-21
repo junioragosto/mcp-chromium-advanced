@@ -74,12 +74,17 @@ For the Chromium Profile Manager MCP, prefer this exact order:
 6. browser actions
 7. `close_profile_session(session_id)`
 
+If `can_start_profile_session(profile_name)` reports `allowed=false` but also reports the same identity as reusable, treat that as "do not start a second session automatically." Only use `reuse_existing=true` when the current project explicitly supports it and the user intends that reuse.
+
+If the project needs a specific browser backend, pass the optional `engine` parameter explicitly when checking or starting a session, for example `engine="selenium_uc"` or `engine="patchright"`. If omitted, the GUI-configured default engine will be used.
+
 ## Chromium-Specific Notes
 
 - Do not guess `profile_name`. If the user did not name one, ask.
 - The daemon endpoint on `28888` is expected to stay stable across tasks.
 - A first request to `/mcp` may lazily start the worker; this is normal.
 - If `get_server_status` reports `occupied`, `starting`, `keepalive_running`, or `external_chromium_running`, do not force a new browser session.
+- If the same profile is already occupied, prefer surfacing that state first. Reuse should be explicit, not implicit.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.
 

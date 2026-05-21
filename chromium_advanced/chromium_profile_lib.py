@@ -26,6 +26,9 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+from chromium_advanced.browser_engines.constants import DEFAULT_BROWSER_ENGINE
+from chromium_advanced.browser_engines.factory import normalize_browser_engine_name
+
 
 APP_NAME = "ChromiumProfileManager"
 CONFIG_FILENAME = "chromium_profiles.json"
@@ -241,6 +244,7 @@ def build_default_config() -> Dict:
         "app": {
             "minimize_to_tray_on_close": True,
             "language": detect_default_language(),
+            "browser_engine": DEFAULT_BROWSER_ENGINE,
         },
         "mcp": {
             "enabled": True,
@@ -462,6 +466,8 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["app"]["minimize_to_tray_on_close"] = bool(loaded_app.get("minimize_to_tray_on_close"))
         if "language" in loaded_app and loaded_app.get("language") is not None:
             normalized["app"]["language"] = str(loaded_app.get("language")).strip()
+        if "browser_engine" in loaded_app and loaded_app.get("browser_engine") is not None:
+            normalized["app"]["browser_engine"] = normalize_browser_engine_name(str(loaded_app.get("browser_engine")).strip())
 
     loaded_mcp = loaded.get("mcp", {})
     if isinstance(loaded_mcp, dict):
@@ -554,6 +560,9 @@ def normalize_config(config: Optional[Dict]) -> Dict:
 
     normalized["profiles"] = sort_profiles(normalized["profiles"])
     normalized["app"]["language"] = normalize_language_code(normalized["app"].get("language", detect_default_language()))
+    normalized["app"]["browser_engine"] = normalize_browser_engine_name(
+        normalized["app"].get("browser_engine", DEFAULT_BROWSER_ENGINE)
+    )
     normalized["mcp"]["enabled"] = bool(normalized["mcp"].get("enabled", False))
     normalized["mcp"]["transport"] = str(normalized["mcp"].get("transport", "streamable-http")).strip() or "streamable-http"
     normalized["mcp"]["host"] = str(normalized["mcp"].get("host", "127.0.0.1")).strip() or "127.0.0.1"

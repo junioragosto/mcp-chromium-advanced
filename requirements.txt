@@ -1,6 +1,7 @@
 fastapi
 fastmcp
 httpx
+patchright
 psutil
 PyQt5
 selenium
