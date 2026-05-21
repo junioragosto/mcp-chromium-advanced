@@ -663,7 +663,6 @@ class ChromiumManagerWindow(QMainWindow):
             ("user_data_root", self.tr("path_user_data"), "dir"),
             ("bookmarks_template_path", self.tr("path_bookmarks"), "file"),
             ("fingerprint_zip_path", self.tr("path_fingerprint"), "file"),
-            ("start_script_path", self.tr("path_start_script"), "file"),
         ]
 
         for key, label, mode in fields:
@@ -1404,7 +1403,6 @@ class ChromiumManagerWindow(QMainWindow):
             ("user_data_root", "path_user_data"),
             ("bookmarks_template_path", "path_bookmarks"),
             ("fingerprint_zip_path", "path_fingerprint"),
-            ("start_script_path", "path_start_script"),
         ]
         for key, title_key in path_keys:
             self.form_layout.labelForField(self.path_editors[key].parentWidget()).setText(self.tr(title_key))

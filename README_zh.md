@@ -135,10 +135,10 @@ Driver 对版原则：
   可选，初始化 Profile 时使用的书签模板
 - `paths.fingerprint_zip_path`
   可选，与 `my-fingerprint` 相关的路径
-- `paths.start_script_path`
-  可选，自定义启动脚本；留空时直接启动 Chromium
 - `app.language`
   界面语言代码，例如 `en`、`ja`、`zh`
+- `launch.*`
+  内置 Python 启动器使用的浏览器启动默认项，例如 `new_window`、`start_maximized`、`load_fingerprint_extension`、`check_url`、`extra_args`
 - `mcp.host`、`mcp.port`、`mcp.worker_port`、`mcp.path`
   daemon 与 worker 的网络设置
 

@@ -5,8 +5,7 @@
     "chromedriver_path": "/absolute/path/to/chromedriver",
     "user_data_root": "/absolute/path/to/user-data",
     "bookmarks_template_path": "/absolute/path/to/bookmarks_template.html",
-    "fingerprint_zip_path": "/absolute/path/to/fingerprint-extension.zip",
-    "start_script_path": ""
+    "fingerprint_zip_path": "/absolute/path/to/fingerprint-extension.zip"
   },
   "app": {
     "minimize_to_tray_on_close": true,
@@ -21,6 +20,25 @@
     "path": "/mcp",
     "log_level": "info",
     "idle_timeout_seconds": 60
+  },
+  "launch": {
+    "new_window": true,
+    "start_maximized": true,
+    "window_size": "",
+    "no_first_run": true,
+    "no_default_browser_check": true,
+    "disable_background_networking": true,
+    "disable_default_apps": true,
+    "disable_sync": true,
+    "metrics_recording_only": true,
+    "disable_client_side_phishing_detection": false,
+    "disable_webrtc": false,
+    "webrtc_ip_handling_policy": "",
+    "force_webrtc_ip_handling_policy": false,
+    "load_fingerprint_extension": true,
+    "open_extensions_page": false,
+    "check_url": "",
+    "extra_args": []
   },
   "profiles": [
     {

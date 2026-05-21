@@ -196,13 +196,10 @@ def get_default_path_config() -> Dict[str, str]:
     # Ship platform-specific hints instead of machine-specific real paths.
     if SYSTEM_NAME == "Windows":
         chromium_hint = os.path.join(workspace_root, "chromium", "chrome.exe")
-        start_script_hint = os.path.join(workspace_root, "scripts", "start-chrome.ps1")
     elif SYSTEM_NAME == "Darwin":
         chromium_hint = "/Applications/Chromium.app/Contents/MacOS/Chromium"
-        start_script_hint = os.path.join(workspace_root, "scripts", "start-chrome.sh")
     else:
         chromium_hint = shutil.which("chromium") or shutil.which("chromium-browser") or "/usr/bin/chromium"
-        start_script_hint = os.path.join(workspace_root, "scripts", "start-chrome.sh")
 
     return {
         "chromium_dir": chromium_hint,
@@ -210,7 +207,6 @@ def get_default_path_config() -> Dict[str, str]:
         "user_data_root": os.path.join(workspace_root, "user-data"),
         "bookmarks_template_path": bookmarks_template_path,
         "fingerprint_zip_path": os.path.join(workspace_root, "extensions", "fingerprint-extension.zip"),
-        "start_script_path": start_script_hint,
     }
 
 
@@ -255,6 +251,25 @@ def build_default_config() -> Dict:
             "path": "/mcp",
             "log_level": "info",
             "idle_timeout_seconds": 60,
+        },
+        "launch": {
+            "new_window": True,
+            "start_maximized": True,
+            "window_size": "",
+            "no_first_run": True,
+            "no_default_browser_check": True,
+            "disable_background_networking": True,
+            "disable_default_apps": True,
+            "disable_sync": True,
+            "metrics_recording_only": True,
+            "disable_client_side_phishing_detection": False,
+            "disable_webrtc": False,
+            "webrtc_ip_handling_policy": "",
+            "force_webrtc_ip_handling_policy": False,
+            "load_fingerprint_extension": True,
+            "open_extensions_page": False,
+            "check_url": "",
+            "extra_args": [],
         },
         "profiles": [],
         "keepalive": {
@@ -436,7 +451,10 @@ def normalize_config(config: Optional[Dict]) -> Dict:
 
     loaded_paths = loaded.get("paths", {})
     if isinstance(loaded_paths, dict):
-        normalized["paths"].update({k: str(v).strip() for k, v in loaded_paths.items() if v is not None})
+        allowed_path_keys = set(normalized["paths"].keys())
+        normalized["paths"].update(
+            {k: str(v).strip() for k, v in loaded_paths.items() if k in allowed_path_keys and v is not None}
+        )
 
     loaded_app = loaded.get("app", {})
     if isinstance(loaded_app, dict):
@@ -458,6 +476,32 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["mcp"]["worker_port"] = loaded_mcp.get("worker_port")
         if "idle_timeout_seconds" in loaded_mcp:
             normalized["mcp"]["idle_timeout_seconds"] = loaded_mcp.get("idle_timeout_seconds")
+
+    loaded_launch = loaded.get("launch", {})
+    if isinstance(loaded_launch, dict):
+        for key in (
+            "new_window",
+            "start_maximized",
+            "no_first_run",
+            "no_default_browser_check",
+            "disable_background_networking",
+            "disable_default_apps",
+            "disable_sync",
+            "metrics_recording_only",
+            "disable_client_side_phishing_detection",
+            "disable_webrtc",
+            "force_webrtc_ip_handling_policy",
+            "load_fingerprint_extension",
+            "open_extensions_page",
+        ):
+            if key in loaded_launch:
+                normalized["launch"][key] = bool(loaded_launch.get(key))
+        for key in ("window_size", "webrtc_ip_handling_policy", "check_url"):
+            if key in loaded_launch and loaded_launch.get(key) is not None:
+                normalized["launch"][key] = str(loaded_launch.get(key)).strip()
+        extra_args = loaded_launch.get("extra_args", [])
+        if isinstance(extra_args, list):
+            normalized["launch"]["extra_args"] = [str(item).strip() for item in extra_args if str(item).strip()]
 
     loaded_keepalive = loaded.get("keepalive", {})
     legacy_keepalive_sites = normalize_keepalive_site_flags(
@@ -1262,10 +1306,6 @@ def update_profile_launch_time(config: Dict, profile_name: str) -> Dict:
     return normalized
 
 
-def quote_powershell_single(value: str) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
-
-
 def resolve_site_url(site: str) -> str:
     site_text = str(site or "").strip()
     if not site_text:
@@ -1274,6 +1314,7 @@ def resolve_site_url(site: str) -> str:
         "google": "https://www.google.com/",
         "gmail": "https://mail.google.com/",
         "chatgpt": "https://chatgpt.com/",
+        "github": "https://github.com/",
     }
     if site_text in site_map:
         return site_map[site_text]
@@ -1285,6 +1326,7 @@ def resolve_site_url(site: str) -> str:
 def build_direct_launch_command(profile_name: str, config: Dict, site: str = "") -> List[str]:
     normalized = normalize_config(config)
     paths = normalized["paths"]
+    launch_settings = normalized.get("launch", {})
     chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
     user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
     if not chromium_binary or not os.path.exists(chromium_binary):
@@ -1296,10 +1338,51 @@ def build_direct_launch_command(profile_name: str, config: Dict, site: str = "")
         chromium_binary,
         f"--user-data-dir={user_data_root}",
         f"--profile-directory={profile_name}",
-        "--start-maximized",
-        "--no-first-run",
-        "--no-default-browser-check",
     ]
+
+    if launch_settings.get("new_window", True):
+        command.append("--new-window")
+    if launch_settings.get("start_maximized", True):
+        command.append("--start-maximized")
+    window_size = str(launch_settings.get("window_size", "")).strip()
+    if window_size:
+        command.append(f"--window-size={window_size}")
+    if launch_settings.get("no_first_run", True):
+        command.append("--no-first-run")
+    if launch_settings.get("no_default_browser_check", True):
+        command.append("--no-default-browser-check")
+    if launch_settings.get("disable_background_networking", True):
+        command.append("--disable-background-networking")
+    if launch_settings.get("disable_default_apps", True):
+        command.append("--disable-default-apps")
+    if launch_settings.get("disable_sync", True):
+        command.append("--disable-sync")
+    if launch_settings.get("metrics_recording_only", True):
+        command.append("--metrics-recording-only")
+    if launch_settings.get("disable_client_side_phishing_detection", False):
+        command.append("--disable-client-side-phishing-detection")
+    if launch_settings.get("disable_webrtc", False):
+        command.append("--disable-webrtc")
+    webrtc_policy = str(launch_settings.get("webrtc_ip_handling_policy", "")).strip()
+    if webrtc_policy:
+        command.append(f"--webrtc-ip-handling-policy={webrtc_policy}")
+    if launch_settings.get("force_webrtc_ip_handling_policy", False):
+        command.append("--force-webrtc-ip-handling-policy")
+
+    if launch_settings.get("load_fingerprint_extension", True):
+        extension_dir = detect_fingerprint_extension_dir(paths.get("fingerprint_zip_path", ""))
+        if extension_dir:
+            command.append(f"--load-extension={extension_dir}")
+
+    if isinstance(launch_settings.get("extra_args", []), list):
+        command.extend([item for item in launch_settings.get("extra_args", []) if item])
+
+    if launch_settings.get("open_extensions_page", False):
+        command.append("chrome://extensions")
+    check_url = str(launch_settings.get("check_url", "")).strip()
+    if check_url:
+        command.append(check_url)
+
     target_url = resolve_site_url(site)
     if target_url:
         command.append(target_url)
@@ -1308,34 +1391,6 @@ def build_direct_launch_command(profile_name: str, config: Dict, site: str = "")
 
 def launch_profile(profile_name: str, config: Dict, site: str = "") -> subprocess.CompletedProcess:
     normalized = normalize_config(config)
-    script_path = normalized["paths"].get("start_script_path", "")
-    if script_path and os.path.exists(script_path) and SYSTEM_NAME == "Windows" and script_path.lower().endswith(".ps1"):
-        launch_id = profile_name_to_start_id(profile_name)
-        ps_command = f"& {quote_powershell_single(script_path)} {quote_powershell_single(launch_id)} -TagBookmark:$false"
-        if site:
-            ps_command += f" -Site {quote_powershell_single(site)}"
-
-        command = [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            ps_command,
-        ]
-
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding=WINDOWS_TEXT_ENCODING,
-            errors="replace",
-            check=False,
-            **get_hidden_subprocess_kwargs(),
-        )
-
-    # Fall back to a direct Chromium launch so the project can run without
-    # a custom wrapper script on macOS/Linux or on a clean Windows setup.
     command = build_direct_launch_command(profile_name, normalized, site)
     process = subprocess.Popen(
         command,
@@ -1347,7 +1402,7 @@ def launch_profile(profile_name: str, config: Dict, site: str = "") -> subproces
     return subprocess.CompletedProcess(
         args=command,
         returncode=0,
-        stdout=f"launched pid={process.pid}",
+        stdout=f"launched pid={process.pid} via built-in launcher",
         stderr="",
     )
 

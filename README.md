@@ -135,10 +135,10 @@ Important fields:
   Optional bookmark template used when initializing profiles
 - `paths.fingerprint_zip_path`
   Optional path related to `my-fingerprint`
-- `paths.start_script_path`
-  Optional custom launcher script. If empty, the project launches Chromium directly
 - `app.language`
   UI language code such as `en`, `ja`, or `zh`
+- `launch.*`
+  Browser launch defaults used by the built-in Python launcher, such as `new_window`, `start_maximized`, `load_fingerprint_extension`, `check_url`, and `extra_args`
 - `mcp.host`, `mcp.port`, `mcp.worker_port`, `mcp.path`
   Network settings for the daemon and worker
 
