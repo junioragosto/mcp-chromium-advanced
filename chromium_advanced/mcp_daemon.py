@@ -122,6 +122,7 @@ class WorkerManager:
         self._process: Optional[subprocess.Popen] = None
         self._active_proxy_requests = 0
         self._last_request_at = 0.0
+        self._last_activity_at = 0.0
         self._last_start_at = 0.0
         self._last_stop_at = 0.0
         self._last_error = ""
@@ -138,19 +139,27 @@ class WorkerManager:
     def begin_proxy_request(self) -> None:
         with self._lock:
             self._active_proxy_requests += 1
-            self._last_request_at = time.time()
+            now_ts = time.time()
+            self._last_request_at = now_ts
+            self._last_activity_at = now_ts
 
     def end_proxy_request(self) -> None:
         with self._lock:
             if self._active_proxy_requests > 0:
                 self._active_proxy_requests -= 1
-            self._last_request_at = time.time()
+            self._last_activity_at = time.time()
+
+    def mark_proxy_activity(self) -> None:
+        with self._lock:
+            self._last_activity_at = time.time()
 
     def ensure_worker_running(self) -> Dict:
         with self._lock:
             self._cleanup_dead_process_locked()
             if self._is_worker_healthy_locked():
-                self._last_request_at = time.time()
+                now_ts = time.time()
+                self._last_request_at = now_ts
+                self._last_activity_at = now_ts
                 return self.get_status()
 
             self._last_error = ""
@@ -172,6 +181,7 @@ class WorkerManager:
             )
             self._last_start_at = time.time()
             self._last_request_at = self._last_start_at
+            self._last_activity_at = self._last_start_at
 
         deadline = time.time() + WORKER_START_TIMEOUT_SECONDS
         while time.time() < deadline:
@@ -202,8 +212,8 @@ class WorkerManager:
             worker_endpoint = f"http://{self.worker_host}:{self.worker_port}{self.public_path}"
             now_ts = time.time()
             idle_seconds = 0
-            if self._last_request_at > 0:
-                idle_seconds = max(0, int(now_ts - self._last_request_at))
+            if self._last_activity_at > 0:
+                idle_seconds = max(0, int(now_ts - self._last_activity_at))
             return {
                 "daemon_state": "running",
                 "public_endpoint": public_endpoint,
@@ -216,6 +226,8 @@ class WorkerManager:
                 "active_proxy_requests": self._active_proxy_requests,
                 "idle_timeout_seconds": self.idle_timeout_seconds,
                 "idle_seconds": idle_seconds,
+                "last_request_at": self._last_request_at,
+                "last_activity_at": self._last_activity_at,
                 "last_start_at": self._last_start_at,
                 "last_stop_at": self._last_stop_at,
                 "last_stop_reason": self._last_stop_reason,
@@ -298,11 +310,9 @@ class WorkerManager:
                 self._cleanup_dead_process_locked()
                 if self._process is None:
                     continue
-                if self._active_proxy_requests > 0:
+                if self._last_activity_at <= 0:
                     continue
-                if self._last_request_at <= 0:
-                    continue
-                if (time.time() - self._last_request_at) < self.idle_timeout_seconds:
+                if (time.time() - self._last_activity_at) < self.idle_timeout_seconds:
                     continue
                 self._stop_worker_locked("idle_timeout")
 
@@ -363,6 +373,37 @@ def create_daemon_app(
         return worker_manager.stop_worker("api_stop")
 
     async def proxy_to_worker(request: Request, tail: str = ""):
+        client_host = getattr(request.client, "host", "") or "-"
+        client_port = getattr(request.client, "port", "") or "-"
+        target_label = public_path if not tail else f"{public_path.rstrip('/')}/{tail.lstrip('/')}"
+        session_id = (
+            request.headers.get("mcp-session-id")
+            or request.headers.get("Mcp-Session-Id")
+            or request.headers.get("x-mcp-session-id")
+            or ""
+        ).strip()
+        user_agent = (request.headers.get("user-agent") or "").strip()
+        accept = (request.headers.get("accept") or "").strip()
+        print(
+            (
+                f"[{now_text()}] [MCP-DAEMON] proxy request: {request.method} {target_label} "
+                f"from {client_host}:{client_port} session_id={'yes' if session_id else 'no'} "
+                f"user_agent={user_agent or '-'} accept={accept or '-'}"
+            ),
+            flush=True,
+        )
+
+        # Prevent generic localhost probes from waking the worker up. In
+        # streamable-http mode, session streams and session deletion require a
+        # session ID, while session creation starts with POST.
+        if transport == "streamable-http" and request.method.upper() != "POST" and not session_id:
+            detail = {
+                "error": "Missing session ID",
+                "message": "This request must include an MCP session ID header.",
+            }
+            status_code = 400 if request.method.upper() in {"GET", "HEAD", "DELETE"} else 405
+            return JSONResponse(detail, status_code=status_code)
+
         try:
             await asyncio.to_thread(worker_manager.ensure_worker_running)
         except Exception as exc:
@@ -403,11 +444,16 @@ def create_daemon_app(
 
         async def close_stream() -> None:
             worker_manager.end_proxy_request()
+            print(
+                f"[{now_text()}] [MCP-DAEMON] proxy request complete: {request.method} {target_label} from {client_host}:{client_port}",
+                flush=True,
+            )
             await backend_response.aclose()
             await client.aclose()
 
         if request.method.upper() == "HEAD":
             data = await backend_response.aread()
+            worker_manager.mark_proxy_activity()
             await close_stream()
             return PlainTextResponse(
                 content=data.decode(errors="replace"),
@@ -415,8 +461,13 @@ def create_daemon_app(
                 headers=response_headers,
             )
 
+        async def iter_response_body():
+            async for chunk in backend_response.aiter_raw():
+                worker_manager.mark_proxy_activity()
+                yield chunk
+
         return StreamingResponse(
-            backend_response.aiter_raw(),
+            iter_response_body(),
             status_code=backend_response.status_code,
             headers=response_headers,
             background=BackgroundTask(close_stream),
