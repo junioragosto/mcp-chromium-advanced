@@ -152,6 +152,7 @@ class WorkerManager:
         self._last_error = ""
         self._last_exit_code: Optional[int] = None
         self._last_stop_reason = ""
+        self._worker_ready_once = False
         self._watchdog_stop = threading.Event()
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
         self._watchdog_thread.start()
@@ -189,6 +190,7 @@ class WorkerManager:
             self._last_error = ""
             self._last_exit_code = None
             self._last_stop_reason = ""
+            self._worker_ready_once = False
             command = build_worker_command(
                 transport=self.transport,
                 host=self.worker_host,
@@ -212,6 +214,7 @@ class WorkerManager:
             with self._lock:
                 self._cleanup_dead_process_locked()
                 if self._is_worker_healthy_locked():
+                    self._worker_ready_once = True
                     return self.get_status()
                 if self._process is None:
                     break
@@ -266,7 +269,10 @@ class WorkerManager:
         if exit_code is None:
             return
         self._last_exit_code = exit_code
-        if exit_code != 0 and not self._last_error:
+        exited_during_active_request = self._active_proxy_requests > 0
+        exited_before_ready = not self._worker_ready_once
+        classify_as_unexpected = exited_during_active_request or exited_before_ready
+        if classify_as_unexpected and exit_code != 0 and not self._last_error:
             self._last_error = f"worker exited unexpectedly with code {exit_code}"
         print(
             f"[{now_text()}] [MCP-DAEMON] worker exited: code={exit_code}",
@@ -275,7 +281,9 @@ class WorkerManager:
         self._process = None
         self._last_stop_at = time.time()
         if not self._last_stop_reason:
-            self._last_stop_reason = "unexpected_exit"
+            self._last_stop_reason = "unexpected_exit" if classify_as_unexpected else "self_terminated"
+        if not classify_as_unexpected:
+            self._last_error = ""
 
     def _is_worker_healthy_locked(self) -> bool:
         if self._process is None or self._process.poll() is not None:
@@ -304,6 +312,7 @@ class WorkerManager:
                 pass
         self._last_exit_code = process.poll()
         self._process = None
+        self._worker_ready_once = False
         self._last_stop_at = time.time()
 
     def _terminate_process_tree(self, root_pid: int) -> None:
