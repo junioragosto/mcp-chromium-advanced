@@ -1877,6 +1877,7 @@ def create_driver_for_profile(config: Dict, profile_name: str):
     options.add_argument("--disable-sync")
     options.add_argument("--metrics-recording-only")
     options.add_argument("--disable-popup-blocking")
+    options.set_capability("goog:loggingPrefs", {"browser": "ALL", "performance": "ALL"})
 
     if keepalive.get("headless"):
         options.add_argument("--headless=new")

@@ -63,6 +63,8 @@ On top of that browser layer, the MCP service adds:
 - Start the browser worker only when needed
 - Release resources automatically after idle timeout
 - Run keepalive jobs against real logged-in profiles
+- Coordinate multi-tab browser work with explicit tab listing, opening, activation, and closing tools
+- Collect structured console, page error, and network diagnostics instead of relying on screenshots alone
 
 ## Requirements
 
@@ -170,6 +172,36 @@ Typical MCP flow:
 
 Engine-aware callers may also pass an explicit engine when starting a session. If omitted, the configured GUI default engine is used.
 
+### Multi-tab tools
+
+The worker now exposes formal multi-tab operations so agents do not have to rely on hidden browser focus changes:
+
+- `browser_list_tabs`
+- `browser_open_tab`
+- `browser_activate_tab`
+- `browser_close_tab`
+
+The practical workflow is:
+
+1. open or discover the tab
+2. activate the target tab explicitly
+3. perform page actions on that active tab
+4. switch again when needed
+
+For tab-aware read and debug calls, tools such as `navigate`, `get_current_url`, `get_page_text`, `get_page_html`, `browser_snapshot`, `browser_list_candidates`, `inspect_elements`, `run_script`, and `screenshot` also accept an optional `tab_id`.
+
+### Debug and observability tools
+
+The worker also exposes structured debugging helpers that are meant to replace manual F12 screenshots in many cases:
+
+- `browser_get_console_messages`
+- `browser_get_page_errors`
+- `browser_get_network_requests`
+- `browser_clear_debug_buffers`
+- `browser_diagnose_page`
+
+`browser_diagnose_page` is the highest-signal first stop when an agent gets blocked. It bundles the current interaction context together with recent console errors, page exceptions, failed requests, and recent bad HTTP responses.
+
 ## Engine Notes
 
 ### Shared behavior
@@ -189,7 +221,15 @@ Engine-aware callers may also pass an explicit engine when starting a session. I
 - Already supports real persistent profile sessions through the MCP/session layer
 - Uses a smaller validated startup argument set than Selenium for compatibility
 - Intended for sites where a Playwright-compatible execution model is more reliable
+- Provides the strongest tab model and the richest structured debug telemetry in the current project
+- Collects DevTools-style diagnostics through per-tab CDP sessions, so agents can read console output, uncaught exceptions, and network failures without opening browser DevTools manually
 - Keepalive is not routed through Patchright yet in this stage
+
+### Selenium plus undetected-chromedriver debug notes
+
+- Selenium sessions now expose the same high-level tab and debug tools where Chromium logging supports them
+- Console and network diagnostics are gathered from browser and performance logs, so they are best-effort compared with Patchright
+- Structured accessibility snapshots and snapshot-ref targeting still remain Patchright-only
 
 ## Cross-platform notes
 

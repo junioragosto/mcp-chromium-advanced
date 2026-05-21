@@ -18,6 +18,7 @@ Use this skill only for the WSL-to-Windows access layer. The normal identity and
 3. Test connectivity from WSL to the Windows MCP endpoint.
 4. Use the reachable WSL-side URL for MCP calls.
 5. Before starting a browser session, still check occupancy and confirm the identity parameter with the user if it is not specified.
+6. For multi-tab or debug-heavy tasks, use the same explicit tab activation and structured debug tools as the normal browser identity MCP workflow.
 
 ## Typical Host Discovery
 
@@ -49,3 +50,4 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - Verify that the Windows service is listening on a WSL-reachable host such as `0.0.0.0` or a specific LAN address.
 - If WSL cannot reach the service, check Windows firewall rules and listening host configuration before debugging MCP semantics.
 - After connectivity is confirmed, follow the same identity confirmation and occupancy rules as the normal browser identity MCP workflow.
+- After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, and `browser_diagnose_page` over screenshot-only diagnosis.

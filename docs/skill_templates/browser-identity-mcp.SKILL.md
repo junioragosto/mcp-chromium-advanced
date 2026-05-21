@@ -74,6 +74,22 @@ For the Chromium Profile Manager MCP, prefer this exact order:
 6. browser actions
 7. `close_profile_session(session_id)`
 
+For multi-tab work inside one session, prefer this extension:
+
+1. `browser_list_tabs`
+2. `browser_open_tab(...)` when needed
+3. `browser_activate_tab(...)` before interacting with a different tab
+4. page actions on the active tab
+5. `browser_close_tab(...)` if the tab is no longer needed
+
+If an action fails and the page looks dynamic or broken, prefer structured diagnostics before guessing:
+
+1. `browser_get_interaction_context`
+2. `browser_get_console_messages`
+3. `browser_get_page_errors`
+4. `browser_get_network_requests`
+5. `browser_diagnose_page`
+
 If `can_start_profile_session(profile_name)` reports `allowed=false` but also reports the same identity as reusable, treat that as "do not start a second session automatically." Only use `reuse_existing=true` when the current project explicitly supports it and the user intends that reuse.
 
 If the project needs a specific browser backend, pass the optional `engine` parameter explicitly when checking or starting a session, for example `engine="selenium_uc"` or `engine="patchright"`. If omitted, the GUI-configured default engine will be used.
@@ -85,6 +101,8 @@ If the project needs a specific browser backend, pass the optional `engine` para
 - A first request to `/mcp` may lazily start the worker; this is normal.
 - If `get_server_status` reports `occupied`, `starting`, `keepalive_running`, or `external_chromium_running`, do not force a new browser session.
 - If the same profile is already occupied, prefer surfacing that state first. Reuse should be explicit, not implicit.
+- For multi-tab tasks, do not assume a newly opened tab became the effective action target unless you explicitly activated it or the tool says it was activated.
+- When diagnosing broken pages, prefer the MCP debug tools over manual screenshots of DevTools whenever possible.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.
 

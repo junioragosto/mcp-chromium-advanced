@@ -18,25 +18,49 @@ class BrowserSession(Protocol):
     def get_capabilities(self) -> Dict:
         ...
 
-    def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20) -> Dict:
+    def list_tabs(self) -> Dict:
         ...
 
-    def get_current_url(self) -> Dict:
+    def open_tab(
+        self,
+        url: str = "",
+        activate: bool = True,
+        wait_for_ready: bool = True,
+        timeout_seconds: int = 20,
+    ) -> Dict:
         ...
 
-    def get_page_text(self) -> Dict:
+    def activate_tab(
+        self,
+        tab_id: str = "",
+        index: int = -1,
+        title_contains: str = "",
+        url_contains: str = "",
+    ) -> Dict:
         ...
 
-    def get_page_html(self) -> Dict:
+    def close_tab(self, tab_id: str = "", index: int = -1) -> Dict:
         ...
 
-    def inspect_elements(self, selector: str, by: str = "css", limit: int = 10) -> Dict:
+    def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         ...
 
-    def get_active_element(self) -> Dict:
+    def get_current_url(self, tab_id: str = "") -> Dict:
         ...
 
-    def get_interaction_context(self) -> Dict:
+    def get_page_text(self, tab_id: str = "") -> Dict:
+        ...
+
+    def get_page_html(self, tab_id: str = "") -> Dict:
+        ...
+
+    def inspect_elements(self, selector: str, by: str = "css", limit: int = 10, tab_id: str = "") -> Dict:
+        ...
+
+    def get_active_element(self, tab_id: str = "") -> Dict:
+        ...
+
+    def get_interaction_context(self, tab_id: str = "") -> Dict:
         ...
 
     def snapshot(
@@ -46,6 +70,7 @@ class BrowserSession(Protocol):
         depth: int | None = None,
         boxes: bool = False,
         filename: str = "",
+        tab_id: str = "",
     ) -> Dict:
         ...
 
@@ -56,6 +81,7 @@ class BrowserSession(Protocol):
         text_filter: str = "",
         limit: int = 25,
         include_boxes: bool = True,
+        tab_id: str = "",
     ) -> Dict:
         ...
 
@@ -120,7 +146,22 @@ class BrowserSession(Protocol):
     ) -> Dict:
         ...
 
-    def run_script(self, script: str) -> Dict:
+    def run_script(self, script: str, tab_id: str = "") -> Dict:
+        ...
+
+    def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:
+        ...
+
+    def get_page_errors(self, tab_id: str = "", limit: int = 100) -> Dict:
+        ...
+
+    def get_network_requests(self, tab_id: str = "", limit: int = 100, failed_only: bool = False) -> Dict:
+        ...
+
+    def clear_debug_buffers(self, tab_id: str = "") -> Dict:
+        ...
+
+    def diagnose_page(self, tab_id: str = "") -> Dict:
         ...
 
     def verify_text(self, text: str) -> Dict:
@@ -176,7 +217,7 @@ class BrowserSession(Protocol):
     def mouse_drag_xy(self, start_x: float, start_y: float, end_x: float, end_y: float) -> Dict:
         ...
 
-    def screenshot(self, filename: str = "") -> Dict:
+    def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
         ...
 
     def close(self) -> None:

@@ -4,7 +4,8 @@ import json
 import os
 import re
 import tempfile
-from typing import Dict
+import time
+from typing import Any, Dict
 
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -24,6 +25,7 @@ from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession
 
 
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
+DEBUG_EVENT_LIMIT = 400
 
 
 def selector_kind_to_by(by: str):
@@ -228,6 +230,184 @@ def element_box(driver, element) -> dict:
 class SeleniumBrowserSession(BrowserSession):
     def __init__(self, driver):
         self.driver = driver
+        self._console_messages: list[Dict[str, Any]] = []
+        self._page_errors: list[Dict[str, Any]] = []
+        self._network_requests: list[Dict[str, Any]] = []
+
+    def _append_limited(self, bucket: list[Dict[str, Any]], payload: Dict[str, Any]) -> None:
+        bucket.append(payload)
+        overflow = len(bucket) - DEBUG_EVENT_LIMIT
+        if overflow > 0:
+            del bucket[:overflow]
+
+    def _make_timestamp(self) -> float:
+        return round(time.time(), 3)
+
+    def _list_window_handles(self) -> list[str]:
+        try:
+            return list(self.driver.window_handles)
+        except Exception:
+            return []
+
+    def _current_tab_id(self) -> str:
+        try:
+            return str(self.driver.current_window_handle)
+        except Exception:
+            return ""
+
+    def _tab_entry(self, handle: str, index: int) -> Dict[str, Any]:
+        original = self._current_tab_id()
+        title = ""
+        url = ""
+        alive = True
+        try:
+            self.driver.switch_to.window(handle)
+            title = str(self.driver.title or "")
+            url = str(self.driver.current_url or "")
+        except Exception:
+            alive = False
+        finally:
+            if original and handle != original:
+                try:
+                    self.driver.switch_to.window(original)
+                except Exception:
+                    pass
+        return {
+            "tab_id": str(handle),
+            "index": int(index),
+            "url": url,
+            "title": title,
+            "active": str(handle) == original,
+            "alive": bool(alive),
+        }
+
+    def _resolve_handle(self, tab_id: str = "", index: int = -1, title_contains: str = "", url_contains: str = "") -> str:
+        handles = self._list_window_handles()
+        if not handles:
+            raise RuntimeError("No live tabs are available in the current session.")
+        normalized_tab_id = str(tab_id or "").strip()
+        if normalized_tab_id:
+            if normalized_tab_id in handles:
+                return normalized_tab_id
+            raise ValueError(f"Tab not found: {normalized_tab_id}")
+        if int(index) >= 0:
+            if int(index) >= len(handles):
+                raise ValueError(f"Tab index out of range: {index}")
+            return handles[int(index)]
+        title_filter = str(title_contains or "").strip().lower()
+        url_filter = str(url_contains or "").strip().lower()
+        if title_filter or url_filter:
+            original = self._current_tab_id()
+            try:
+                for handle in handles:
+                    try:
+                        self.driver.switch_to.window(handle)
+                        current_title = str(self.driver.title or "").lower()
+                        current_url = str(self.driver.current_url or "").lower()
+                        if title_filter and title_filter in current_title:
+                            return handle
+                        if url_filter and url_filter in current_url:
+                            return handle
+                    except Exception:
+                        continue
+            finally:
+                if original:
+                    try:
+                        self.driver.switch_to.window(original)
+                    except Exception:
+                        pass
+        return self._current_tab_id() or handles[0]
+
+    def _activate_handle(self, handle: str) -> str:
+        self.driver.switch_to.window(handle)
+        return handle
+
+    def _poll_debug_logs(self) -> None:
+        current_tab_id = self._current_tab_id()
+        try:
+            browser_logs = self.driver.get_log("browser")
+        except Exception:
+            browser_logs = []
+        for entry in browser_logs or []:
+            level = str(entry.get("level", "") or "").lower()
+            message = str(entry.get("message", "") or "")
+            payload = {
+                "timestamp": self._make_timestamp(),
+                "tab_id": current_tab_id,
+                "type": level,
+                "text": message,
+                "location": {},
+            }
+            self._append_limited(self._console_messages, payload)
+            if level in {"severe", "error"}:
+                self._append_limited(
+                    self._page_errors,
+                    {
+                        "timestamp": payload["timestamp"],
+                        "tab_id": current_tab_id,
+                        "message": message,
+                    },
+                )
+
+        try:
+            perf_logs = self.driver.get_log("performance")
+        except Exception:
+            perf_logs = []
+        for entry in perf_logs or []:
+            try:
+                message = json.loads(str(entry.get("message", "") or "")).get("message", {})
+            except Exception:
+                continue
+            method = str(message.get("method", "") or "")
+            params = message.get("params", {}) or {}
+            if method == "Network.requestWillBeSent":
+                request = params.get("request", {}) or {}
+                payload = {
+                    "timestamp": self._make_timestamp(),
+                    "tab_id": current_tab_id,
+                    "request_id": str(params.get("requestId", "") or ""),
+                    "event": "request",
+                    "method": str(request.get("method", "") or ""),
+                    "url": str(request.get("url", "") or ""),
+                    "resource_type": str(params.get("type", "") or ""),
+                    "navigation": False,
+                    "status": None,
+                    "ok": None,
+                    "failure": "",
+                }
+                self._append_limited(self._network_requests, payload)
+            elif method == "Network.responseReceived":
+                response = params.get("response", {}) or {}
+                status = response.get("status")
+                payload = {
+                    "timestamp": self._make_timestamp(),
+                    "tab_id": current_tab_id,
+                    "request_id": str(params.get("requestId", "") or ""),
+                    "event": "response",
+                    "method": "",
+                    "url": str(response.get("url", "") or ""),
+                    "resource_type": str(params.get("type", "") or ""),
+                    "navigation": False,
+                    "status": int(status) if isinstance(status, (int, float)) else None,
+                    "ok": bool(response.get("status", 0) and int(response.get("status", 0)) < 400) if isinstance(response.get("status"), (int, float)) else None,
+                    "failure": "",
+                }
+                self._append_limited(self._network_requests, payload)
+            elif method == "Network.loadingFailed":
+                payload = {
+                    "timestamp": self._make_timestamp(),
+                    "tab_id": current_tab_id,
+                    "request_id": str(params.get("requestId", "") or ""),
+                    "event": "requestfailed",
+                    "method": "",
+                    "url": str(params.get("url", "") or ""),
+                    "resource_type": str(params.get("type", "") or ""),
+                    "navigation": False,
+                    "status": None,
+                    "ok": False,
+                    "failure": str(params.get("errorText", "") or ""),
+                }
+                self._append_limited(self._network_requests, payload)
 
     def get_summary(self) -> BrowserSessionSummary:
         try:
@@ -247,7 +427,70 @@ class SeleniumBrowserSession(BrowserSession):
             "supports_highlight": False,
             "supports_coordinates": True,
             "supports_post_action_context": False,
+            "supports_tabs": True,
+            "supports_console_messages": True,
+            "supports_page_errors": True,
+            "supports_network_requests": True,
         }
+
+    def list_tabs(self) -> Dict:
+        tabs = [self._tab_entry(handle, index) for index, handle in enumerate(self._list_window_handles())]
+        return {**self.get_current_url(), "active_tab_id": self._current_tab_id(), "count": len(tabs), "tabs": tabs}
+
+    def open_tab(
+        self,
+        url: str = "",
+        activate: bool = True,
+        wait_for_ready: bool = True,
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        original = self._current_tab_id()
+        self.driver.execute_script("window.open(arguments[0] || 'about:blank', '_blank');", str(url or "").strip() or "about:blank")
+        handles = self._list_window_handles()
+        new_handle = handles[-1]
+        if activate:
+            self._activate_handle(new_handle)
+        elif original:
+            self._activate_handle(original)
+        if activate and wait_for_ready:
+            wait_until_ready(self.driver, int(timeout_seconds))
+        return {
+            **self.get_current_url(tab_id=new_handle if activate else original),
+            "opened": True,
+            "activated": bool(activate),
+            "tab": self._tab_entry(new_handle, handles.index(new_handle)),
+            "tabs": self.list_tabs().get("tabs", []),
+        }
+
+    def activate_tab(
+        self,
+        tab_id: str = "",
+        index: int = -1,
+        title_contains: str = "",
+        url_contains: str = "",
+    ) -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id, index=index, title_contains=title_contains, url_contains=url_contains)
+        self._activate_handle(handle)
+        return {
+            **self.get_current_url(tab_id=handle),
+            "activated": True,
+            "tab": self._tab_entry(handle, self._list_window_handles().index(handle)),
+            "tabs": self.list_tabs().get("tabs", []),
+        }
+
+    def close_tab(self, tab_id: str = "", index: int = -1) -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id, index=index)
+        tabs_before = self._list_window_handles()
+        closed_tab = self._tab_entry(handle, tabs_before.index(handle))
+        if len(tabs_before) <= 1:
+            self.driver.execute_script("window.open('about:blank', '_blank');")
+            tabs_before = self._list_window_handles()
+        self._activate_handle(handle)
+        self.driver.close()
+        remaining = self._list_window_handles()
+        if remaining:
+            self._activate_handle(remaining[0])
+        return {**self.get_current_url(), "closed": True, "closed_tab": closed_tab, "tabs": self.list_tabs().get("tabs", [])}
 
     def _error_payload(
         self,
@@ -290,23 +533,43 @@ class SeleniumBrowserSession(BrowserSession):
                 payload["page_candidates_error"] = str(candidate_exc)
         return payload
 
-    def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20) -> Dict:
+    def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
         self.driver.get(url)
         if wait_for_ready:
             wait_until_ready(self.driver, int(timeout_seconds))
-        return self.get_current_url()
+        return self.get_current_url(tab_id=handle)
 
-    def get_current_url(self) -> Dict:
-        return {"url": self.driver.current_url, "title": self.driver.title}
+    def get_current_url(self, tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id) if tab_id else self._current_tab_id()
+        if handle and handle != self._current_tab_id():
+            original = self._current_tab_id()
+            try:
+                self._activate_handle(handle)
+                return {"tab_id": handle, "url": self.driver.current_url, "title": self.driver.title}
+            finally:
+                if original and original != handle:
+                    try:
+                        self._activate_handle(original)
+                    except Exception:
+                        pass
+        return {"tab_id": handle, "url": self.driver.current_url, "title": self.driver.title}
 
-    def get_page_text(self) -> Dict:
+    def get_page_text(self, tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
         body = self.driver.find_element(By.TAG_NAME, "body")
-        return {**self.get_current_url(), "text": (body.text or "").strip()}
+        return {**self.get_current_url(tab_id=handle), "text": (body.text or "").strip()}
 
-    def get_page_html(self) -> Dict:
-        return {**self.get_current_url(), "html": self.driver.page_source}
+    def get_page_html(self, tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
+        return {**self.get_current_url(tab_id=handle), "html": self.driver.page_source}
 
-    def inspect_elements(self, selector: str, by: str = "css", limit: int = 10) -> Dict:
+    def inspect_elements(self, selector: str, by: str = "css", limit: int = 10, tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
         locator_by = selector_kind_to_by(by)
         elements = self.driver.find_elements(locator_by, selector)
         inspected = []
@@ -315,20 +578,25 @@ class SeleniumBrowserSession(BrowserSession):
                 inspected.append(describe_element(self.driver, element))
             except WebDriverException:
                 continue
-        return {**self.get_current_url(), "count": len(elements), "elements": inspected}
+        return {**self.get_current_url(tab_id=handle), "count": len(elements), "elements": inspected}
 
-    def get_active_element(self) -> Dict:
+    def get_active_element(self, tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
         element = self.driver.switch_to.active_element
-        return {**self.get_current_url(), "element": describe_element(self.driver, element)}
+        return {**self.get_current_url(tab_id=handle), "element": describe_element(self.driver, element)}
 
-    def get_interaction_context(self) -> Dict:
+    def get_interaction_context(self, tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
         return {
-            **self.get_current_url(),
+            **self.get_current_url(tab_id=handle),
             "interaction_context": {
                 "action_name": "inspect",
-                "page": self.get_current_url(),
-                "tabs": [],
-                "active_element": self.get_active_element().get("element", {}),
+                "page": self.get_current_url(tab_id=handle),
+                "tabs": self.list_tabs().get("tabs", []),
+                "active_tab_id": handle,
+                "active_element": self.get_active_element(tab_id=handle).get("element", {}),
                 "modal_state": {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []},
                 "snapshot": {"error": "Structured snapshot context is currently supported only by the patchright engine."},
             },
@@ -351,7 +619,10 @@ class SeleniumBrowserSession(BrowserSession):
         text_filter: str = "",
         limit: int = 25,
         include_boxes: bool = True,
+        tab_id: str = "",
     ) -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
         if str(target or "").strip():
             raise NotImplementedError("Region candidate enumeration is currently supported only by the patchright engine.")
         lowered = str(text_filter or "").strip().lower()
@@ -382,7 +653,13 @@ class SeleniumBrowserSession(BrowserSession):
                 candidates.append(entry)
             except WebDriverException:
                 continue
-        return {**self.get_current_url(), "target": "", "text_filter": str(text_filter or ""), "count": len(candidates), "candidates": candidates}
+        return {
+            **self.get_current_url(tab_id=handle),
+            "target": "",
+            "text_filter": str(text_filter or ""),
+            "count": len(candidates),
+            "candidates": candidates,
+        }
 
     def wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict:
         try:
@@ -544,13 +821,104 @@ class SeleniumBrowserSession(BrowserSession):
         except Exception as exc:
             return self._error_payload("press_key", exc, selector=selector, by=by, text_filter=selector or key)
 
-    def run_script(self, script: str) -> Dict:
+    def run_script(self, script: str, tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
         result = self.driver.execute_script(script)
         try:
             serialized = json.loads(json.dumps(result))
         except TypeError:
             serialized = str(result)
-        return {**self.get_current_url(), "result": serialized}
+        return {**self.get_current_url(tab_id=handle), "result": serialized}
+
+    def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:
+        self._poll_debug_logs()
+        normalized_tab_id = str(tab_id or "").strip()
+        normalized_level = str(level or "").strip().lower()
+        messages = list(self._console_messages)
+        if normalized_tab_id:
+            messages = [item for item in messages if str(item.get("tab_id", "") or "") == normalized_tab_id]
+        if normalized_level:
+            messages = [item for item in messages if str(item.get("type", "") or "").lower() == normalized_level]
+        messages = messages[-max(1, int(limit)) :]
+        return {
+            **(self.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self.get_current_url()),
+            "tab_id": normalized_tab_id,
+            "level": normalized_level,
+            "count": len(messages),
+            "messages": messages,
+        }
+
+    def get_page_errors(self, tab_id: str = "", limit: int = 100) -> Dict:
+        self._poll_debug_logs()
+        normalized_tab_id = str(tab_id or "").strip()
+        errors = list(self._page_errors)
+        if normalized_tab_id:
+            errors = [item for item in errors if str(item.get("tab_id", "") or "") == normalized_tab_id]
+        errors = errors[-max(1, int(limit)) :]
+        return {
+            **(self.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self.get_current_url()),
+            "tab_id": normalized_tab_id,
+            "count": len(errors),
+            "errors": errors,
+        }
+
+    def get_network_requests(self, tab_id: str = "", limit: int = 100, failed_only: bool = False) -> Dict:
+        self._poll_debug_logs()
+        normalized_tab_id = str(tab_id or "").strip()
+        requests = list(self._network_requests)
+        if normalized_tab_id:
+            requests = [item for item in requests if str(item.get("tab_id", "") or "") == normalized_tab_id]
+        if bool(failed_only):
+            requests = [item for item in requests if item.get("event") == "requestfailed" or item.get("ok") is False]
+        requests = requests[-max(1, int(limit)) :]
+        return {
+            **(self.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self.get_current_url()),
+            "tab_id": normalized_tab_id,
+            "failed_only": bool(failed_only),
+            "count": len(requests),
+            "requests": requests,
+        }
+
+    def clear_debug_buffers(self, tab_id: str = "") -> Dict:
+        normalized_tab_id = str(tab_id or "").strip()
+        if normalized_tab_id:
+            self._console_messages = [item for item in self._console_messages if str(item.get("tab_id", "") or "") != normalized_tab_id]
+            self._page_errors = [item for item in self._page_errors if str(item.get("tab_id", "") or "") != normalized_tab_id]
+            self._network_requests = [item for item in self._network_requests if str(item.get("tab_id", "") or "") != normalized_tab_id]
+        else:
+            self._console_messages.clear()
+            self._page_errors.clear()
+            self._network_requests.clear()
+        return {
+            **(self.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self.get_current_url()),
+            "cleared": True,
+            "tab_id": normalized_tab_id,
+        }
+
+    def diagnose_page(self, tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
+        console_messages = self.get_console_messages(tab_id=handle, limit=20).get("messages", [])
+        page_errors = self.get_page_errors(tab_id=handle, limit=20).get("errors", [])
+        failed_requests = self.get_network_requests(tab_id=handle, limit=30, failed_only=True).get("requests", [])
+        all_requests = self.get_network_requests(tab_id=handle, limit=30, failed_only=False).get("requests", [])
+        bad_responses = [
+            item
+            for item in all_requests
+            if item.get("event") == "response" and isinstance(item.get("status"), int) and int(item.get("status")) >= 400
+        ]
+        return {
+            **self.get_current_url(tab_id=handle),
+            "tab_id": handle,
+            "diagnosis": {
+                "interaction_context": self.get_interaction_context(tab_id=handle).get("interaction_context", {}),
+                "console_messages": console_messages,
+                "page_errors": page_errors,
+                "failed_requests": failed_requests,
+                "bad_responses": bad_responses[-20:],
+            },
+        }
 
     def verify_text(self, text: str) -> Dict:
         try:
@@ -795,12 +1163,14 @@ class SeleniumBrowserSession(BrowserSession):
             "end_y": float(end_y),
         }
 
-    def screenshot(self, filename: str = "") -> Dict:
+    def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
         output_path = str(filename or "").strip()
         if not output_path:
             output_path = os.path.join(tempfile.gettempdir(), "chromium-advanced-selenium-session.png")
         self.driver.save_screenshot(output_path)
-        return {**self.get_current_url(), "path": output_path}
+        return {**self.get_current_url(tab_id=handle), "path": output_path}
 
     def close(self) -> None:
         self.driver.quit()

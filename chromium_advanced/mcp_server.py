@@ -125,16 +125,77 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         return result
 
     @server.tool
-    def navigate(session_id: str, url: str, wait_for_ready: bool = True, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> dict:
+    def navigate(
+        session_id: str,
+        url: str,
+        wait_for_ready: bool = True,
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        tab_id: str = "",
+    ) -> dict:
         """Navigate the session to a URL."""
         browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.navigate(url, wait_for_ready, int(timeout_seconds))}
+        return {
+            "session_id": session_id,
+            **browser_session.navigate(url, wait_for_ready, int(timeout_seconds), tab_id=tab_id),
+        }
 
     @server.tool
-    def get_current_url(session_id: str) -> dict:
+    def get_current_url(session_id: str, tab_id: str = "") -> dict:
         """Get the session's current URL and title."""
         browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.get_current_url()}
+        return {"session_id": session_id, **browser_session.get_current_url(tab_id=tab_id)}
+
+    @server.tool
+    def browser_list_tabs(session_id: str) -> dict:
+        """List known tabs for the current browser session and indicate which tab is active."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.list_tabs()}
+
+    @server.tool
+    def browser_open_tab(
+        session_id: str,
+        url: str = "",
+        activate: bool = True,
+        wait_for_ready: bool = True,
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    ) -> dict:
+        """Open a new tab, optionally navigate it to a URL, and optionally activate it."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.open_tab(
+                url=url,
+                activate=bool(activate),
+                wait_for_ready=bool(wait_for_ready),
+                timeout_seconds=int(timeout_seconds),
+            ),
+        }
+
+    @server.tool
+    def browser_activate_tab(
+        session_id: str,
+        tab_id: str = "",
+        index: int = -1,
+        title_contains: str = "",
+        url_contains: str = "",
+    ) -> dict:
+        """Activate an existing tab by explicit tab_id, index, or partial title/URL match."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.activate_tab(
+                tab_id=tab_id,
+                index=int(index),
+                title_contains=title_contains,
+                url_contains=url_contains,
+            ),
+        }
+
+    @server.tool
+    def browser_close_tab(session_id: str, tab_id: str = "", index: int = -1) -> dict:
+        """Close a tab by explicit tab_id or index and keep the session alive on a remaining tab."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.close_tab(tab_id=tab_id, index=int(index))}
 
     @server.tool
     def get_session_capabilities(session_id: str) -> dict:
@@ -143,16 +204,16 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         return {"session_id": session_id, **browser_session.get_capabilities()}
 
     @server.tool
-    def get_page_text(session_id: str) -> dict:
+    def get_page_text(session_id: str, tab_id: str = "") -> dict:
         """Extract visible page text from the current document body."""
         browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.get_page_text()}
+        return {"session_id": session_id, **browser_session.get_page_text(tab_id=tab_id)}
 
     @server.tool
-    def get_page_html(session_id: str) -> dict:
+    def get_page_html(session_id: str, tab_id: str = "") -> dict:
         """Return the current page HTML source."""
         browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.get_page_html()}
+        return {"session_id": session_id, **browser_session.get_page_html(tab_id=tab_id)}
 
     @server.tool
     def browser_snapshot(
@@ -162,13 +223,21 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         depth: int = 0,
         boxes: bool = False,
         filename: str = "",
+        tab_id: str = "",
     ) -> dict:
         """Capture an AI-friendly accessibility snapshot of the page or a target subtree."""
         browser_session = session_manager.resolve_session(session_id)
         resolved_depth = int(depth) if int(depth) > 0 else None
         return {
             "session_id": session_id,
-            **browser_session.snapshot(target=target, by=by, depth=resolved_depth, boxes=bool(boxes), filename=filename),
+            **browser_session.snapshot(
+                target=target,
+                by=by,
+                depth=resolved_depth,
+                boxes=bool(boxes),
+                filename=filename,
+                tab_id=tab_id,
+            ),
         }
 
     @server.tool
@@ -179,6 +248,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         text_filter: str = "",
         limit: int = 25,
         include_boxes: bool = True,
+        tab_id: str = "",
     ) -> dict:
         """List actionable candidate elements from the page or a target subtree."""
         browser_session = session_manager.resolve_session(session_id)
@@ -190,6 +260,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
                 text_filter=text_filter,
                 limit=int(limit),
                 include_boxes=bool(include_boxes),
+                tab_id=tab_id,
             ),
         }
 
@@ -199,22 +270,23 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         selector: str,
         by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
         limit: int = 10,
+        tab_id: str = "",
     ) -> dict:
         """Inspect matching elements to debug dynamic pages and refine selectors."""
         browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.inspect_elements(selector, by, int(limit))}
+        return {"session_id": session_id, **browser_session.inspect_elements(selector, by, int(limit), tab_id)}
 
     @server.tool
-    def get_active_element(session_id: str) -> dict:
+    def get_active_element(session_id: str, tab_id: str = "") -> dict:
         """Describe the currently focused element."""
         browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.get_active_element()}
+        return {"session_id": session_id, **browser_session.get_active_element(tab_id=tab_id)}
 
     @server.tool
-    def browser_get_interaction_context(session_id: str) -> dict:
+    def browser_get_interaction_context(session_id: str, tab_id: str = "") -> dict:
         """Return the current page, focus, modal, tab, and snapshot context for agent reasoning."""
         browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.get_interaction_context()}
+        return {"session_id": session_id, **browser_session.get_interaction_context(tab_id=tab_id)}
 
     @server.tool
     def wait_for(
@@ -347,10 +419,56 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         }
 
     @server.tool
-    def run_script(session_id: str, script: str) -> dict:
+    def run_script(session_id: str, script: str, tab_id: str = "") -> dict:
         """Run JavaScript in the current page and return a JSON-serializable result when possible."""
         browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.run_script(script)}
+        return {"session_id": session_id, **browser_session.run_script(script, tab_id=tab_id)}
+
+    @server.tool
+    def browser_get_console_messages(
+        session_id: str,
+        tab_id: str = "",
+        limit: int = 100,
+        level: str = "",
+    ) -> dict:
+        """Return recent console messages, optionally filtered by tab and message level."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.get_console_messages(tab_id=tab_id, limit=int(limit), level=level),
+        }
+
+    @server.tool
+    def browser_get_page_errors(session_id: str, tab_id: str = "", limit: int = 100) -> dict:
+        """Return recent uncaught page errors and severe browser log entries."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.get_page_errors(tab_id=tab_id, limit=int(limit))}
+
+    @server.tool
+    def browser_get_network_requests(
+        session_id: str,
+        tab_id: str = "",
+        limit: int = 100,
+        failed_only: bool = False,
+    ) -> dict:
+        """Return recent observed network requests and responses, optionally filtering to failures."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.get_network_requests(tab_id=tab_id, limit=int(limit), failed_only=bool(failed_only)),
+        }
+
+    @server.tool
+    def browser_clear_debug_buffers(session_id: str, tab_id: str = "") -> dict:
+        """Clear cached console, page error, and network request buffers for the session or one tab."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.clear_debug_buffers(tab_id=tab_id)}
+
+    @server.tool
+    def browser_diagnose_page(session_id: str, tab_id: str = "") -> dict:
+        """Return a high-signal diagnostic bundle for a page, including recent console, error, and network failures."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.diagnose_page(tab_id=tab_id)}
 
     @server.tool
     def browser_verify_text(session_id: str, text: str) -> dict:
@@ -527,10 +645,10 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         }
 
     @server.tool
-    def screenshot(session_id: str, filename: str = "") -> dict:
+    def screenshot(session_id: str, filename: str = "", tab_id: str = "") -> dict:
         """Save a screenshot to disk and return the file path."""
         browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.screenshot(filename)}
+        return {"session_id": session_id, **browser_session.screenshot(filename, tab_id=tab_id)}
 
     @server.tool
     def close_all_sessions() -> dict:

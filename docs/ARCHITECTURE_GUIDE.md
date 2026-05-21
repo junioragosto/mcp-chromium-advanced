@@ -64,6 +64,13 @@ Responsibilities:
 - keep profile/session ownership outside the engine layer
 - allow the GUI and MCP worker to select an execution backend without changing profile creation logic
 - keep keepalive separate for now so engine migration can happen incrementally
+- expose explicit tab lifecycle operations instead of relying on hidden browser focus
+- expose structured debug telemetry such as console messages, page errors, and network request summaries
+
+Engine-specific note:
+
+- `patchright` collects debug telemetry through per-tab CDP sessions, which makes console output, uncaught exceptions, and failed requests much closer to what a human would inspect in DevTools
+- `selenium_uc` collects similar signals from Chromium browser/performance logs when available, so the API surface is shared but the fidelity is lower
 
 ### MCP Service Layer
 
@@ -106,6 +113,22 @@ The intended MCP lifecycle is:
 
 This keeps real browser identities usable across many tasks without letting multiple tasks silently fight over the same logged-in state.
 
+For multi-tab tasks, the intended page lifecycle inside one session is:
+
+1. list tabs or open a new tab
+2. activate the target tab explicitly
+3. perform page actions on that active tab
+4. switch again when needed
+5. close the tab or release the whole session
+
+For blocked or unstable pages, the intended diagnostic flow is:
+
+1. capture the current interaction context
+2. inspect recent console messages
+3. inspect recent page errors
+4. inspect recent failed or bad network requests
+5. use the bundled page diagnosis payload before falling back to screenshots
+
 ## Why Not a Generic Browser Sandbox
 
 This project is intentionally not optimized for disposable generic browser automation. It is optimized for:
@@ -123,3 +146,4 @@ That design choice is what makes it useful for AI workflows that need access to 
 - keep expanding i18n coverage so all user-facing strings come from resource files
 - add automated smoke tests for GUI startup, config loading, and MCP daemon lifecycle
 - document cross-platform packaging separately from source-level compatibility
+- consider eventually making `tab_id` a first-class optional parameter across every browser action, not just tab management and read/diagnostic helpers

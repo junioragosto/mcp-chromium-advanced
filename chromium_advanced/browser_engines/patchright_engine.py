@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from typing import Any, Dict
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
@@ -12,6 +13,7 @@ from chromium_advanced.chromium_profile_lib import now_text
 
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
 SNAPSHOT_REF_EXTRACT_PATTERN = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
+DEBUG_EVENT_LIMIT = 400
 
 
 def _load_patchright():
@@ -167,6 +169,271 @@ class PatchrightBrowserSession(BrowserSession):
         self.page = page
         self._last_snapshot_text = ""
         self._last_snapshot_refs: set[str] = set()
+        self._tab_ids_by_page_key: dict[int, str] = {}
+        self._cdp_sessions_by_page_key: dict[int, Any] = {}
+        self._next_tab_number = 1
+        self._console_messages: list[Dict[str, Any]] = []
+        self._page_errors: list[Dict[str, Any]] = []
+        self._network_requests: list[Dict[str, Any]] = []
+        self._network_request_ids: dict[tuple[int, int], str] = {}
+        self._next_request_number = 1
+        self._attach_existing_pages()
+        try:
+            self.context.on("page", self._handle_new_page)
+        except Exception:
+            pass
+
+    def _append_limited(self, bucket: list[Dict[str, Any]], payload: Dict[str, Any]) -> None:
+        bucket.append(payload)
+        overflow = len(bucket) - DEBUG_EVENT_LIMIT
+        if overflow > 0:
+            del bucket[:overflow]
+
+    def _make_timestamp(self) -> float:
+        return round(time.time(), 3)
+
+    def _get_page_key(self, page) -> int:
+        return id(page)
+
+    def _get_tab_id(self, page) -> str:
+        page_key = self._get_page_key(page)
+        tab_id = self._tab_ids_by_page_key.get(page_key)
+        if tab_id:
+            return tab_id
+        tab_id = f"tab-{self._next_tab_number:03d}"
+        self._next_tab_number += 1
+        self._tab_ids_by_page_key[page_key] = tab_id
+        return tab_id
+
+    def _attach_existing_pages(self) -> None:
+        for existing_page in list(getattr(self.context, "pages", []) or []):
+            self._attach_page(existing_page)
+
+    def _handle_new_page(self, page) -> None:
+        self._attach_page(page)
+
+    def _attach_page(self, page) -> None:
+        page_key = self._get_page_key(page)
+        if page_key in self._tab_ids_by_page_key:
+            return
+        tab_id = self._get_tab_id(page)
+
+        try:
+            cdp = self.context.new_cdp_session(page)
+            cdp.send("Runtime.enable")
+            cdp.send("Log.enable")
+            cdp.send("Network.enable")
+            self._cdp_sessions_by_page_key[page_key] = cdp
+
+            def handle_runtime_console(params) -> None:
+                args = params.get("args", []) or []
+                parts = []
+                for item in args:
+                    value = item.get("value")
+                    if value is not None:
+                        parts.append(str(value))
+                        continue
+                    description = item.get("description")
+                    if description:
+                        parts.append(str(description))
+                stack_frames = ((params.get("stackTrace") or {}).get("callFrames") or [])
+                first_frame = stack_frames[0] if stack_frames else {}
+                payload = {
+                    "timestamp": round(float(params.get("timestamp", 0) or 0) / 1000.0, 3) or self._make_timestamp(),
+                    "tab_id": tab_id,
+                    "type": str(params.get("type", "") or ""),
+                    "text": " ".join(parts).strip(),
+                    "location": {
+                        "url": str(first_frame.get("url", "") or ""),
+                        "line_number": first_frame.get("lineNumber"),
+                        "column_number": first_frame.get("columnNumber"),
+                    },
+                }
+                self._append_limited(self._console_messages, payload)
+
+            def handle_runtime_exception(params) -> None:
+                details = params.get("exceptionDetails", {}) or {}
+                exception = details.get("exception", {}) or {}
+                message = (
+                    str(exception.get("description", "") or "")
+                    or str(exception.get("value", "") or "")
+                    or str(details.get("text", "") or "")
+                )
+                payload = {
+                    "timestamp": round(float(params.get("timestamp", 0) or 0) / 1000.0, 3) or self._make_timestamp(),
+                    "tab_id": tab_id,
+                    "message": message.strip(),
+                    "line_number": details.get("lineNumber"),
+                    "column_number": details.get("columnNumber"),
+                    "url": str(details.get("url", "") or ""),
+                }
+                self._append_limited(self._page_errors, payload)
+
+            def handle_log_entry(params) -> None:
+                entry = params.get("entry", {}) or {}
+                level = str(entry.get("level", "") or "")
+                text = str(entry.get("text", "") or "")
+                payload = {
+                    "timestamp": round(float(entry.get("timestamp", 0) or 0) / 1000.0, 3) or self._make_timestamp(),
+                    "tab_id": tab_id,
+                    "type": level,
+                    "text": text,
+                    "location": {
+                        "url": str(entry.get("url", "") or ""),
+                        "line_number": entry.get("lineNumber"),
+                        "column_number": None,
+                    },
+                }
+                self._append_limited(self._console_messages, payload)
+                if level.lower() in {"error", "warning"}:
+                    self._append_limited(
+                        self._page_errors,
+                        {
+                            "timestamp": payload["timestamp"],
+                            "tab_id": tab_id,
+                            "message": text,
+                            "url": payload["location"]["url"],
+                            "line_number": payload["location"]["line_number"],
+                            "column_number": payload["location"]["column_number"],
+                        },
+                    )
+
+            def handle_request_will_be_sent(params) -> None:
+                request = params.get("request", {}) or {}
+                request_id = str(params.get("requestId", "") or "")
+                payload = {
+                    "timestamp": self._make_timestamp(),
+                    "tab_id": tab_id,
+                    "request_id": request_id,
+                    "event": "request",
+                    "method": str(request.get("method", "") or ""),
+                    "url": str(request.get("url", "") or ""),
+                    "resource_type": str(params.get("type", "") or ""),
+                    "navigation": bool(params.get("documentURL")),
+                    "status": None,
+                    "ok": None,
+                    "failure": "",
+                }
+                self._append_limited(self._network_requests, payload)
+
+            def handle_response_received(params) -> None:
+                response = params.get("response", {}) or {}
+                status = response.get("status")
+                payload = {
+                    "timestamp": self._make_timestamp(),
+                    "tab_id": tab_id,
+                    "request_id": str(params.get("requestId", "") or ""),
+                    "event": "response",
+                    "method": "",
+                    "url": str(response.get("url", "") or ""),
+                    "resource_type": str(params.get("type", "") or ""),
+                    "navigation": False,
+                    "status": int(status) if isinstance(status, (int, float)) else None,
+                    "ok": bool(status < 400) if isinstance(status, (int, float)) else None,
+                    "failure": "",
+                }
+                self._append_limited(self._network_requests, payload)
+
+            def handle_loading_failed(params) -> None:
+                payload = {
+                    "timestamp": self._make_timestamp(),
+                    "tab_id": tab_id,
+                    "request_id": str(params.get("requestId", "") or ""),
+                    "event": "requestfailed",
+                    "method": "",
+                    "url": str(params.get("url", "") or ""),
+                    "resource_type": str(params.get("type", "") or ""),
+                    "navigation": False,
+                    "status": None,
+                    "ok": False,
+                    "failure": str(params.get("errorText", "") or ""),
+                }
+                self._append_limited(self._network_requests, payload)
+
+            cdp.on("Runtime.consoleAPICalled", handle_runtime_console)
+            cdp.on("Runtime.exceptionThrown", handle_runtime_exception)
+            cdp.on("Log.entryAdded", handle_log_entry)
+            cdp.on("Network.requestWillBeSent", handle_request_will_be_sent)
+            cdp.on("Network.responseReceived", handle_response_received)
+            cdp.on("Network.loadingFailed", handle_loading_failed)
+        except Exception:
+            pass
+
+    def _live_pages(self) -> list:
+        pages = []
+        for page in list(getattr(self.context, "pages", []) or []):
+            try:
+                if not page.is_closed():
+                    pages.append(page)
+            except Exception:
+                continue
+        if not pages and getattr(self, "page", None) is not None:
+            try:
+                if not self.page.is_closed():
+                    pages.append(self.page)
+            except Exception:
+                pass
+        return pages
+
+    def _resolve_page(self, tab_id: str = "", index: int = -1, title_contains: str = "", url_contains: str = ""):
+        pages = self._live_pages()
+        if not pages:
+            raise RuntimeError("No live tabs are available in the current session.")
+        normalized_tab_id = str(tab_id or "").strip()
+        if normalized_tab_id:
+            for page in pages:
+                if self._get_tab_id(page) == normalized_tab_id:
+                    return page
+            raise ValueError(f"Tab not found: {normalized_tab_id}")
+        if int(index) >= 0:
+            if int(index) >= len(pages):
+                raise ValueError(f"Tab index out of range: {index}")
+            return pages[int(index)]
+        title_filter = str(title_contains or "").strip().lower()
+        if title_filter:
+            for page in pages:
+                try:
+                    if title_filter in str(page.title() or "").lower():
+                        return page
+                except Exception:
+                    continue
+        url_filter = str(url_contains or "").strip().lower()
+        if url_filter:
+            for page in pages:
+                try:
+                    if url_filter in str(page.url or "").lower():
+                        return page
+                except Exception:
+                    continue
+        active_page = getattr(self, "page", None)
+        if active_page is not None:
+            try:
+                if not active_page.is_closed():
+                    return active_page
+            except Exception:
+                pass
+        return pages[0]
+
+    def _tab_entry(self, page, index: int) -> Dict[str, Any]:
+        url = ""
+        title = ""
+        alive = True
+        try:
+            url = str(page.url or "")
+        except Exception:
+            alive = False
+        try:
+            title = str(page.title() or "")
+        except Exception:
+            alive = False
+        return {
+            "tab_id": self._get_tab_id(page),
+            "index": int(index),
+            "url": url,
+            "title": title,
+            "active": page == getattr(self, "page", None),
+            "alive": bool(alive),
+        }
 
     def get_summary(self) -> BrowserSessionSummary:
         try:
@@ -184,6 +451,10 @@ class PatchrightBrowserSession(BrowserSession):
             "supports_highlight": True,
             "supports_coordinates": True,
             "supports_post_action_context": True,
+            "supports_tabs": True,
+            "supports_console_messages": True,
+            "supports_page_errors": True,
+            "supports_network_requests": True,
         }
 
     def _update_snapshot_cache(self, snapshot_text: str) -> list[str]:
@@ -192,24 +463,26 @@ class PatchrightBrowserSession(BrowserSession):
         self._last_snapshot_refs = set(refs)
         return refs
 
-    def _resolve_target_locator(self, target: str, by: str = "css", element: str = ""):
+    def _resolve_target_locator(self, target: str, by: str = "css", element: str = "", page=None):
         target = str(target or "").strip()
         if not target:
             raise ValueError("target is required")
+        current_page = page or self._resolve_page()
         if _is_snapshot_ref(target):
             if self._last_snapshot_refs and target not in self._last_snapshot_refs:
                 raise ValueError(f"Ref {target} not found in the cached snapshot. Capture a fresh browser_snapshot first.")
-            locator = self.page.locator(f"aria-ref={target}")
+            locator = current_page.locator(f"aria-ref={target}")
         else:
-            locator = _raw_target_to_locator(self.page, target) or _selector_to_locator(self.page, target, by)
+            locator = _raw_target_to_locator(current_page, target) or _selector_to_locator(current_page, target, by)
         locator = locator.first
         if str(element or "").strip():
             locator = locator.describe(str(element).strip())
         return locator
 
-    def _safe_page_snapshot(self, depth: int = 4, max_chars: int = 5000, update_cache: bool = False) -> Dict:
+    def _safe_page_snapshot(self, page=None, depth: int = 4, max_chars: int = 5000, update_cache: bool = False) -> Dict:
+        current_page = page or self._resolve_page()
         try:
-            snapshot_text = self.page.aria_snapshot(mode="ai", depth=depth, boxes=False)
+            snapshot_text = current_page.aria_snapshot(mode="ai", depth=depth, boxes=False)
             refs = _extract_snapshot_refs(snapshot_text)
             if update_cache:
                 self._update_snapshot_cache(snapshot_text)
@@ -235,22 +508,16 @@ class PatchrightBrowserSession(BrowserSession):
     def _safe_tabs_summary(self) -> list[Dict]:
         tabs = []
         try:
-            for index, page in enumerate(self.context.pages):
-                tabs.append(
-                    {
-                        "index": index,
-                        "url": page.url or "",
-                        "title": page.title() or "",
-                        "active": page == self.page,
-                    }
-                )
+            for index, page in enumerate(self._live_pages()):
+                tabs.append(self._tab_entry(page, index))
         except Exception as exc:
             tabs.append({"error": str(exc)})
         return tabs
 
-    def _safe_modal_state(self) -> Dict:
+    def _safe_modal_state(self, page=None) -> Dict:
+        current_page = page or self._resolve_page()
         try:
-            payload = self.page.evaluate(
+            payload = current_page.evaluate(
                 """
                 () => {
                   const normalizeText = value => String(value || '').replace(/\\s+/g, ' ').trim();
@@ -319,17 +586,21 @@ class PatchrightBrowserSession(BrowserSession):
         except Exception as exc:
             return {"error": str(exc)}
 
-    def _post_action_context(self, action_name: str) -> Dict:
+    def _post_action_context(self, action_name: str, page=None) -> Dict:
+        current_page = page or self._resolve_page()
         context = {
             "action_name": action_name,
-            "page": self.get_current_url(),
+            "page": self.get_current_url(tab_id=self._get_tab_id(current_page)),
             "tabs": self._safe_tabs_summary(),
+            "active_tab_id": self._get_tab_id(current_page),
             "active_element": {},
-            "modal_state": self._safe_modal_state(),
-            "snapshot": self._safe_page_snapshot(depth=4, max_chars=5000, update_cache=False),
+            "modal_state": self._safe_modal_state(page=current_page),
+            "snapshot": self._safe_page_snapshot(page=current_page, depth=4, max_chars=5000, update_cache=False),
         }
         try:
-            context["active_element"] = self._compact_element_details(self.get_active_element().get("element", {}))
+            context["active_element"] = self._compact_element_details(
+                self.get_active_element(tab_id=self._get_tab_id(current_page)).get("element", {})
+            )
         except Exception as exc:
             context["active_element"] = {"error": str(exc)}
         return context
@@ -345,14 +616,20 @@ class PatchrightBrowserSession(BrowserSession):
         text_filter: str = "",
         element: str = "",
         limit: int = 8,
+        tab_id: str = "",
     ) -> Dict:
+        current_page = None
+        try:
+            current_page = self._resolve_page(tab_id=tab_id)
+        except Exception:
+            current_page = None
         payload: Dict[str, Any] = {
-            **self.get_current_url(),
+            **(self.get_current_url(tab_id=tab_id) if current_page is not None else self.get_current_url()),
             "ok": False,
             "action_name": action_name,
             "error": str(error),
             "error_type": type(error).__name__,
-            "post_action_context": self._post_action_context(f"{action_name}_failed"),
+            "post_action_context": self._post_action_context(f"{action_name}_failed", page=current_page) if current_page is not None else {},
         }
         diagnose_target = str(target or selector or "").strip()
         if diagnose_target:
@@ -363,6 +640,7 @@ class PatchrightBrowserSession(BrowserSession):
                     by=by,
                     text_filter=text_filter or diagnose_target,
                     limit=limit,
+                    tab_id=tab_id,
                 )
             except Exception as diag_exc:
                 payload["diagnosis_error"] = str(diag_exc)
@@ -372,6 +650,7 @@ class PatchrightBrowserSession(BrowserSession):
                     text_filter=text_filter,
                     limit=limit,
                     include_boxes=True,
+                    tab_id=tab_id,
                 ).get("candidates", [])
             except Exception as candidate_exc:
                 payload["page_candidates_error"] = str(candidate_exc)
@@ -499,23 +778,104 @@ class PatchrightBrowserSession(BrowserSession):
                 break
         return candidates
 
-    def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20) -> Dict:
+    def list_tabs(self) -> Dict:
+        tabs = self._safe_tabs_summary()
+        active_tab_id = ""
+        for item in tabs:
+            if item.get("active"):
+                active_tab_id = str(item.get("tab_id", "") or "")
+                break
+        return {**self.get_current_url(), "active_tab_id": active_tab_id, "count": len(tabs), "tabs": tabs}
+
+    def open_tab(
+        self,
+        url: str = "",
+        activate: bool = True,
+        wait_for_ready: bool = True,
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        page = self.context.new_page()
+        self._attach_page(page)
+        if str(url or "").strip():
+            wait_until = "load" if wait_for_ready else "domcontentloaded"
+            page.goto(str(url).strip(), wait_until=wait_until, timeout=int(timeout_seconds) * 1000)
+        if activate:
+            self.page = page
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+        return {
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
+            "opened": True,
+            "activated": bool(activate),
+            "tab": self._tab_entry(page, self._live_pages().index(page)),
+            "tabs": self._safe_tabs_summary(),
+        }
+
+    def activate_tab(
+        self,
+        tab_id: str = "",
+        index: int = -1,
+        title_contains: str = "",
+        url_contains: str = "",
+    ) -> Dict:
+        page = self._resolve_page(tab_id=tab_id, index=index, title_contains=title_contains, url_contains=url_contains)
+        self.page = page
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
+        return {
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
+            "activated": True,
+            "tab": self._tab_entry(page, self._live_pages().index(page)),
+            "tabs": self._safe_tabs_summary(),
+        }
+
+    def close_tab(self, tab_id: str = "", index: int = -1) -> Dict:
+        page = self._resolve_page(tab_id=tab_id, index=index)
+        closing_tab = self._tab_entry(page, self._live_pages().index(page))
+        page.close()
+        remaining_pages = self._live_pages()
+        if remaining_pages:
+            if self.page == page:
+                self.page = remaining_pages[0]
+        else:
+            self.page = self.context.new_page()
+            self._attach_page(self.page)
+        return {
+            **self.get_current_url(),
+            "closed": True,
+            "closed_tab": closing_tab,
+            "tabs": self._safe_tabs_summary(),
+        }
+
+    def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
         wait_until = "load" if wait_for_ready else "domcontentloaded"
-        self.page.goto(url, wait_until=wait_until, timeout=int(timeout_seconds) * 1000)
-        return {**self.get_current_url(), "post_action_context": self._post_action_context("navigate")}
+        page.goto(url, wait_until=wait_until, timeout=int(timeout_seconds) * 1000)
+        return {
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
+            "post_action_context": self._post_action_context("navigate", page=page),
+        }
 
-    def get_current_url(self) -> Dict:
-        return {"url": self.page.url, "title": self.page.title()}
+    def get_current_url(self, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
+        return {"tab_id": self._get_tab_id(page), "url": page.url, "title": page.title()}
 
-    def get_page_text(self) -> Dict:
-        text = self.page.locator("body").inner_text(timeout=15000).strip()
-        return {**self.get_current_url(), "text": text}
+    def get_page_text(self, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
+        text = page.locator("body").inner_text(timeout=15000).strip()
+        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "text": text}
 
-    def get_page_html(self) -> Dict:
-        return {**self.get_current_url(), "html": self.page.content()}
+    def get_page_html(self, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
+        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "html": page.content()}
 
-    def inspect_elements(self, selector: str, by: str = "css", limit: int = 10) -> Dict:
-        locator = _selector_to_locator(self.page, selector, by)
+    def inspect_elements(self, selector: str, by: str = "css", limit: int = 10, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
+        locator = _selector_to_locator(page, selector, by)
         count = locator.count()
         elements = []
         for index in range(min(max(1, int(limit)), count)):
@@ -523,10 +883,11 @@ class PatchrightBrowserSession(BrowserSession):
                 elements.append(_describe_locator(locator.nth(index)))
             except Exception:
                 continue
-        return {**self.get_current_url(), "count": count, "elements": elements}
+        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "count": count, "elements": elements}
 
-    def get_active_element(self) -> Dict:
-        element = self.page.evaluate(
+    def get_active_element(self, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
+        element = page.evaluate(
             """
             () => {
               const el = document.activeElement;
@@ -546,10 +907,14 @@ class PatchrightBrowserSession(BrowserSession):
             }
             """
         )
-        return {**self.get_current_url(), "element": element}
+        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "element": element}
 
-    def get_interaction_context(self) -> Dict:
-        return {**self.get_current_url(), "interaction_context": self._post_action_context("inspect")}
+    def get_interaction_context(self, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
+        return {
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
+            "interaction_context": self._post_action_context("inspect", page=page),
+        }
 
     def snapshot(
         self,
@@ -558,17 +923,19 @@ class PatchrightBrowserSession(BrowserSession):
         depth: int | None = None,
         boxes: bool = False,
         filename: str = "",
+        tab_id: str = "",
     ) -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
         locator = None
         resolved_target = str(target or "").strip()
         if resolved_target:
-            locator = self._resolve_target_locator(resolved_target, by=by)
+            locator = self._resolve_target_locator(resolved_target, by=by, page=page)
             snapshot_text = locator.aria_snapshot(mode="ai", depth=depth, boxes=bool(boxes))
         else:
-            snapshot_text = self.page.aria_snapshot(mode="ai", depth=depth, boxes=bool(boxes))
+            snapshot_text = page.aria_snapshot(mode="ai", depth=depth, boxes=bool(boxes))
         refs = self._update_snapshot_cache(snapshot_text)
         result = {
-            **self.get_current_url(),
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
             "target": resolved_target,
             "depth": depth,
             "boxes": bool(boxes),
@@ -590,21 +957,23 @@ class PatchrightBrowserSession(BrowserSession):
         text_filter: str = "",
         limit: int = 25,
         include_boxes: bool = True,
+        tab_id: str = "",
     ) -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
         resolved_target = str(target or "").strip()
         locator = None
         if resolved_target:
-            locator = self._resolve_target_locator(resolved_target, by=by)
+            locator = self._resolve_target_locator(resolved_target, by=by, page=page)
             snapshot_text = locator.aria_snapshot(mode="ai", boxes=False)
         else:
-            snapshot_text = self.page.aria_snapshot(mode="ai", boxes=False)
+            snapshot_text = page.aria_snapshot(mode="ai", boxes=False)
         refs = _extract_snapshot_refs(snapshot_text)
         lowered_filter = str(text_filter or "").strip().lower()
         candidates = []
         seen_targets = set()
         for ref in refs:
             try:
-                ref_locator = self.page.locator(f"aria-ref={ref}").first
+                ref_locator = page.locator(f"aria-ref={ref}").first
                 details = _describe_locator(ref_locator)
                 visible = bool(ref_locator.is_visible())
                 enabled = bool(ref_locator.is_enabled())
@@ -635,7 +1004,7 @@ class PatchrightBrowserSession(BrowserSession):
             except Exception:
                 continue
         if len(candidates) < max(1, int(limit)):
-            root_locator = locator or self.page.locator("body")
+            root_locator = locator or page.locator("body")
             for entry in self._list_dom_candidates(
                 root_locator=root_locator,
                 lowered_filter=lowered_filter,
@@ -649,7 +1018,7 @@ class PatchrightBrowserSession(BrowserSession):
                 candidates.append(entry)
         candidates = sorted(candidates, key=_candidate_sort_key)[: max(1, int(limit))]
         return {
-            **self.get_current_url(),
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
             "target": resolved_target,
             "text_filter": str(text_filter or ""),
             "count": len(candidates),
@@ -658,20 +1027,31 @@ class PatchrightBrowserSession(BrowserSession):
 
     def wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict:
         try:
-            locator = _selector_to_locator(self.page, selector, by).first
+            page = self._resolve_page()
+            locator = _selector_to_locator(page, selector, by).first
             target_state = {"present": "attached", "visible": "visible", "clickable": "visible"}.get(condition, "visible")
             locator.wait_for(state=target_state, timeout=int(timeout_seconds) * 1000)
             item = _describe_locator(locator)
-            return {**self.get_current_url(), "found": True, "tag_name": item.get("tag_name", ""), "text": item.get("text", "")}
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "found": True,
+                "tag_name": item.get("tag_name", ""),
+                "text": item.get("text", ""),
+            }
         except Exception as exc:
             return self._action_error_payload("wait_for", exc, selector=selector, by=by, text_filter=selector)
 
     def click(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
         try:
-            locator = _selector_to_locator(self.page, selector, by).first
+            page = self._resolve_page()
+            locator = _selector_to_locator(page, selector, by).first
             locator.scroll_into_view_if_needed(timeout=int(timeout_seconds) * 1000)
             locator.click(timeout=int(timeout_seconds) * 1000)
-            return {**self.get_current_url(), "clicked": True, "post_action_context": self._post_action_context("click")}
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "clicked": True,
+                "post_action_context": self._post_action_context("click", page=page),
+            }
         except Exception as exc:
             return self._action_error_payload("click", exc, selector=selector, by=by, text_filter=selector)
 
@@ -684,18 +1064,19 @@ class PatchrightBrowserSession(BrowserSession):
         double_click: bool = False,
     ) -> Dict:
         try:
-            locator = self._resolve_target_locator(target, by=by, element=element)
+            page = self._resolve_page()
+            locator = self._resolve_target_locator(target, by=by, element=element, page=page)
             locator.scroll_into_view_if_needed(timeout=int(timeout_seconds) * 1000)
             if double_click:
                 locator.dblclick(timeout=int(timeout_seconds) * 1000)
             else:
                 locator.click(timeout=int(timeout_seconds) * 1000)
             return {
-                **self.get_current_url(),
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "clicked": True,
                 "double_click": bool(double_click),
                 "target": str(target or "").strip(),
-                "post_action_context": self._post_action_context("click_target"),
+                "post_action_context": self._post_action_context("click_target", page=page),
             }
         except Exception as exc:
             return self._action_error_payload(
@@ -717,7 +1098,8 @@ class PatchrightBrowserSession(BrowserSession):
         timeout_seconds: int = 20,
     ) -> Dict:
         try:
-            locator = _selector_to_locator(self.page, selector, by).first
+            page = self._resolve_page()
+            locator = _selector_to_locator(page, selector, by).first
             locator.wait_for(state="visible", timeout=int(timeout_seconds) * 1000)
             if clear_first:
                 locator.fill("", timeout=int(timeout_seconds) * 1000)
@@ -725,10 +1107,10 @@ class PatchrightBrowserSession(BrowserSession):
             if submit:
                 locator.press("Enter", timeout=int(timeout_seconds) * 1000)
             return {
-                **self.get_current_url(),
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "typed": True,
                 "submitted": bool(submit),
-                "post_action_context": self._post_action_context("type_text"),
+                "post_action_context": self._post_action_context("type_text", page=page),
             }
         except Exception as exc:
             return self._action_error_payload("type_text", exc, selector=selector, by=by, text_filter=selector)
@@ -744,7 +1126,8 @@ class PatchrightBrowserSession(BrowserSession):
         timeout_seconds: int = 20,
     ) -> Dict:
         try:
-            locator = self._resolve_target_locator(target, by=by, element=element)
+            page = self._resolve_page()
+            locator = self._resolve_target_locator(target, by=by, element=element, page=page)
             locator.wait_for(state="visible", timeout=int(timeout_seconds) * 1000)
             if clear_first:
                 locator.fill("", timeout=int(timeout_seconds) * 1000)
@@ -752,11 +1135,11 @@ class PatchrightBrowserSession(BrowserSession):
             if submit:
                 locator.press("Enter", timeout=int(timeout_seconds) * 1000)
             return {
-                **self.get_current_url(),
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "typed": True,
                 "submitted": bool(submit),
                 "target": str(target or "").strip(),
-                "post_action_context": self._post_action_context("type_target"),
+                "post_action_context": self._post_action_context("type_target", page=page),
             }
         except Exception as exc:
             return self._action_error_payload(
@@ -810,34 +1193,124 @@ class PatchrightBrowserSession(BrowserSession):
         timeout_seconds: int = 20,
     ) -> Dict:
         try:
+            page = self._resolve_page()
             repeat = max(1, int(count))
             if str(selector or "").strip():
-                locator = _selector_to_locator(self.page, selector, by).first
+                locator = _selector_to_locator(page, selector, by).first
                 locator.wait_for(state="visible", timeout=int(timeout_seconds) * 1000)
                 locator.focus(timeout=int(timeout_seconds) * 1000)
             for _ in range(repeat):
-                self.page.keyboard.press(str(key))
+                page.keyboard.press(str(key))
             return {
-                **self.get_current_url(),
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "pressed": True,
                 "key": key,
                 "count": repeat,
-                "post_action_context": self._post_action_context("press_key"),
+                "post_action_context": self._post_action_context("press_key", page=page),
             }
         except Exception as exc:
             return self._action_error_payload("press_key", exc, selector=selector, by=by, text_filter=selector or key)
 
-    def run_script(self, script: str) -> Dict:
-        result = self.page.evaluate(f"() => {{ {script} }}")
+    def run_script(self, script: str, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
+        result = page.evaluate(f"() => {{ {script} }}")
         try:
             serialized = json.loads(json.dumps(result))
         except TypeError:
             serialized = str(result)
-        return {**self.get_current_url(), "result": serialized}
+        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "result": serialized}
+
+    def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:
+        normalized_tab_id = str(tab_id or "").strip()
+        normalized_level = str(level or "").strip().lower()
+        messages = list(self._console_messages)
+        if normalized_tab_id:
+            messages = [item for item in messages if str(item.get("tab_id", "") or "") == normalized_tab_id]
+        if normalized_level:
+            messages = [item for item in messages if str(item.get("type", "") or "").lower() == normalized_level]
+        messages = messages[-max(1, int(limit)) :]
+        return {
+            **(self.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self.get_current_url()),
+            "tab_id": normalized_tab_id,
+            "level": normalized_level,
+            "count": len(messages),
+            "messages": messages,
+        }
+
+    def get_page_errors(self, tab_id: str = "", limit: int = 100) -> Dict:
+        normalized_tab_id = str(tab_id or "").strip()
+        errors = list(self._page_errors)
+        if normalized_tab_id:
+            errors = [item for item in errors if str(item.get("tab_id", "") or "") == normalized_tab_id]
+        errors = errors[-max(1, int(limit)) :]
+        return {
+            **(self.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self.get_current_url()),
+            "tab_id": normalized_tab_id,
+            "count": len(errors),
+            "errors": errors,
+        }
+
+    def get_network_requests(self, tab_id: str = "", limit: int = 100, failed_only: bool = False) -> Dict:
+        normalized_tab_id = str(tab_id or "").strip()
+        requests = list(self._network_requests)
+        if normalized_tab_id:
+            requests = [item for item in requests if str(item.get("tab_id", "") or "") == normalized_tab_id]
+        if bool(failed_only):
+            requests = [item for item in requests if item.get("event") == "requestfailed" or item.get("ok") is False]
+        requests = requests[-max(1, int(limit)) :]
+        return {
+            **(self.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self.get_current_url()),
+            "tab_id": normalized_tab_id,
+            "failed_only": bool(failed_only),
+            "count": len(requests),
+            "requests": requests,
+        }
+
+    def clear_debug_buffers(self, tab_id: str = "") -> Dict:
+        normalized_tab_id = str(tab_id or "").strip()
+        if normalized_tab_id:
+            self._console_messages = [item for item in self._console_messages if str(item.get("tab_id", "") or "") != normalized_tab_id]
+            self._page_errors = [item for item in self._page_errors if str(item.get("tab_id", "") or "") != normalized_tab_id]
+            self._network_requests = [item for item in self._network_requests if str(item.get("tab_id", "") or "") != normalized_tab_id]
+        else:
+            self._console_messages.clear()
+            self._page_errors.clear()
+            self._network_requests.clear()
+            self._network_request_ids.clear()
+        return {
+            **(self.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self.get_current_url()),
+            "cleared": True,
+            "tab_id": normalized_tab_id,
+        }
+
+    def diagnose_page(self, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
+        resolved_tab_id = self._get_tab_id(page)
+        console_messages = self.get_console_messages(tab_id=resolved_tab_id, limit=20).get("messages", [])
+        page_errors = self.get_page_errors(tab_id=resolved_tab_id, limit=20).get("errors", [])
+        failed_requests = self.get_network_requests(tab_id=resolved_tab_id, limit=30, failed_only=True).get("requests", [])
+        all_requests = self.get_network_requests(tab_id=resolved_tab_id, limit=30, failed_only=False).get("requests", [])
+        recent_bad_responses = [
+            item
+            for item in all_requests
+            if item.get("event") == "response" and isinstance(item.get("status"), int) and int(item.get("status")) >= 400
+        ]
+        return {
+            **self.get_current_url(tab_id=resolved_tab_id),
+            "tab_id": resolved_tab_id,
+            "diagnosis": {
+                "interaction_context": self._post_action_context("diagnose_page", page=page),
+                "console_messages": console_messages,
+                "page_errors": page_errors,
+                "failed_requests": failed_requests,
+                "bad_responses": recent_bad_responses[-20:],
+            },
+        }
 
     def verify_text(self, text: str) -> Dict:
         try:
-            locator = self.page.get_by_text(str(text))
+            page = self._resolve_page()
+            locator = page.get_by_text(str(text))
             count = locator.count()
             visible = False
             if count:
@@ -847,13 +1320,14 @@ class PatchrightBrowserSession(BrowserSession):
                     visible = False
             if not count or not visible:
                 raise ValueError(f'Text not visible: "{text}"')
-            return {**self.get_current_url(), "verified": True, "text": str(text), "count": count}
+            return {**self.get_current_url(tab_id=self._get_tab_id(page)), "verified": True, "text": str(text), "count": count}
         except Exception as exc:
             return self._action_error_payload("verify_text", exc, text_filter=str(text))
 
     def verify_dialog(self, accessible_name: str = "", text: str = "") -> Dict:
         try:
-            modal_state = self._safe_modal_state()
+            page = self._resolve_page()
+            modal_state = self._safe_modal_state(page=page)
             dialogs = modal_state.get("dialogs", [])
             matched = []
             expected_name = str(accessible_name or "").strip().lower()
@@ -869,7 +1343,7 @@ class PatchrightBrowserSession(BrowserSession):
             if not matched:
                 raise ValueError("Dialog not visible or did not match the expected name/text.")
             return {
-                **self.get_current_url(),
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "verified": True,
                 "count": len(matched),
                 "dialog": matched[0],
@@ -884,17 +1358,27 @@ class PatchrightBrowserSession(BrowserSession):
 
     def verify_active_element(self, target: str = "", by: str = "css", element: str = "") -> Dict:
         try:
-            active = self.get_active_element().get("element", {})
+            page = self._resolve_page()
+            active = self.get_active_element(tab_id=self._get_tab_id(page)).get("element", {})
             if str(target or "").strip():
-                locator = self._resolve_target_locator(target=target, by=by, element=element)
+                locator = self._resolve_target_locator(target=target, by=by, element=element, page=page)
                 is_active = bool(locator.evaluate("el => el === document.activeElement"))
                 if not is_active:
                     raise ValueError(f'Active element did not match target: "{target}"')
                 expected = _describe_locator(locator)
-                return {**self.get_current_url(), "verified": True, "target": str(target), "element": expected}
+                return {
+                    **self.get_current_url(tab_id=self._get_tab_id(page)),
+                    "verified": True,
+                    "target": str(target),
+                    "element": expected,
+                }
             if not active:
                 raise ValueError("No active element found.")
-            return {**self.get_current_url(), "verified": True, "element": self._compact_element_details(active)}
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "verified": True,
+                "element": self._compact_element_details(active),
+            }
         except Exception as exc:
             return self._action_error_payload(
                 "verify_active_element",
@@ -907,13 +1391,14 @@ class PatchrightBrowserSession(BrowserSession):
 
     def verify_target_value(self, target: str, expected_value: str, element: str = "", by: str = "css") -> Dict:
         try:
-            locator = self._resolve_target_locator(target=target, by=by, element=element)
+            page = self._resolve_page()
+            locator = self._resolve_target_locator(target=target, by=by, element=element, page=page)
             details = _describe_locator(locator)
             actual_value = str(details.get("value", "") or "")
             if actual_value != str(expected_value):
                 raise ValueError(f'Value mismatch for target "{target}": expected "{expected_value}", got "{actual_value}"')
             return {
-                **self.get_current_url(),
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "verified": True,
                 "target": str(target or "").strip(),
                 "expected_value": str(expected_value),
@@ -931,13 +1416,14 @@ class PatchrightBrowserSession(BrowserSession):
 
     def verify_target_visible(self, target: str, element: str = "", by: str = "css") -> Dict:
         try:
-            locator = self._resolve_target_locator(target=target, by=by, element=element)
+            page = self._resolve_page()
+            locator = self._resolve_target_locator(target=target, by=by, element=element, page=page)
             visible = bool(locator.is_visible())
             if not visible:
                 raise ValueError(f'Target not visible: "{target}"')
             details = _describe_locator(locator)
             return {
-                **self.get_current_url(),
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "verified": True,
                 "target": str(target or "").strip(),
                 "visible": True,
@@ -955,10 +1441,11 @@ class PatchrightBrowserSession(BrowserSession):
             )
 
     def describe_target(self, target: str, element: str = "", by: str = "css", include_box: bool = True) -> Dict:
-        locator = self._resolve_target_locator(target=target, by=by, element=element)
+        page = self._resolve_page()
+        locator = self._resolve_target_locator(target=target, by=by, element=element, page=page)
         details = _describe_locator(locator)
         result = {
-            **self.get_current_url(),
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
             "target": str(target or "").strip(),
             "visible": bool(locator.is_visible()),
             "enabled": bool(locator.is_enabled()),
@@ -975,10 +1462,12 @@ class PatchrightBrowserSession(BrowserSession):
         by: str = "css",
         text_filter: str = "",
         limit: int = 10,
+        tab_id: str = "",
     ) -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
         resolved_target = str(target or "").strip()
         diagnosis: Dict[str, Any] = {
-            **self.get_current_url(),
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
             "target": resolved_target,
             "element": str(element or "").strip(),
             "by": str(by or "css"),
@@ -1000,7 +1489,7 @@ class PatchrightBrowserSession(BrowserSession):
                 diagnosis["interaction_context"] = self._post_action_context("diagnose_target")
                 return diagnosis
         try:
-            locator = self._resolve_target_locator(resolved_target, by=by, element=element)
+            locator = self._resolve_target_locator(resolved_target, by=by, element=element, page=page)
             details = _describe_locator(locator)
             diagnosis.update(
                 {
@@ -1020,6 +1509,7 @@ class PatchrightBrowserSession(BrowserSession):
                     text_filter=text_filter,
                     limit=max(1, int(limit)),
                     include_boxes=True,
+                    tab_id=self._get_tab_id(page),
                 )
                 diagnosis["subtree_candidates"] = subtree_candidates.get("candidates", [])
             except Exception as exc:
@@ -1033,6 +1523,7 @@ class PatchrightBrowserSession(BrowserSession):
                         selector=resolved_target,
                         by=by,
                         limit=max(1, int(limit)),
+                        tab_id=self._get_tab_id(page),
                     )
                 except Exception as inspect_exc:
                     diagnosis["selector_matches_error"] = str(inspect_exc)
@@ -1041,15 +1532,17 @@ class PatchrightBrowserSession(BrowserSession):
                     text_filter=text_filter or resolved_target,
                     limit=max(1, int(limit)),
                     include_boxes=True,
+                    tab_id=self._get_tab_id(page),
                 ).get("candidates", [])
             except Exception as candidate_exc:
                 diagnosis["page_candidates_error"] = str(candidate_exc)
-        diagnosis["interaction_context"] = self._post_action_context("diagnose_target")
+        diagnosis["interaction_context"] = self._post_action_context("diagnose_target", page=page)
         return diagnosis
 
     def verify_element(self, role: str, accessible_name: str) -> Dict:
         try:
-            locator = self.page.get_by_role(str(role), name=str(accessible_name))
+            page = self._resolve_page()
+            locator = page.get_by_role(str(role), name=str(accessible_name))
             count = locator.count()
             if not count:
                 raise ValueError(f'Element not found: role="{role}" accessible_name="{accessible_name}"')
@@ -1057,7 +1550,7 @@ class PatchrightBrowserSession(BrowserSession):
             if not first.is_visible():
                 raise ValueError(f'Element not visible: role="{role}" accessible_name="{accessible_name}"')
             resolved = {
-                **self.get_current_url(),
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "verified": True,
                 "role": str(role),
                 "accessible_name": str(accessible_name),
@@ -1076,20 +1569,27 @@ class PatchrightBrowserSession(BrowserSession):
             )
 
     def highlight_target(self, target: str, element: str = "", by: str = "css", style: str = "") -> Dict:
-        locator = self._resolve_target_locator(target=target, by=by, element=element)
+        page = self._resolve_page()
+        locator = self._resolve_target_locator(target=target, by=by, element=element, page=page)
         kwargs = {}
         if str(style or "").strip():
             kwargs["style"] = str(style).strip()
         locator.highlight(**kwargs)
-        return {**self.get_current_url(), "highlighted": True, "target": str(target or "").strip()}
+        return {
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
+            "highlighted": True,
+            "target": str(target or "").strip(),
+        }
 
     def clear_highlights(self) -> Dict:
-        self.page.hide_highlight()
-        return {**self.get_current_url(), "cleared": True}
+        page = self._resolve_page()
+        page.hide_highlight()
+        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "cleared": True}
 
     def mouse_move_xy(self, x: float, y: float) -> Dict:
-        self.page.mouse.move(float(x), float(y))
-        return {**self.get_current_url(), "moved": True, "x": float(x), "y": float(y)}
+        page = self._resolve_page()
+        page.mouse.move(float(x), float(y))
+        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "moved": True, "x": float(x), "y": float(y)}
 
     def mouse_click_xy(
         self,
@@ -1099,7 +1599,8 @@ class PatchrightBrowserSession(BrowserSession):
         click_count: int = 1,
         delay_ms: int = 0,
     ) -> Dict:
-        self.page.mouse.click(
+        page = self._resolve_page()
+        page.mouse.click(
             float(x),
             float(y),
             button=str(button or "left"),
@@ -1107,36 +1608,38 @@ class PatchrightBrowserSession(BrowserSession):
             delay=max(0, int(delay_ms)),
         )
         return {
-            **self.get_current_url(),
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
             "clicked": True,
             "x": float(x),
             "y": float(y),
             "button": str(button or "left"),
             "click_count": max(1, int(click_count)),
-            "post_action_context": self._post_action_context("mouse_click_xy"),
+            "post_action_context": self._post_action_context("mouse_click_xy", page=page),
         }
 
     def mouse_drag_xy(self, start_x: float, start_y: float, end_x: float, end_y: float) -> Dict:
-        self.page.mouse.move(float(start_x), float(start_y))
-        self.page.mouse.down()
-        self.page.mouse.move(float(end_x), float(end_y))
-        self.page.mouse.up()
+        page = self._resolve_page()
+        page.mouse.move(float(start_x), float(start_y))
+        page.mouse.down()
+        page.mouse.move(float(end_x), float(end_y))
+        page.mouse.up()
         return {
-            **self.get_current_url(),
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
             "dragged": True,
             "start_x": float(start_x),
             "start_y": float(start_y),
             "end_x": float(end_x),
             "end_y": float(end_y),
-            "post_action_context": self._post_action_context("mouse_drag_xy"),
+            "post_action_context": self._post_action_context("mouse_drag_xy", page=page),
         }
 
-    def screenshot(self, filename: str = "") -> Dict:
+    def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
         output_path = str(filename or "").strip()
         if not output_path:
             output_path = os.path.join(tempfile.gettempdir(), "chromium-advanced-patchright-session.png")
-        self.page.screenshot(path=output_path, full_page=True)
-        return {**self.get_current_url(), "path": output_path}
+        page.screenshot(path=output_path, full_page=True)
+        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "path": output_path}
 
     def close(self) -> None:
         try:
@@ -1185,16 +1688,45 @@ class PatchrightEngine(BrowserEngine):
         if isinstance(extra_args, list):
             args.extend([item for item in extra_args if item])
 
-        playwright_ctx = sync_playwright().start()
-        print(f"[{now_text()}] [PATCHRIGHT] playwright started: profile={profile_name}", flush=True)
-        browser_context = playwright_ctx.chromium.launch_persistent_context(
-            user_data_dir=user_data_root,
-            executable_path=chromium_binary,
-            headless=False,
-            args=args,
-            no_viewport=True,
-        )
-        print(f"[{now_text()}] [PATCHRIGHT] persistent context launched: profile={profile_name}", flush=True)
+        last_error = None
+        playwright_ctx = None
+        browser_context = None
+        for attempt in range(1, 3):
+            try:
+                playwright_ctx = sync_playwright().start()
+                print(
+                    f"[{now_text()}] [PATCHRIGHT] playwright started: profile={profile_name} attempt={attempt}",
+                    flush=True,
+                )
+                browser_context = playwright_ctx.chromium.launch_persistent_context(
+                    user_data_dir=user_data_root,
+                    executable_path=chromium_binary,
+                    headless=False,
+                    args=args,
+                    no_viewport=True,
+                )
+                print(
+                    f"[{now_text()}] [PATCHRIGHT] persistent context launched: profile={profile_name} attempt={attempt}",
+                    flush=True,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                print(
+                    f"[{now_text()}] [PATCHRIGHT] launch attempt failed: profile={profile_name} attempt={attempt} error={exc}",
+                    flush=True,
+                )
+                if playwright_ctx is not None:
+                    try:
+                        playwright_ctx.stop()
+                    except Exception:
+                        pass
+                    playwright_ctx = None
+                if attempt >= 2:
+                    raise
+                time.sleep(1.0)
+        if browser_context is None or playwright_ctx is None:
+            raise RuntimeError(f"Patchright failed to launch for profile {profile_name}: {last_error}")
         page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
         extensions_page = bool(launch_settings.get("open_extensions_page", False))
         check_url = str(launch_settings.get("check_url", "")).strip()
