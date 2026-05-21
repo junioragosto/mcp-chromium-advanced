@@ -16,7 +16,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from PyQt5.QtCore import QProcess, QThread, QTimer, Qt, QTime, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon
+from PyQt5.QtGui import QColor, QGuiApplication, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -331,8 +331,9 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_stop_requested = False
 
         self.setWindowTitle(self.tr("window_title"))
-        self.resize(980, 720)
+        self.resize(860, 680)
         self.init_ui()
+        self.fit_window_to_screen()
         self.retranslate_ui()
         self.setup_tray_icon()
         self.refresh_app_auto_start_checkbox()
@@ -352,6 +353,43 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_watchdog_timer = QTimer(self)
         self.mcp_watchdog_timer.timeout.connect(self.on_mcp_watchdog_timer)
         self.mcp_watchdog_timer.start(MCP_WATCHDOG_INTERVAL_MS)
+
+    def _current_screen_available_geometry(self):
+        screen = self.screen()
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return None
+        return screen.availableGeometry()
+
+    def fit_window_to_screen(self):
+        available = self._current_screen_available_geometry()
+        if available is None:
+            return
+        max_width = max(720, min(available.width() - 40, 1100))
+        max_height = max(560, min(available.height() - 40, 820))
+        desired_width = min(self.width(), max_width)
+        desired_height = min(self.height(), max_height)
+        if desired_width <= 0 or desired_height <= 0:
+            desired_width = max_width
+            desired_height = max_height
+        self.resize(desired_width, desired_height)
+
+        x = self.x()
+        y = self.y()
+        if x < available.left():
+            x = available.left()
+        if y < available.top():
+            y = available.top()
+        if x + self.width() > available.right():
+            x = max(available.left(), available.right() - self.width())
+        if y + self.height() > available.bottom():
+            y = max(available.top(), available.bottom() - self.height())
+        self.move(x, y)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.fit_window_to_screen()
 
     def tr(self, key: str, fallback: str = "") -> str:
         lang = self.current_language if getattr(self, "current_language", "") in I18N else "en"
@@ -1870,6 +1908,7 @@ class ChromiumManagerWindow(QMainWindow):
 
     def show_from_tray(self):
         self.showNormal()
+        self.fit_window_to_screen()
         self.raise_()
         self.activateWindow()
         self.update_tray_actions()
