@@ -1,5 +1,7 @@
 import argparse
+import ctypes
 import os
+import traceback
 from typing import Literal, Optional
 
 from fastmcp import FastMCP
@@ -14,6 +16,29 @@ MCP_INSTRUCTIONS = (
 )
 
 DEFAULT_TIMEOUT_SECONDS = 20
+ERROR_ALREADY_EXISTS = 183
+
+
+def acquire_single_instance_guard(name: str):
+    if os.name != "nt":
+        return None
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, False, str(name))
+    if not handle:
+        raise ctypes.WinError()
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return None
+    return handle
+
+
+def release_single_instance_guard(handle) -> None:
+    if not handle or os.name != "nt":
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        pass
 
 
 def build_server(config_path: Optional[str] = None) -> FastMCP:
@@ -48,7 +73,29 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
     @server.tool
     def start_profile_session(profile_name: str, reuse_existing: bool = False, engine: str = "") -> dict:
         """Start or reuse a real logged-in browser session for the specified profile."""
-        result = session_manager.start_session(profile_name=profile_name, reuse_existing=reuse_existing, engine_name=engine)
+        print(
+            (
+                f"[{now_text()}] [MCP-WORKER] start session request: "
+                f"profile={profile_name} reuse_existing={reuse_existing} engine={engine or '-'}"
+            ),
+            flush=True,
+        )
+        try:
+            result = session_manager.start_session(
+                profile_name=profile_name,
+                reuse_existing=reuse_existing,
+                engine_name=engine,
+            )
+        except Exception as exc:
+            print(
+                (
+                    f"[{now_text()}] [MCP-WORKER] start session failed: "
+                    f"profile={profile_name} engine={engine or '-'} error={exc}"
+                ),
+                flush=True,
+            )
+            print(traceback.format_exc(), flush=True)
+            raise
         print(
             (
                 f"[{now_text()}] [MCP-WORKER] session "
@@ -528,22 +575,32 @@ def main() -> None:
     args = parser.parse_args()
 
     config_path = args.config_path or None
-    server = build_server(config_path=config_path)
     transport = str(args.transport or "stdio").strip() or "stdio"
-    if transport == "stdio":
-        server.run(transport)
-        return
+    guard_name = ""
+    if transport != "stdio" and args.port:
+        guard_name = f"Local\\ChromiumMcpWorker-{int(args.port)}"
+    guard = acquire_single_instance_guard(guard_name) if guard_name else None
+    if guard_name and guard is None:
+        raise SystemExit(f"MCP worker already running on configured port {int(args.port)}")
 
-    run_kwargs = {}
-    if args.host:
-        run_kwargs["host"] = args.host
-    if args.port:
-        run_kwargs["port"] = int(args.port)
-    if args.path:
-        run_kwargs["path"] = args.path
-    if args.log_level:
-        run_kwargs["log_level"] = args.log_level
-    server.run(transport, **run_kwargs)
+    try:
+        server = build_server(config_path=config_path)
+        if transport == "stdio":
+            server.run(transport)
+            return
+
+        run_kwargs = {}
+        if args.host:
+            run_kwargs["host"] = args.host
+        if args.port:
+            run_kwargs["port"] = int(args.port)
+        if args.path:
+            run_kwargs["path"] = args.path
+        if args.log_level:
+            run_kwargs["log_level"] = args.log_level
+        server.run(transport, **run_kwargs)
+    finally:
+        release_single_instance_guard(guard)
 
 
 if __name__ == "__main__":

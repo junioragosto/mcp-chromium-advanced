@@ -12,6 +12,7 @@ from chromium_advanced.chromium_profile_lib import (
     get_lock_path,
     load_app_config,
     normalize_config,
+    now_text,
 )
 
 
@@ -285,9 +286,25 @@ class SessionManager:
             self._starting_started_at = time.time()
 
         try:
+            print(
+                f"[{now_text()}] [SESSION] start_session begin: profile={profile_name} engine={resolved_engine_name}",
+                flush=True,
+            )
             ensure_profile_bookmarks_initialized(config, profile_name)
+            print(
+                f"[{now_text()}] [SESSION] bookmarks ready: profile={profile_name}",
+                flush=True,
+            )
             engine = create_browser_engine(resolved_engine_name)
+            print(
+                f"[{now_text()}] [SESSION] engine created: profile={profile_name} engine={resolved_engine_name}",
+                flush=True,
+            )
             browser_session = engine.create_session(config, profile_name)
+            print(
+                f"[{now_text()}] [SESSION] browser session created: profile={profile_name} engine={resolved_engine_name}",
+                flush=True,
+            )
             session_id = f"session-{uuid.uuid4().hex[:12]}"
             now = time.time()
             session = SessionRecord(

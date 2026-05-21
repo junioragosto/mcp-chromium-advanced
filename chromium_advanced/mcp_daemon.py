@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import ctypes
 import multiprocessing
 import os
 import platform
@@ -29,6 +30,7 @@ from chromium_advanced.chromium_profile_lib import (
 HEALTHCHECK_TIMEOUT_SECONDS = 0.5
 WORKER_START_TIMEOUT_SECONDS = 15.0
 WATCHDOG_INTERVAL_SECONDS = 2.0
+ERROR_ALREADY_EXISTS = 183
 
 
 def normalize_path(path: str) -> str:
@@ -36,6 +38,28 @@ def normalize_path(path: str) -> str:
     if not text.startswith("/"):
         text = "/" + text
     return text
+
+
+def acquire_single_instance_guard(name: str):
+    if platform.system() != "Windows":
+        return None
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, False, str(name))
+    if not handle:
+        raise ctypes.WinError()
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return None
+    return handle
+
+
+def release_single_instance_guard(handle) -> None:
+    if not handle or platform.system() != "Windows":
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        pass
 
 
 def can_connect(host: str, port: int, timeout: float = HEALTHCHECK_TIMEOUT_SECONDS) -> bool:
@@ -498,24 +522,30 @@ def main() -> None:
     config_path = args.config_path or os.environ.get("CHROMIUM_MCP_CONFIG_PATH", "").strip() or get_default_config_path()
     if not config_path:
         raise SystemExit("config path is required")
+    guard = acquire_single_instance_guard(f"Local\\ChromiumMcpDaemon-{int(args.port or 28888)}")
+    if guard is None:
+        raise SystemExit(f"MCP daemon already running on configured port {int(args.port or 28888)}")
 
-    app = create_daemon_app(
-        config_path=config_path,
-        host=str(args.host or "127.0.0.1").strip() or "127.0.0.1",
-        port=int(args.port or 28888),
-        path=str(args.path or "/mcp").strip() or "/mcp",
-        transport=str(args.transport or "streamable-http").strip() or "streamable-http",
-        log_level=str(args.log_level or "info").strip() or "info",
-        worker_port=int(args.worker_port or 28889),
-        idle_timeout_seconds=int(args.idle_timeout_seconds or 60),
-    )
-    uvicorn.run(
-        app,
-        host=str(args.host or "127.0.0.1"),
-        port=int(args.port or 28888),
-        log_level=str(args.log_level or "info"),
-        log_config=None,
-    )
+    try:
+        app = create_daemon_app(
+            config_path=config_path,
+            host=str(args.host or "127.0.0.1").strip() or "127.0.0.1",
+            port=int(args.port or 28888),
+            path=str(args.path or "/mcp").strip() or "/mcp",
+            transport=str(args.transport or "streamable-http").strip() or "streamable-http",
+            log_level=str(args.log_level or "info").strip() or "info",
+            worker_port=int(args.worker_port or 28889),
+            idle_timeout_seconds=int(args.idle_timeout_seconds or 60),
+        )
+        uvicorn.run(
+            app,
+            host=str(args.host or "127.0.0.1"),
+            port=int(args.port or 28888),
+            log_level=str(args.log_level or "info"),
+            log_config=None,
+        )
+    finally:
+        release_single_instance_guard(guard)
 
 
 if __name__ == "__main__":

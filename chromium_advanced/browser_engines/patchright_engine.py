@@ -7,6 +7,7 @@ import tempfile
 from typing import Any, Dict
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
+from chromium_advanced.chromium_profile_lib import now_text
 
 
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
@@ -1159,6 +1160,13 @@ class PatchrightEngine(BrowserEngine):
             raise FileNotFoundError(f"chromium browser not found: {chromium_binary or paths.get('chromium_dir', '')}")
         if not os.path.isdir(user_data_root):
             raise FileNotFoundError(f"UserData root not found: {user_data_root}")
+        print(
+            (
+                f"[{now_text()}] [PATCHRIGHT] create_session begin: "
+                f"profile={profile_name} chromium={chromium_binary} user_data_root={user_data_root}"
+            ),
+            flush=True,
+        )
 
         # Keep Patchright on the smallest validated argument set first.
         # Its Chromium startup behavior differs from Selenium/uc, so not every
@@ -1178,6 +1186,7 @@ class PatchrightEngine(BrowserEngine):
             args.extend([item for item in extra_args if item])
 
         playwright_ctx = sync_playwright().start()
+        print(f"[{now_text()}] [PATCHRIGHT] playwright started: profile={profile_name}", flush=True)
         browser_context = playwright_ctx.chromium.launch_persistent_context(
             user_data_dir=user_data_root,
             executable_path=chromium_binary,
@@ -1185,6 +1194,7 @@ class PatchrightEngine(BrowserEngine):
             args=args,
             no_viewport=True,
         )
+        print(f"[{now_text()}] [PATCHRIGHT] persistent context launched: profile={profile_name}", flush=True)
         page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
         extensions_page = bool(launch_settings.get("open_extensions_page", False))
         check_url = str(launch_settings.get("check_url", "")).strip()
