@@ -35,6 +35,7 @@ BOOKMARK_BAR_FOLDER_NAMES = {"书签栏", "Bookmarks Bar", "Bookmarks bar", "Boo
 PROFILE_MARKER_URL = "https://www.google.com/generate_204"
 LEGACY_CHATGPT_PROMPT = "Reply with one word: alive"
 SYSTEM_NAME = platform.system()
+KEEPALIVE_SITE_ORDER = ("chatgpt", "gmail", "google", "github")
 DEFAULT_CHATGPT_PROMPTS = [
     "I just got back. Reply with a short greeting.",
     "I am checking in briefly. Reply with one short sentence.",
@@ -261,6 +262,7 @@ def build_default_config() -> Dict:
                 "chatgpt": True,
                 "gmail": True,
                 "google": True,
+                "github": False,
             },
             "schedule_time": "09:00",
             "headless": False,
@@ -328,12 +330,35 @@ def safe_copy(value):
     return copy.deepcopy(value)
 
 
-def normalize_profile_entry(entry: Dict) -> Dict:
+def normalize_keepalive_site_flags(value, default: bool = False) -> Dict[str, bool]:
+    flags = {site_name: bool(default) for site_name in KEEPALIVE_SITE_ORDER}
+    if isinstance(value, dict):
+        for site_name in KEEPALIVE_SITE_ORDER:
+            if site_name in value:
+                flags[site_name] = bool(value.get(site_name))
+    return flags
+
+
+def format_keepalive_sites_text(site_flags: Dict, translate: Optional[Callable[[str, str], str]] = None) -> str:
+    tr = translate or (lambda key, fallback="": fallback or key)
+    labels = []
+    normalized = normalize_keepalive_site_flags(site_flags, default=False)
+    for site_name in KEEPALIVE_SITE_ORDER:
+        if normalized.get(site_name):
+            labels.append(tr(f"site_name_{site_name}", site_name.title()))
+    return ", ".join(labels) if labels else "-"
+
+
+def normalize_profile_entry(entry: Dict, legacy_keepalive_sites: Optional[Dict] = None) -> Dict:
     normalized = dict(entry) if isinstance(entry, dict) else {}
     normalized["profile_name"] = str(normalized.get("profile_name", "")).strip()
     normalized["account"] = str(normalized.get("account", "")).strip()
     normalized["notes"] = str(normalized.get("notes", "")).strip()
     normalized["keepalive_enabled"] = bool(normalized.get("keepalive_enabled", False))
+    if "keepalive_sites" in normalized:
+        normalized["keepalive_sites"] = normalize_keepalive_site_flags(normalized.get("keepalive_sites"), default=False)
+    else:
+        normalized["keepalive_sites"] = normalize_keepalive_site_flags(legacy_keepalive_sites, default=False)
     normalized["last_launch_at"] = str(normalized.get("last_launch_at", "")).strip()
     normalized["last_keepalive_at"] = str(normalized.get("last_keepalive_at", "")).strip()
     normalized["last_keepalive_status"] = str(normalized.get("last_keepalive_status", "never")).strip() or "never"
@@ -359,6 +384,13 @@ def merge_profile_entries(existing: Dict, incoming: Dict) -> Dict:
 
     if candidate.get("keepalive_enabled"):
         merged["keepalive_enabled"] = True
+
+    merged_sites = normalize_keepalive_site_flags(merged.get("keepalive_sites"), default=False)
+    candidate_sites = normalize_keepalive_site_flags(candidate.get("keepalive_sites"), default=False)
+    for site_name in KEEPALIVE_SITE_ORDER:
+        if candidate_sites.get(site_name):
+            merged_sites[site_name] = True
+    merged["keepalive_sites"] = merged_sites
 
     if candidate.get("last_keepalive_status") and candidate.get("last_keepalive_status") != "never":
         merged["last_keepalive_status"] = candidate["last_keepalive_status"]
@@ -428,6 +460,10 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["mcp"]["idle_timeout_seconds"] = loaded_mcp.get("idle_timeout_seconds")
 
     loaded_keepalive = loaded.get("keepalive", {})
+    legacy_keepalive_sites = normalize_keepalive_site_flags(
+        loaded_keepalive.get("enabled_sites", normalized["keepalive"]["enabled_sites"]) if isinstance(loaded_keepalive, dict) else {},
+        default=False,
+    )
     if isinstance(loaded_keepalive, dict):
         enabled_sites = loaded_keepalive.get("enabled_sites", {})
         if isinstance(enabled_sites, dict):
@@ -436,6 +472,7 @@ def normalize_config(config: Optional[Dict]) -> Dict:
                     "chatgpt": bool(enabled_sites.get("chatgpt", normalized["keepalive"]["enabled_sites"]["chatgpt"])),
                     "gmail": bool(enabled_sites.get("gmail", normalized["keepalive"]["enabled_sites"]["gmail"])),
                     "google": bool(enabled_sites.get("google", normalized["keepalive"]["enabled_sites"]["google"])),
+                    "github": bool(enabled_sites.get("github", normalized["keepalive"]["enabled_sites"]["github"])),
                 }
             )
 
@@ -466,7 +503,7 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     profiles = loaded.get("profiles", [])
     if isinstance(profiles, list):
         normalized["profiles"] = dedupe_profile_entries([
-            normalize_profile_entry(item)
+            normalize_profile_entry(item, legacy_keepalive_sites)
             for item in profiles
             if isinstance(item, dict) and str(item.get("profile_name", "")).strip()
         ])
@@ -563,6 +600,7 @@ def sync_profiles_with_user_data(config: Dict) -> Dict:
                         "profile_name": profile_name,
                         "account": "",
                         "keepalive_enabled": False,
+                        "keepalive_sites": {},
                     }
                 )
             )
@@ -964,30 +1002,39 @@ def detect_fingerprint_extension_dir(zip_path: str) -> str:
     return ""
 
 
-def build_profile_detail_text(profile: Dict) -> str:
+def build_profile_detail_text(profile: Dict, translate: Optional[Callable[[str, str], str]] = None) -> str:
+    tr = translate or (lambda key, fallback="": fallback or key)
     details = profile.get("last_keepalive_details", {}) or {}
     site_parts = []
-    for site_name in ("chatgpt", "gmail", "google"):
+    for site_name in KEEPALIVE_SITE_ORDER:
         info = details.get(site_name, {})
         if not info:
             continue
         status = info.get("status", "unknown")
         message = info.get("message", "")
-        site_parts.append(f"{site_name}: {status} {message}".strip())
+        site_label = tr(f"site_name_{site_name}", site_name.title())
+        site_parts.append(f"{site_label}: {status} {message}".strip())
 
     return "\n".join(
         [
-            f"Profile: {profile.get('profile_name', '')}",
-            f"Account: {profile.get('account', '') or '-'}",
-            f"KeepAlive Enabled: {'Yes' if profile.get('keepalive_enabled') else 'No'}",
-            f"Last Launch: {profile.get('last_launch_at', '') or '-'}",
-            f"Last KeepAlive: {profile.get('last_keepalive_at', '') or '-'}",
-            f"Last Status: {profile.get('last_keepalive_status', '') or '-'}",
-            f"Last Message: {profile.get('last_keepalive_message', '') or '-'}",
-            f"Site Detail: {' | '.join(site_parts) if site_parts else '-'}",
-            f"Notes: {profile.get('notes', '') or '-'}",
+            f"{tr('detail_profile', 'Profile')}: {profile.get('profile_name', '')}",
+            f"{tr('detail_account', 'Account')}: {profile.get('account', '') or '-'}",
+            f"{tr('detail_keepalive_enabled', 'Keepalive Enabled')}: {tr('common_yes', 'Yes') if profile.get('keepalive_enabled') else tr('common_no', 'No')}",
+            f"{tr('detail_keepalive_sites', 'Enabled Sites')}: {format_keepalive_sites_text(profile.get('keepalive_sites', {}), tr)}",
+            f"{tr('detail_last_launch', 'Last Launch')}: {profile.get('last_launch_at', '') or '-'}",
+            f"{tr('detail_last_keepalive', 'Last Keepalive')}: {profile.get('last_keepalive_at', '') or '-'}",
+            f"{tr('detail_last_status', 'Last Status')}: {profile.get('last_keepalive_status', '') or '-'}",
+            f"{tr('detail_last_message', 'Last Message')}: {profile.get('last_keepalive_message', '') or '-'}",
+            f"{tr('detail_site_detail', 'Site Detail')}: {' | '.join(site_parts) if site_parts else '-'}",
+            f"{tr('detail_notes', 'Notes')}: {profile.get('notes', '') or '-'}",
         ]
     )
+
+
+class KeepAliveLoginRequiredError(RuntimeError):
+    def __init__(self, site_name: str, message: str):
+        super().__init__(message)
+        self.site_name = site_name
 
 
 def normalize_fs_path(path_value: str) -> str:
@@ -1508,6 +1555,14 @@ def keepalive_google(
     logger: Optional[Callable[[str], None]],
     stop_controller: Optional[KeepAliveStopController] = None,
 ) -> Dict:
+    timeout = int(settings["page_timeout_seconds"])
+    driver.get("https://myaccount.google.com/")
+    WebDriverWait(driver, timeout).until(lambda current: current.execute_script("return document.readyState") == "complete")
+
+    current_url = driver.current_url.lower()
+    if "accounts.google.com" in current_url or "signin" in current_url:
+        raise KeepAliveLoginRequiredError("google", "Google account is not signed in for this profile.")
+
     driver.get("https://www.google.com/ncr")
     dismiss_google_consent_if_needed(driver)
 
@@ -1517,7 +1572,7 @@ def keepalive_google(
             (By.CSS_SELECTOR, "textarea[name='q']"),
             (By.CSS_SELECTOR, "input[name='q']"),
         ],
-        int(settings["page_timeout_seconds"]),
+        timeout,
     )
     query = str(settings.get("google_query", "")).strip() or "profile keepalive"
     try:
@@ -1551,7 +1606,7 @@ def keepalive_gmail(
 
     current_url = driver.current_url.lower()
     if "accounts.google.com" in current_url or "signin" in current_url:
-        raise RuntimeError("Gmail is not signed in for this profile.")
+        raise KeepAliveLoginRequiredError("gmail", "Gmail is not signed in for this profile.")
 
     try:
         wait_for_any(
@@ -1609,7 +1664,7 @@ def keepalive_chatgpt(
 
     current_url = driver.current_url.lower()
     if "auth" in current_url or "login" in current_url:
-        raise RuntimeError("ChatGPT is not signed in for this profile.")
+        raise KeepAliveLoginRequiredError("chatgpt", "ChatGPT is not signed in for this profile.")
 
     conversation_title = open_chatgpt_existing_conversation(
         driver,
@@ -1678,6 +1733,45 @@ def keepalive_chatgpt(
     }
 
 
+def keepalive_github(
+    driver,
+    settings: Dict,
+    logger: Optional[Callable[[str], None]],
+    stop_controller: Optional[KeepAliveStopController] = None,
+) -> Dict:
+    driver.get("https://github.com/")
+    timeout = int(settings["page_timeout_seconds"])
+    dwell_seconds = int(settings.get("site_dwell_seconds", 6))
+    WebDriverWait(driver, timeout).until(lambda current: current.execute_script("return document.readyState") == "complete")
+
+    current_url = driver.current_url.lower()
+    if "/login" in current_url or "/session" in current_url:
+        raise KeepAliveLoginRequiredError("github", "GitHub is not signed in for this profile.")
+
+    user_login = str(
+        driver.execute_script(
+            "const meta = document.querySelector('meta[name=\"user-login\"]'); return meta ? meta.content || '' : '';"
+        )
+        or ""
+    ).strip()
+    if not user_login:
+        sign_in_links = driver.find_elements(By.CSS_SELECTOR, "a[href='/login'], a[data-analytics-event*='login']")
+        if sign_in_links:
+            raise KeepAliveLoginRequiredError("github", "GitHub is not signed in for this profile.")
+
+    driver.get("https://github.com/pulls")
+    WebDriverWait(driver, timeout).until(lambda current: current.execute_script("return document.readyState") == "complete")
+    current_url = driver.current_url.lower()
+    if "/login" in current_url or "/session" in current_url:
+        raise KeepAliveLoginRequiredError("github", "GitHub is not signed in for this profile.")
+
+    if dwell_seconds > 0:
+        log_message(logger, f"GitHub pulls page loaded; staying {dwell_seconds}s")
+        interruptible_sleep(dwell_seconds, stop_controller)
+    log_message(logger, "GitHub pulls page loaded.")
+    return {"status": "success", "message": f"pull requests page loaded and stayed {dwell_seconds}s"}
+
+
 def create_driver_for_profile(config: Dict, profile_name: str):
     paths = config["paths"]
     keepalive = config["keepalive"]
@@ -1739,10 +1833,15 @@ def run_profile_keepalive(
     stop_controller: Optional[KeepAliveStopController] = None,
 ) -> Dict:
     settings = config["keepalive"]
-    enabled_sites = settings.get("enabled_sites", {})
+    profile_entry = next(
+        (item for item in config.get("profiles", []) if item.get("profile_name") == profile_name),
+        {},
+    )
+    enabled_sites = normalize_keepalive_site_flags(profile_entry.get("keepalive_sites", {}), default=False)
     driver = None
     site_results: Dict[str, Dict[str, str]] = {}
     failed_sites = []
+    disabled_sites = []
 
     try:
         if stop_controller:
@@ -1760,6 +1859,17 @@ def run_profile_keepalive(
             actions.append(("gmail", keepalive_gmail))
         if enabled_sites.get("google"):
             actions.append(("google", keepalive_google))
+        if enabled_sites.get("github"):
+            actions.append(("github", keepalive_github))
+
+        if not actions:
+            return {
+                "profile_name": profile_name,
+                "status": "skipped",
+                "message": "no keepalive sites checked for this profile",
+                "details": {},
+                "disabled_sites": [],
+            }
 
         for site_name, action in actions:
             if stop_controller:
@@ -1767,11 +1877,17 @@ def run_profile_keepalive(
             try:
                 log_message(logger, f"{profile_name}: start {site_name}")
                 result = action(driver, settings, logger, stop_controller)
+                result["signed_in"] = True
                 site_results[site_name] = result
                 if stop_controller:
                     stop_controller.check_or_raise()
             except KeepAliveStoppedError:
                 raise
+            except KeepAliveLoginRequiredError as exc:
+                failed_sites.append(site_name)
+                disabled_sites.append(site_name)
+                site_results[site_name] = {"status": "failed", "message": str(exc), "signed_in": False}
+                log_message(logger, f"{profile_name}: {site_name} signed out; unchecked for next run")
             except Exception as exc:
                 if stop_controller and stop_controller.should_stop():
                     raise KeepAliveStoppedError("keepalive stopped by user") from exc
@@ -1794,6 +1910,7 @@ def run_profile_keepalive(
             "status": summary_status,
             "message": summary_message,
             "details": site_results,
+            "disabled_sites": disabled_sites,
         }
     finally:
         if stop_controller:
@@ -1894,6 +2011,7 @@ def run_keepalive_job(
         profile_results = []
         any_failed = False
         any_partial = False
+        any_skipped = False
 
         try:
             for index, item in enumerate(target_profiles):
@@ -1942,6 +2060,10 @@ def run_keepalive_job(
                 for profile in config["profiles"]:
                     if profile.get("profile_name") != profile_name:
                         continue
+                    profile_sites = normalize_keepalive_site_flags(profile.get("keepalive_sites", {}), default=False)
+                    for site_name in result.get("disabled_sites", []):
+                        profile_sites[site_name] = False
+                    profile["keepalive_sites"] = profile_sites
                     profile["last_keepalive_at"] = now_text()
                     profile["last_keepalive_status"] = result["status"]
                     profile["last_keepalive_message"] = result["message"]
@@ -1952,6 +2074,8 @@ def run_keepalive_job(
                     any_failed = True
                 elif result["status"] == "partial":
                     any_partial = True
+                elif result["status"] == "skipped":
+                    any_skipped = True
 
                 profile_results.append(result)
                 save_app_config(config, path)
@@ -1987,6 +2111,12 @@ def run_keepalive_job(
         elif any_partial:
             final_status = "partial"
             final_message = "at least one profile partially failed"
+        elif profile_results and all(item.get("status") == "skipped" for item in profile_results):
+            final_status = "skipped"
+            final_message = "all selected profiles were skipped"
+        elif any_skipped:
+            final_status = "partial"
+            final_message = "at least one profile was skipped"
         else:
             final_status = "success"
             final_message = "all selected profiles finished"

@@ -27,6 +27,12 @@
       "profile_name": "Profile 1",
       "account": "account-label@example.com",
       "keepalive_enabled": false,
+      "keepalive_sites": {
+        "chatgpt": false,
+        "gmail": false,
+        "google": false,
+        "github": false
+      },
       "notes": "Example entry only. Remove before real use.",
       "last_launch_at": "",
       "last_keepalive_at": "",
@@ -39,7 +45,8 @@
     "enabled_sites": {
       "chatgpt": true,
       "gmail": true,
-      "google": true
+      "google": true,
+      "github": false
     },
     "schedule_time": "09:00",
     "headless": false,

@@ -50,6 +50,7 @@ from PyQt5.QtWidgets import (
 
 from chromium_advanced.chromium_profile_lib import (
     APP_NAME,
+    KEEPALIVE_SITE_ORDER,
     LEGACY_CHATGPT_PROMPT,
     KeepAliveStopController,
     build_profile_detail_text,
@@ -425,12 +426,13 @@ class ChromiumManagerWindow(QMainWindow):
         self.table = QTableWidget()
         self.table.setMinimumHeight(0)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Profile", "Account", "Keepalive", "Actions"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Profile", "Account", "Logged In", "Keepalive", "Actions"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.cellDoubleClicked.connect(self.on_table_double_clicked)
@@ -507,16 +509,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.settings_group = QGroupBox()
         self.settings_layout = QFormLayout(self.settings_group)
 
-        self.site_chatgpt = QCheckBox("ChatGPT")
-        self.site_gmail = QCheckBox("Gmail")
-        self.site_google = QCheckBox("Google")
-        site_row = QHBoxLayout()
-        site_row.addWidget(self.site_chatgpt)
-        site_row.addWidget(self.site_gmail)
-        site_row.addWidget(self.site_google)
-        site_row.addStretch()
-        self.site_row_widget = QWidget()
-        self.site_row_widget.setLayout(site_row)
+        self.site_scope_hint = QLabel()
+        self.site_scope_hint.setWordWrap(True)
 
         self.keepalive_headless = QCheckBox()
         self.keepalive_timeout = QSpinBox()
@@ -539,7 +533,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.schedule_time.setToolTip(self.tr("schedule_time_tooltip"))
         self.chatgpt_conversation_hint.setPlaceholderText(self.tr("chatgpt_hint_placeholder"))
 
-        self.settings_layout.addRow(self.tr("site_label"), self.site_row_widget)
+        self.settings_layout.addRow(self.tr("site_label"), self.site_scope_hint)
         self.settings_layout.addRow(self.tr("headless"), self.keepalive_headless)
         self.settings_layout.addRow(self.tr("page_timeout"), self.keepalive_timeout)
         self.settings_layout.addRow(self.tr("between_profiles"), self.keepalive_between_profiles)
@@ -907,7 +901,7 @@ class ChromiumManagerWindow(QMainWindow):
         if not profile:
             self.selected_profile_status.setPlainText(self.tr("status_no_profile_selected"))
             return
-        self.selected_profile_status.setPlainText(build_profile_detail_text(profile))
+        self.selected_profile_status.setPlainText(build_profile_detail_text(profile, self.tr))
 
     def is_profile_keepalive_running(self, profile_name: str) -> bool:
         profile_name = str(profile_name or "").strip()
@@ -929,6 +923,26 @@ class ChromiumManagerWindow(QMainWindow):
             return QColor("#616161")
         return None
 
+    def create_profile_site_selector(self, profile: Dict) -> QWidget:
+        wrapper = QWidget()
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(6)
+        site_flags = profile.get("keepalive_sites", {}) or {}
+        for site_name in KEEPALIVE_SITE_ORDER:
+            checkbox = QCheckBox(self.tr(f"site_name_{site_name}"))
+            checkbox.setChecked(bool(site_flags.get(site_name, False)))
+            checkbox.setEnabled(self.keepalive_worker is None)
+            checkbox.setToolTip(self.tr("site_checkbox_tooltip"))
+            checkbox.stateChanged.connect(
+                lambda state, name=profile.get("profile_name", ""), site=site_name: self.set_profile_keepalive_site_enabled(
+                    name, site, state == Qt.Checked
+                )
+            )
+            layout.addWidget(checkbox)
+        layout.addStretch()
+        return wrapper
+
     def refresh_table(self):
         profiles = sorted(self.config.get("profiles", []), key=lambda item: profile_sort_key(item.get("profile_name", "")))
         self.table.setUpdatesEnabled(False)
@@ -949,9 +963,11 @@ class ChromiumManagerWindow(QMainWindow):
                 account_item.setToolTip(tooltip)
                 self.table.setItem(row, 0, profile_item)
                 self.table.setItem(row, 1, account_item)
+                self.table.setCellWidget(row, 2, self.create_profile_site_selector(profile))
 
                 keepalive_checkbox = QCheckBox()
                 keepalive_checkbox.setChecked(bool(profile.get("keepalive_enabled", False)))
+                keepalive_checkbox.setEnabled(self.keepalive_worker is None)
                 keepalive_checkbox.stateChanged.connect(
                     lambda state, name=profile.get("profile_name", ""): self.set_profile_keepalive_enabled(
                         name, state == Qt.Checked
@@ -962,7 +978,7 @@ class ChromiumManagerWindow(QMainWindow):
                 keepalive_layout.setContentsMargins(4, 2, 4, 2)
                 keepalive_layout.addWidget(keepalive_checkbox)
                 keepalive_layout.setAlignment(Qt.AlignCenter)
-                self.table.setCellWidget(row, 2, keepalive_wrapper)
+                self.table.setCellWidget(row, 3, keepalive_wrapper)
 
                 launch_button = QPushButton(self.tr("action_launch"))
                 launch_button.setEnabled(self.keepalive_worker is None)
@@ -983,7 +999,7 @@ class ChromiumManagerWindow(QMainWindow):
                 button_layout.addWidget(launch_button)
                 button_layout.addWidget(keepalive_button)
                 button_layout.setAlignment(Qt.AlignCenter)
-                self.table.setCellWidget(row, 3, button_wrapper)
+                self.table.setCellWidget(row, 4, button_wrapper)
 
             if profiles:
                 row_to_select = 0
@@ -1008,6 +1024,7 @@ class ChromiumManagerWindow(QMainWindow):
             "profile_name": profile_name,
             "account": "",
             "keepalive_enabled": False,
+            "keepalive_sites": {},
             "notes": "",
         }
         dialog = ProfileEditDialog(new_profile, self, self.tr)
@@ -1212,9 +1229,6 @@ class ChromiumManagerWindow(QMainWindow):
 
     def save_keepalive_settings(self):
         keepalive = self.config["keepalive"]
-        keepalive["enabled_sites"]["chatgpt"] = self.site_chatgpt.isChecked()
-        keepalive["enabled_sites"]["gmail"] = self.site_gmail.isChecked()
-        keepalive["enabled_sites"]["google"] = self.site_google.isChecked()
         keepalive["headless"] = self.keepalive_headless.isChecked()
         keepalive["page_timeout_seconds"] = self.keepalive_timeout.value()
         keepalive["between_profiles_seconds"] = self.keepalive_between_profiles.value()
@@ -1254,12 +1268,37 @@ class ChromiumManagerWindow(QMainWindow):
             )
         )
 
+    def set_profile_keepalive_site_enabled(self, profile_name: str, site_name: str, enabled: bool):
+        changed = False
+        for item in self.config.get("profiles", []):
+            if item.get("profile_name") != profile_name:
+                continue
+            site_flags = dict(item.get("keepalive_sites", {}) or {})
+            if bool(site_flags.get(site_name, False)) == bool(enabled):
+                return
+            site_flags[site_name] = bool(enabled)
+            item["keepalive_sites"] = site_flags
+            changed = True
+            break
+
+        if not changed:
+            return
+
+        self.config = save_app_config(self.config, self.config_path)
+        self.selected_profile_name = profile_name
+        self.refresh_table()
+        self.update_selected_profile_status()
+        self.append_log(
+            self.trf(
+                "log_profile_keepalive_site_toggled",
+                profile_name=profile_name,
+                site_name=self.tr(f"site_name_{site_name}"),
+                state=self.tr("state_checked") if enabled else self.tr("state_unchecked"),
+            )
+        )
+
     def load_keepalive_settings_to_ui(self):
         keepalive = self.config["keepalive"]
-        enabled_sites = keepalive.get("enabled_sites", {})
-        self.site_chatgpt.setChecked(enabled_sites.get("chatgpt", True))
-        self.site_gmail.setChecked(enabled_sites.get("gmail", True))
-        self.site_google.setChecked(enabled_sites.get("google", True))
         self.keepalive_headless.setChecked(bool(keepalive.get("headless", False)))
         self.keepalive_timeout.setValue(int(keepalive.get("page_timeout_seconds", 45)))
         self.keepalive_between_profiles.setValue(int(keepalive.get("between_profiles_seconds", 5)))
@@ -1323,6 +1362,7 @@ class ChromiumManagerWindow(QMainWindow):
             [
                 self.tr("table_profile"),
                 self.tr("table_account"),
+                self.tr("table_logged_in"),
                 self.tr("table_keepalive"),
                 self.tr("table_actions"),
             ]
@@ -1350,6 +1390,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_reload.setText(self.tr("reload_disk"))
         self.keepalive_headless.setText(self.tr("headless"))
         self.mcp_status_detail_label.setText(self.tr("mcp_detail_idle"))
+        self.site_scope_hint.setText(self.tr("site_scope_hint"))
         self.chatgpt_conversation_hint.setPlaceholderText(self.tr("chatgpt_hint_placeholder"))
         self.schedule_time.setToolTip(self.tr("schedule_time_tooltip"))
         self.keepalive_timeout.setSuffix(self.tr("unit_seconds"))
@@ -1371,7 +1412,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.form_layout.labelForField(self.language_combo).setText(self.tr("language"))
 
         self.settings_layout.labelForField(self.keepalive_headless).setText(self.tr("headless"))
-        self.settings_layout.labelForField(self.site_row_widget).setText(self.tr("site_label"))
+        self.settings_layout.labelForField(self.site_scope_hint).setText(self.tr("site_label"))
         self.settings_layout.labelForField(self.keepalive_timeout).setText(self.tr("page_timeout"))
         self.settings_layout.labelForField(self.keepalive_between_profiles).setText(self.tr("between_profiles"))
         self.settings_layout.labelForField(self.keepalive_settle).setText(self.tr("settle"))
@@ -1488,6 +1529,21 @@ class ChromiumManagerWindow(QMainWindow):
             host = "127.0.0.1"
         port = int(settings.get("port", 28888))
         return f"http://{host}:{port}/_daemon/status"
+
+    def get_mcp_connect_host_port(self):
+        settings = self.config.get("mcp", {})
+        host = str(settings.get("host", "127.0.0.1")).strip() or "127.0.0.1"
+        if host in {"0.0.0.0", "::"}:
+            host = "127.0.0.1"
+        port = int(settings.get("port", 28888))
+        return host, port
+
+    def has_external_mcp_daemon(self) -> bool:
+        status = self.query_mcp_status()
+        if status:
+            return True
+        host, port = self.get_mcp_connect_host_port()
+        return can_connect(host, port)
 
     def is_mcp_expected_enabled(self) -> bool:
         return bool(self.config.get("mcp", {}).get("enabled", False))
@@ -1615,6 +1671,10 @@ class ChromiumManagerWindow(QMainWindow):
 
     def start_mcp_service(self):
         self.save_mcp_settings()
+        if self.has_external_mcp_daemon():
+            self.append_mcp_log(self.tr("log_mcp_external_reused"), prefix="MCP")
+            self.refresh_mcp_status_ui()
+            return
         self.ensure_mcp_process()
         if self.mcp_process.state() != QProcess.NotRunning:
             self.refresh_mcp_status_ui()
@@ -1691,7 +1751,10 @@ class ChromiumManagerWindow(QMainWindow):
         status_text = self.tr("process_exit_normal") if exit_status == QProcess.NormalExit else self.tr("process_exit_abnormal")
         self.mcp_status_cache = {}
         self.append_mcp_log(self.trf("log_mcp_finished", status_text=status_text, exit_code=exit_code))
-        should_restart = (self.is_mcp_expected_enabled() and not self.mcp_stop_requested) or self.mcp_restart_pending
+        external_ready = self.has_external_mcp_daemon()
+        should_restart = ((self.is_mcp_expected_enabled() and not self.mcp_stop_requested) or self.mcp_restart_pending) and not external_ready
+        if external_ready:
+            self.append_mcp_log(self.tr("log_mcp_external_reused"), prefix="MCP")
         self.refresh_mcp_status_ui()
         if should_restart:
             self.mcp_restart_pending = False
@@ -1705,13 +1768,11 @@ class ChromiumManagerWindow(QMainWindow):
         self.refresh_mcp_status_ui()
         if not self.is_mcp_expected_enabled():
             return
-        settings = self.config.get("mcp", {})
-        host = str(settings.get("host", "127.0.0.1")).strip() or "127.0.0.1"
-        if host in {"0.0.0.0", "::"}:
-            host = "127.0.0.1"
-        port = int(settings.get("port", 28888))
+        host, port = self.get_mcp_connect_host_port()
         process_state = self.mcp_process.state() if self.mcp_process is not None else QProcess.NotRunning
         if process_state == QProcess.NotRunning:
+            if self.has_external_mcp_daemon():
+                return
             self.append_mcp_log(self.tr("log_mcp_watchdog_not_running"), prefix="MCP-WARN")
             self.start_mcp_service()
             return
