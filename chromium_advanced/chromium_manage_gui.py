@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Dict, List, Optional
@@ -61,6 +62,7 @@ from chromium_advanced.chromium_profile_lib import (
     ensure_profile_directory,
     ensure_profile_bookmarks_initialized,
     get_default_config_path,
+    get_hidden_subprocess_kwargs,
     find_running_chromium_processes,
     get_project_root,
     get_state_storage_dir,
@@ -91,6 +93,10 @@ MCP_PROCESS_STOP_TIMEOUT_MS = 3000
 MCP_WATCHDOG_INTERVAL_MS = 5000
 MCP_HEALTHCHECK_START_TIMEOUT_MS = 15000
 MCP_HEALTHCHECK_POLL_INTERVAL_MS = 250
+MCP_STATUS_QUERY_TIMEOUT_SECONDS = 0.6
+MCP_STATUS_CACHE_TTL_SECONDS = 1.0
+MCP_RECENT_HEALTH_GRACE_SECONDS = 30.0
+MCP_WATCHDOG_RESTART_FAILURES = 6
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
 LANGUAGE_OPTIONS = load_language_options()
@@ -446,6 +452,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_startup_in_progress = False
         self.mcp_startup_token = 0
         self.mcp_startup_deadline: Optional[datetime.datetime] = None
+        self.mcp_launch_pid = 0
+        self.mcp_status_last_query_at = 0.0
+        self.mcp_status_last_ok_at = 0.0
+        self.mcp_status_consecutive_failures = 0
         self.window_state_dirty = False
 
         self.setWindowTitle(self.tr("window_title"))
@@ -957,12 +967,10 @@ class ChromiumManagerWindow(QMainWindow):
         mcp_state_text = self.tr("bottom_mcp_stopped")
         active_session_count = 0
 
-        if self.mcp_process is not None:
-            state = self.mcp_process.state()
-            if state == QProcess.Starting:
-                mcp_state_text = "starting"
-            elif state == QProcess.Running:
-                mcp_state_text = "running"
+        if self.mcp_startup_in_progress:
+            mcp_state_text = "starting"
+        elif self.mcp_status_cache:
+            mcp_state_text = "running"
 
         mcp_status_text = self.mcp_status_label.text() if hasattr(self, "mcp_status_label") else mcp_state_text
         detail_text = self.mcp_status_detail_label.text() if hasattr(self, "mcp_status_detail_label") else ""
@@ -1778,14 +1786,29 @@ class ChromiumManagerWindow(QMainWindow):
     def is_mcp_expected_enabled(self) -> bool:
         return bool(self.config.get("mcp", {}).get("enabled", False))
 
-    def query_mcp_status(self) -> Dict:
+    def query_mcp_status(self, force: bool = False) -> Dict:
+        now_ts = time.monotonic()
+        if (
+            not force
+            and self.mcp_status_cache
+            and self.mcp_status_last_query_at > 0
+            and (now_ts - self.mcp_status_last_query_at) < MCP_STATUS_CACHE_TTL_SECONDS
+        ):
+            return self.mcp_status_cache
         try:
-            status = fetch_json(self.get_mcp_status_url())
+            status = fetch_json(self.get_mcp_status_url(), timeout=MCP_STATUS_QUERY_TIMEOUT_SECONDS)
+            self.mcp_status_last_query_at = now_ts
             if isinstance(status, dict) and status:
                 self.mcp_status_cache = status
+                self.mcp_status_last_ok_at = now_ts
+                self.mcp_status_consecutive_failures = 0
                 return status
         except Exception:
-            pass
+            self.mcp_status_last_query_at = now_ts
+            self.mcp_status_consecutive_failures += 1
+        if self.mcp_status_cache and self.mcp_status_last_ok_at > 0:
+            if (now_ts - self.mcp_status_last_ok_at) < MCP_RECENT_HEALTH_GRACE_SECONDS:
+                return self.mcp_status_cache
         self.mcp_status_cache = {}
         return {}
 
@@ -1797,7 +1820,7 @@ class ChromiumManagerWindow(QMainWindow):
         )
 
         daemon_status = self.query_mcp_status()
-        if daemon_status and (self.mcp_owned_process or (self.mcp_process is not None and self.mcp_process.state() != QProcess.NotRunning)):
+        if daemon_status and self.is_mcp_expected_enabled():
             worker_state = str(daemon_status.get("worker_state", "stopped"))
             worker_pid = daemon_status.get("worker_pid")
             active_requests = int(daemon_status.get("active_proxy_requests", 0) or 0)
@@ -1828,22 +1851,20 @@ class ChromiumManagerWindow(QMainWindow):
             self.refresh_bottom_stats()
             return
 
-        if self.mcp_process is None:
+        if self.mcp_startup_in_progress:
+            self.mcp_status_label.setText(self.tr("mcp_state_starting"))
+            self.mcp_status_detail_label.setText(self.tr("mcp_status_detail_starting"))
+            self.refresh_bottom_stats()
+            return
+
+        if not self.is_mcp_expected_enabled():
             self.mcp_status_label.setText(self.tr("mcp_state_not_started"))
             self.mcp_status_detail_label.setText(self.tr("mcp_status_detail_not_started"))
             self.refresh_bottom_stats()
             return
 
-        state = self.mcp_process.state()
-        if state == QProcess.Starting:
-            self.mcp_status_label.setText(self.tr("mcp_state_starting"))
-            self.mcp_status_detail_label.setText(self.tr("mcp_status_detail_starting"))
-        elif state == QProcess.Running:
-            self.mcp_status_label.setText(self.tr("mcp_state_waiting"))
-            self.mcp_status_detail_label.setText(self.tr("mcp_status_detail_waiting"))
-        else:
-            self.mcp_status_label.setText(self.tr("mcp_state_stopped"))
-            self.mcp_status_detail_label.setText(self.tr("mcp_status_detail_stopped"))
+        self.mcp_status_label.setText(self.tr("mcp_state_waiting"))
+        self.mcp_status_detail_label.setText(self.tr("mcp_status_detail_waiting"))
         self.refresh_bottom_stats()
 
     def apply_initial_mcp_state(self):
@@ -1867,13 +1888,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_startup_in_progress = False
         self.mcp_startup_deadline = None
         self.mcp_stop_requested = True
-        try:
-            if self.mcp_process is not None and self.mcp_process.state() != QProcess.NotRunning:
-                self.mcp_process.kill()
-                self.mcp_process.waitForFinished(MCP_PROCESS_STOP_TIMEOUT_MS)
-        except Exception:
-            pass
         self.cleanup_mcp_process_residue()
+        self.mcp_launch_pid = 0
         self.mcp_owned_process = False
         self.mcp_status_cache = {}
         self.refresh_mcp_status_ui()
@@ -1881,16 +1897,9 @@ class ChromiumManagerWindow(QMainWindow):
     def check_mcp_health_after_start(self, startup_token: int):
         if startup_token != self.mcp_startup_token or not self.mcp_startup_in_progress:
             return
-        process_state = self.mcp_process.state() if self.mcp_process is not None else QProcess.NotRunning
-        if process_state == QProcess.NotRunning:
-            self.append_mcp_log(self.tr("log_mcp_watchdog_port_down"), prefix="MCP-ERR")
-            self.finish_mcp_startup_failure()
-            return
-
-        host, port = self.get_mcp_connect_host_port()
         try:
-            fetch_json(self.get_mcp_health_url(), timeout=1.0)
-            if can_connect(host, port):
+            status = self.query_mcp_status(force=True)
+            if status:
                 self.mcp_startup_in_progress = False
                 self.mcp_startup_deadline = None
                 self.refresh_mcp_status_ui()
@@ -1956,11 +1965,11 @@ class ChromiumManagerWindow(QMainWindow):
 
     def start_mcp_service(self):
         self.save_mcp_settings()
-        self.ensure_mcp_process()
         if self.mcp_startup_in_progress:
             self.refresh_mcp_status_ui()
             return
-        if self.mcp_process.state() != QProcess.NotRunning:
+        if self.query_mcp_status(force=True):
+            self.mcp_owned_process = True
             self.refresh_mcp_status_ui()
             return
 
@@ -1976,6 +1985,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_owned_process = True
         self.mcp_startup_in_progress = True
         self.mcp_startup_token += 1
+        self.mcp_status_consecutive_failures = 0
         self.mcp_startup_deadline = datetime.datetime.now() + datetime.timedelta(
             milliseconds=max(0, int(MCP_HEALTHCHECK_START_TIMEOUT_MS))
         )
@@ -1983,10 +1993,23 @@ class ChromiumManagerWindow(QMainWindow):
         program = sys.executable
         if getattr(sys, "frozen", False):
             program = get_frozen_companion_executable("ChromiumMcpDaemon")
-        self.mcp_process.setProgram(program)
-        self.mcp_process.setArguments(self.build_mcp_process_arguments())
-        self.mcp_process.setWorkingDirectory(get_project_root())
-        self.mcp_process.start()
+        command = [program, *self.build_mcp_process_arguments()]
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=get_project_root(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **get_hidden_subprocess_kwargs(),
+            )
+            self.mcp_launch_pid = int(process.pid or 0)
+        except Exception as exc:
+            self.mcp_startup_in_progress = False
+            self.mcp_startup_deadline = None
+            self.mcp_owned_process = False
+            self.append_mcp_log(self.trf("log_mcp_error", error=exc), prefix="MCP-ERR")
+            self.refresh_mcp_status_ui()
+            return
         self.refresh_mcp_status_ui()
         QTimer.singleShot(0, lambda token=self.mcp_startup_token: self.check_mcp_health_after_start(token))
 
@@ -1994,43 +2017,27 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_startup_in_progress = False
         self.mcp_startup_deadline = None
         self.mcp_startup_token += 1
-        if self.mcp_process is None or self.mcp_process.state() == QProcess.NotRunning:
-            self.cleanup_mcp_process_residue()
-            self.mcp_owned_process = False
-            if update_checkbox:
-                self.mcp_service_checkbox.blockSignals(True)
-                self.mcp_service_checkbox.setChecked(False)
-                self.mcp_service_checkbox.blockSignals(False)
-            self.refresh_mcp_status_ui()
-            return
-
+        self.mcp_status_consecutive_failures = 0
         self.mcp_restart_pending = False
         self.mcp_stop_requested = True
         self.append_mcp_log(self.tr("log_mcp_prepare_stop"))
-        self.mcp_process.terminate()
-        if not self.mcp_process.waitForFinished(MCP_PROCESS_STOP_TIMEOUT_MS):
-            self.append_mcp_log(self.tr("log_mcp_force_kill"), prefix="MCP-WARN")
-            self.mcp_process.kill()
-            self.mcp_process.waitForFinished(MCP_PROCESS_STOP_TIMEOUT_MS)
+        self.cleanup_mcp_process_residue()
+        self.mcp_launch_pid = 0
         if update_checkbox:
             self.mcp_service_checkbox.blockSignals(True)
             self.mcp_service_checkbox.setChecked(False)
             self.mcp_service_checkbox.blockSignals(False)
-        self.cleanup_mcp_process_residue()
         self.mcp_owned_process = False
         self.mcp_status_cache = {}
         self.refresh_mcp_status_ui()
 
     def restart_mcp_service(self):
-        if not self.is_mcp_expected_enabled() and self.mcp_process is None:
+        if not self.is_mcp_expected_enabled():
             self.mcp_service_checkbox.setChecked(True)
             return
-        self.mcp_restart_pending = True
-        if self.mcp_process is None or self.mcp_process.state() == QProcess.NotRunning:
-            self.start_mcp_service()
-            self.mcp_restart_pending = False
-            return
         self.stop_mcp_service(update_checkbox=False)
+        self.mcp_restart_pending = False
+        QTimer.singleShot(800, self.start_mcp_service)
 
     def on_mcp_service_checkbox_changed(self, state):
         enabled = (state == Qt.Checked)
@@ -2053,22 +2060,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.refresh_mcp_status_ui()
 
     def on_mcp_process_finished(self, exit_code: int, exit_status):
-        self.mcp_startup_in_progress = False
-        self.mcp_startup_deadline = None
-        self.mcp_startup_token += 1
-        status_text = self.tr("process_exit_normal") if exit_status == QProcess.NormalExit else self.tr("process_exit_abnormal")
-        self.mcp_status_cache = {}
-        self.append_mcp_log(self.trf("log_mcp_finished", status_text=status_text, exit_code=exit_code))
-        should_restart = (self.is_mcp_expected_enabled() and not self.mcp_stop_requested) or self.mcp_restart_pending
-        self.mcp_owned_process = False
-        self.refresh_mcp_status_ui()
-        if should_restart:
-            self.mcp_restart_pending = False
-            QTimer.singleShot(800, self.start_mcp_service)
+        return
 
     def on_mcp_process_error(self, error):
-        self.append_mcp_log(self.trf("log_mcp_error", error=error), prefix="MCP-ERR")
-        self.refresh_mcp_status_ui()
+        return
 
     def cleanup_mcp_process_residue(self):
         terminated_pids = terminate_project_mcp_processes(exclude_pid=os.getpid())
@@ -2084,15 +2079,12 @@ class ChromiumManagerWindow(QMainWindow):
             return
         if self.mcp_startup_in_progress:
             return
-        host, port = self.get_mcp_connect_host_port()
-        process_state = self.mcp_process.state() if self.mcp_process is not None else QProcess.NotRunning
-        if process_state == QProcess.NotRunning:
+        daemon_status = self.query_mcp_status(force=True)
+        if daemon_status:
+            return
+        if self.mcp_status_consecutive_failures >= 3:
             self.append_mcp_log(self.tr("log_mcp_watchdog_not_running"), prefix="MCP-WARN")
             self.start_mcp_service()
-            return
-        if process_state == QProcess.Running and not can_connect(host, port):
-            self.append_mcp_log(self.tr("log_mcp_watchdog_port_down"), prefix="MCP-WARN")
-            self.restart_mcp_service()
 
     def setup_tray_icon(self):
         self.tray_icon = None
@@ -2137,7 +2129,6 @@ class ChromiumManagerWindow(QMainWindow):
 
     def show_from_tray(self):
         self.showNormal()
-        self.fit_window_to_screen()
         self.raise_()
         self.activateWindow()
         self.update_tray_actions()
@@ -2204,7 +2195,6 @@ class ChromiumManagerWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.fit_window_to_screen()
         self.update_tray_actions()
 
     def hideEvent(self, event):
