@@ -11,6 +11,13 @@ When a browser MCP service runs on Windows and the caller runs inside WSL, do no
 
 Use this skill only for the WSL-to-Windows access layer. The normal identity and occupancy rules from the main browser identity MCP workflow still apply.
 
+For the Chromium Profile Manager service on this machine:
+
+- MCP server id used by Codex:
+  `browserIdentity`
+- default Windows endpoint:
+  `http://127.0.0.1:28888/mcp`
+
 ## Workflow
 
 1. Confirm that the browser MCP service is actually running on Windows.

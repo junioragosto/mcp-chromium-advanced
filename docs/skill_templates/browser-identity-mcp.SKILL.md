@@ -13,6 +13,8 @@ Always optimize for safety over convenience: if the user did not specify which i
 
 For the Chromium Profile Manager service used on this machine:
 
+- MCP server id used by Codex:
+  `browserIdentity`
 - MCP endpoint:
   `http://127.0.0.1:28888/mcp`
 - daemon model:
@@ -96,6 +98,8 @@ If the project needs a specific browser backend, pass the optional `engine` para
 
 ## Chromium-Specific Notes
 
+- `browser-identity-mcp` is the skill name, not the MCP server id.
+- The MCP server id registered in Codex is `browserIdentity`.
 - Do not guess `profile_name`. If the user did not name one, ask.
 - The daemon endpoint on `28888` is expected to stay stable across tasks.
 - A first request to `/mcp` may lazily start the worker; this is normal.
