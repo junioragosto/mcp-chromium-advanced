@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import ctypes
+from contextlib import asynccontextmanager
 import multiprocessing
 import os
 import platform
@@ -80,10 +81,19 @@ def build_worker_command(
 ) -> list[str]:
     if getattr(sys, "frozen", False):
         extension = ".exe" if platform.system() == "Windows" else ""
-        worker_executable = os.path.join(
-            os.path.dirname(os.path.abspath(sys.executable)),
-            f"ChromiumMcpWorker{extension}",
-        )
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        parent_dir = os.path.dirname(base_dir)
+        candidates = [
+            os.path.join(base_dir, f"ChromiumMcpWorker{extension}"),
+            os.path.join(base_dir, "ChromiumMcpWorker", f"ChromiumMcpWorker{extension}"),
+            os.path.join(parent_dir, f"ChromiumMcpWorker{extension}"),
+            os.path.join(parent_dir, "ChromiumMcpWorker", f"ChromiumMcpWorker{extension}"),
+        ]
+        worker_executable = candidates[0]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                worker_executable = candidate
+                break
         return [
             worker_executable,
             "--transport",
@@ -360,7 +370,6 @@ def create_daemon_app(
     worker_port: int,
     idle_timeout_seconds: int,
 ) -> FastAPI:
-    app = FastAPI(title="Chromium Advanced MCP Daemon")
     public_path = normalize_path(path)
     worker_manager = WorkerManager(
         config_path=config_path,
@@ -374,9 +383,14 @@ def create_daemon_app(
         idle_timeout_seconds=idle_timeout_seconds,
     )
 
-    @app.on_event("shutdown")
-    def _shutdown_worker_manager() -> None:
-        worker_manager.shutdown()
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            worker_manager.shutdown()
+
+    app = FastAPI(title="Chromium Advanced MCP Daemon", lifespan=lifespan)
 
     @app.get("/")
     def root() -> Dict:

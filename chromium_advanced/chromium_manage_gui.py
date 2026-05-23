@@ -89,6 +89,8 @@ LOG_FLUSH_INTERVAL_MS = 200
 CONFIG_MTIME_EPSILON = 0.0001
 MCP_PROCESS_STOP_TIMEOUT_MS = 3000
 MCP_WATCHDOG_INTERVAL_MS = 5000
+MCP_HEALTHCHECK_START_TIMEOUT_MS = 15000
+MCP_HEALTHCHECK_POLL_INTERVAL_MS = 250
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
 LANGUAGE_OPTIONS = load_language_options()
@@ -280,7 +282,13 @@ def fetch_json(url: str, timeout: float = 1.5) -> Dict:
 def get_frozen_companion_executable(stem: str) -> str:
     base_dir = os.path.dirname(os.path.abspath(sys.executable))
     extension = ".exe" if SYSTEM_TYPE == "Windows" else ""
-    return os.path.join(base_dir, f"{stem}{extension}")
+    direct_path = os.path.join(base_dir, f"{stem}{extension}")
+    if os.path.exists(direct_path):
+        return direct_path
+    bundled_path = os.path.join(base_dir, stem, f"{stem}{extension}")
+    if os.path.exists(bundled_path):
+        return bundled_path
+    return direct_path
 
 
 def get_startup_command() -> str:
@@ -1852,6 +1860,23 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_process.finished.connect(self.on_mcp_process_finished)
         self.mcp_process.errorOccurred.connect(self.on_mcp_process_error)
 
+    def wait_for_mcp_health(self, timeout_ms: int = MCP_HEALTHCHECK_START_TIMEOUT_MS) -> bool:
+        host, port = self.get_mcp_connect_host_port()
+        deadline = datetime.datetime.now() + datetime.timedelta(milliseconds=max(0, int(timeout_ms)))
+        while datetime.datetime.now() < deadline:
+            process_state = self.mcp_process.state() if self.mcp_process is not None else QProcess.NotRunning
+            if process_state == QProcess.NotRunning:
+                return False
+            try:
+                fetch_json(self.get_mcp_health_url(), timeout=1.0)
+                if can_connect(host, port):
+                    return True
+            except Exception:
+                pass
+            QApplication.processEvents()
+            QThread.msleep(MCP_HEALTHCHECK_POLL_INTERVAL_MS)
+        return False
+
     def build_mcp_process_arguments(self) -> List[str]:
         settings = self.config.get("mcp", {})
         if getattr(sys, "frozen", False):
@@ -1922,6 +1947,19 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_process.setArguments(self.build_mcp_process_arguments())
         self.mcp_process.setWorkingDirectory(get_project_root())
         self.mcp_process.start()
+        if not self.wait_for_mcp_health():
+            self.append_mcp_log(self.tr("log_mcp_watchdog_port_down"), prefix="MCP-ERR")
+            self.mcp_stop_requested = True
+            try:
+                self.mcp_process.kill()
+                self.mcp_process.waitForFinished(MCP_PROCESS_STOP_TIMEOUT_MS)
+            except Exception:
+                pass
+            self.cleanup_mcp_process_residue()
+            self.mcp_owned_process = False
+            self.mcp_status_cache = {}
+            self.refresh_mcp_status_ui()
+            return
         self.refresh_mcp_status_ui()
 
     def stop_mcp_service(self, update_checkbox: bool = True):
