@@ -129,6 +129,14 @@ Status: verified by unit test
 
 Status: verified by unit test and local runtime integration test
 
+### Managed post-action context
+
+- managed runtime now upgrades `supports_post_action_context` when a raw runtime exposes interaction-context primitives even if it does not natively attach post-action payloads
+- common action results and normalized failures now carry a consistent `post_action_context` shape across `playwright_cli`, `selenium_uc`, and `patchright`
+- the managed layer rewrites raw `inspect` interaction-context payloads to the actual action name so callers do not need engine-specific interpretation rules
+
+Status: verified by unit test and local runtime integration test
+
 ### Built runtime path
 
 - packaged daemon and worker can lazy-start, create a managed browser session, run browser actions, and reclaim the worker after idle timeout
