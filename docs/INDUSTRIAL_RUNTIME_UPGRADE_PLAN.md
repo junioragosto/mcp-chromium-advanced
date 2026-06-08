@@ -48,6 +48,7 @@ This upgrade stays generic and open source friendly.
 - automated tests for capability negotiation
 - automated tests for fallback behavior
 - automated tests for snapshot-ref translation
+- automated tests for deep DOM and open shadow-root ref replay
 - automated tests for normalized runtime failures
 
 ## Implementation Plan
@@ -119,6 +120,14 @@ Status: verified by unit test
 - runtime exception returns stable `error_code`
 
 Status: verified by unit test
+
+### Complex frontend fallback path
+
+- fallback candidate enumeration now preserves deep selectors for elements inside open shadow roots
+- managed target actions can replay cached deep refs even when the raw runtime only understands plain selectors or native snapshot refs
+- `playwright_cli` wait polling no longer depends on `null` eval payloads, avoiding unstable behavior in transient DOM states
+
+Status: verified by unit test and local runtime integration test
 
 ### Built runtime path
 

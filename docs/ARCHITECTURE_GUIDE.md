@@ -69,6 +69,8 @@ Responsibilities:
 - expose structured debug telemetry such as console messages, page errors, and network request summaries
 - expose runtime capability metadata separately from raw engine names
 - keep a managed action kernel between MCP tools and raw runtime sessions
+- preserve actionable snapshot refs even when the underlying runtime does not have native ref semantics
+- support deep DOM and open shadow-root traversal in the managed fallback path
 
 Engine-specific note:
 
@@ -109,6 +111,8 @@ Responsibilities:
 - attach consistent action metadata regardless of runtime
 - provide generic DOM-script fallbacks for runtimes that do not natively implement some higher-level tools
 - preserve the external MCP tool surface while reducing engine-specific `NotImplementedError` leakage
+- cache fallback candidates as executable handles, not only plain CSS selectors, so later target actions can still resolve on complex pages
+- use deep selector replay for open shadow-root targets when plain CSS cannot safely cross runtime boundaries
 
 ### Packaging Layer
 
