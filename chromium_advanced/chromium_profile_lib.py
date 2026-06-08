@@ -345,6 +345,19 @@ def get_project_root() -> str:
     return os.path.abspath(os.path.join(get_script_dir(), ".."))
 
 
+def get_runtime_launch_cwd(executable_path: Optional[str] = None) -> str:
+    candidate = str(executable_path or "").strip()
+    if getattr(sys, "frozen", False):
+        if candidate:
+            normalized_candidate = os.path.abspath(candidate)
+            if os.path.isfile(normalized_candidate):
+                return os.path.dirname(normalized_candidate)
+            if os.path.isdir(normalized_candidate):
+                return normalized_candidate
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return get_project_root()
+
+
 def get_state_storage_dir() -> str:
     base_dir = get_platform_config_root()
     path = os.path.join(base_dir, APP_NAME, "workstates")

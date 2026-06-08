@@ -65,6 +65,7 @@ from chromium_advanced.chromium_profile_lib import (
     get_hidden_subprocess_kwargs,
     find_running_chromium_processes,
     get_project_root,
+    get_runtime_launch_cwd,
     get_state_storage_dir,
     launch_profile,
     load_app_config,
@@ -1997,7 +1998,7 @@ class ChromiumManagerWindow(QMainWindow):
         try:
             process = subprocess.Popen(
                 command,
-                cwd=get_project_root(),
+                cwd=get_runtime_launch_cwd(program),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 **get_hidden_subprocess_kwargs(),
