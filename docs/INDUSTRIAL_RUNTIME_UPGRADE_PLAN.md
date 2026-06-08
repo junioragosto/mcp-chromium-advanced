@@ -137,6 +137,15 @@ Status: verified by unit test and local runtime integration test
 
 Status: verified by unit test and local runtime integration test
 
+### Token and targeting efficiency
+
+- managed `get_page_html` now emits an HTML summary and truncates oversized payloads into bounded previews instead of returning unbounded raw markup by default
+- fallback candidate enumeration now ranks matches by visibility, interactivity, and text affinity instead of using DOM scan order
+- these changes specifically reduce diagnostic noise and improve first-hit behavior on complex frontends without introducing site-specific adapters
+- automated MCP/runtime validation can now run with `mcp.headless=true`, reducing desktop interference during local regression work
+
+Status: verified by unit test and local runtime integration test
+
 ### Built runtime path
 
 - packaged daemon and worker can lazy-start, create a managed browser session, run browser actions, and reclaim the worker after idle timeout

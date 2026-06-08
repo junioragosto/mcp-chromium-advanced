@@ -14,6 +14,8 @@ class FakeRawSession:
         self.visible_after = 1
         self.raise_click = None
         self.deep_candidate = False
+        self.large_html = False
+        self.candidate_entries = None
 
     def get_summary(self):
         return BrowserSessionSummary(current_url="https://example.com", title="Example", alive=True)
@@ -56,6 +58,10 @@ class FakeRawSession:
         return {"tab_id": tab_id or "tab-001", "url": "https://example.com", "title": "Example", "text": "Hello"}
 
     def get_page_html(self, tab_id=""):
+        if self.large_html:
+            custom = "<app-shell><yt-chip-cloud-chip-renderer>Newest</yt-chip-cloud-chip-renderer></app-shell>"
+            html = "<html><head><title>Example</title></head><body>" + (custom * 400) + "</body></html>"
+            return {"tab_id": tab_id or "tab-001", "url": "https://example.com", "title": "Example", "html": html}
         return {"tab_id": tab_id or "tab-001", "url": "https://example.com", "title": "Example", "html": "<html></html>"}
 
     def inspect_elements(self, selector, by="css", limit=10, tab_id=""):
@@ -190,6 +196,8 @@ class FakeRawSession:
                 }
             }
         if "nodes.slice(0" in script:
+            if isinstance(self.candidate_entries, list):
+                return {"result": self.candidate_entries}
             deep_selector = "app-shell#root >>> button.save" if self.deep_candidate else ""
             return {
                 "result": [
@@ -351,6 +359,57 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertEqual(result["post_action_context"]["action_name"], "click")
         self.assertEqual(result["post_action_context"]["active_tab_id"], "tab-001")
         self.assertEqual(result["post_action_context"]["active_element"]["id"], "name")
+
+    def test_get_page_html_is_truncated_and_summarized_for_large_pages(self):
+        raw = FakeRawSession(engine_name="playwright_cli")
+        raw.large_html = True
+        session = ManagedBrowserSession(raw)
+        result = session.get_page_html()
+        self.assertTrue(result["html_truncated"])
+        self.assertGreater(result["html_length"], len(result["html"]))
+        self.assertIn("html_summary", result)
+        self.assertGreaterEqual(result["html_summary"]["custom_element_count"], 1)
+
+    def test_list_candidates_prioritizes_better_text_match(self):
+        raw = FakeRawSession(engine_name="selenium_uc")
+        raw.candidate_entries = [
+            {
+                "tag_name": "button",
+                "text": "Sort by",
+                "value": "",
+                "visible": True,
+                "enabled": True,
+                "id": "sort",
+                "name": "",
+                "class": "menu-trigger",
+                "aria_label": "Sort by",
+                "role": "button",
+                "href": "",
+                "outer_html": "<button>Sort by</button>",
+                "selector": "#sort",
+                "box": {"x": 1, "y": 2, "width": 100, "height": 20},
+            },
+            {
+                "tag_name": "button",
+                "text": "Newest",
+                "value": "",
+                "visible": True,
+                "enabled": True,
+                "id": "newest",
+                "name": "",
+                "class": "menu-item",
+                "aria_label": "Newest",
+                "role": "menuitem",
+                "href": "",
+                "outer_html": "<button>Newest</button>",
+                "selector": "#newest",
+                "box": {"x": 1, "y": 2, "width": 100, "height": 20},
+            },
+        ]
+        session = ManagedBrowserSession(raw)
+        result = session.list_candidates(text_filter="newest", limit=5)
+        self.assertEqual(result["candidates"][0]["text"], "Newest")
+        self.assertGreater(result["candidates"][0]["match_score"], 0)
 
 
 if __name__ == "__main__":

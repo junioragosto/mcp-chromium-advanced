@@ -86,6 +86,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             "launch": dict(base.get("launch", {})),
             "profiles": [],
             "app": {"browser_engine": "playwright_cli"},
+            "mcp": {"headless": True},
         }
         runtime_root = tempfile.mkdtemp(prefix="mcp-runtime-profile-")
         profile_name = "Profile 1"
@@ -129,6 +130,10 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
             page_text = session.get_page_text()
             self.assertIn("Submitted: Alice", page_text.get("text", ""))
+
+            page_html = session.get_page_html()
+            self.assertIn("html_summary", page_html)
+            self.assertFalse(page_html.get("html_truncated"))
         finally:
             if session is not None:
                 with contextlib.suppress(Exception):

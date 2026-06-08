@@ -11,6 +11,7 @@ from chromium_advanced.browser_engines.base import BrowserSession, BrowserSessio
 
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
 SNAPSHOT_LINE_REF_PATTERN = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
+HTML_PREVIEW_LIMIT = 12000
 
 CAPABILITY_MATRIX = {
     "snapshot": "supports_snapshot",
@@ -311,8 +312,79 @@ class ManagedBrowserSession(BrowserSession):
             error_type = str(normalized.get("error_type", "") or "")
             normalized.setdefault("error_code", self._infer_error_code(error_type, error_text))
             normalized.setdefault("recoverable", normalized["error_code"] != "runtime_action_failed")
+        if action_name == "get_page_html":
+            normalized = self._normalize_html_payload(normalized)
         normalized["action_meta"] = self._action_meta(action_name, used_fallback=used_fallback)
         return self._attach_post_action_context(action_name, normalized, failure=normalized.get("ok") is False)
+
+    def _normalize_html_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        html = payload.get("html")
+        if not isinstance(html, str):
+            return payload
+        compact = str(html)
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", compact, re.IGNORECASE | re.DOTALL)
+        custom_tags = set(re.findall(r"<([a-z][a-z0-9:_-]*-[a-z0-9:_-]*)\b", compact, re.IGNORECASE))
+        summary = {
+            "length": len(compact),
+            "line_count": compact.count("\n") + 1,
+            "script_count": len(re.findall(r"<script\\b", compact, re.IGNORECASE)),
+            "style_count": len(re.findall(r"<style\\b", compact, re.IGNORECASE)),
+            "form_control_count": len(re.findall(r"<(?:input|button|textarea|select)\\b", compact, re.IGNORECASE)),
+            "link_count": len(re.findall(r"<a\\b", compact, re.IGNORECASE)),
+            "custom_element_count": len(custom_tags),
+            "custom_element_preview": sorted(custom_tags)[:20],
+            "title": re.sub(r"\\s+", " ", title_match.group(1)).strip() if title_match else str(payload.get("title", "") or ""),
+        }
+        payload["html_summary"] = summary
+        if len(compact) <= HTML_PREVIEW_LIMIT:
+            payload["html_length"] = len(compact)
+            payload["html_truncated"] = False
+            return payload
+        preview = compact[:HTML_PREVIEW_LIMIT] + "\n...[truncated by managed runtime]"
+        payload["html"] = preview
+        payload["html_preview"] = preview
+        payload["html_length"] = len(compact)
+        payload["html_truncated"] = True
+        payload["html_preview_limit"] = HTML_PREVIEW_LIMIT
+        return payload
+
+    def _candidate_relevance_score(self, entry: Dict[str, Any], text_filter: str = "") -> int:
+        if not isinstance(entry, dict):
+            return -1
+        score = 0
+        if entry.get("visible"):
+            score += 30
+        if entry.get("enabled", True):
+            score += 10
+        tag_name = str(entry.get("tag_name", "") or "").lower()
+        role = str(entry.get("role", "") or "").lower()
+        if tag_name in {"button", "a", "input", "textarea", "select", "summary"}:
+            score += 12
+        if role in {"button", "link", "textbox", "option", "menuitem", "tab"}:
+            score += 10
+        filter_text = str(text_filter or "").strip().lower()
+        if not filter_text:
+            return score
+        haystacks = {
+            "text": str(entry.get("text", "") or "").strip(),
+            "aria_label": str(entry.get("aria_label", "") or "").strip(),
+            "name": str(entry.get("name", "") or "").strip(),
+            "id": str(entry.get("id", "") or "").strip(),
+            "value": str(entry.get("value", "") or "").strip(),
+            "role": role,
+            "class": str(entry.get("class", "") or "").strip(),
+        }
+        for key, raw_value in haystacks.items():
+            value = raw_value.lower()
+            if not value:
+                continue
+            if value == filter_text:
+                score += 220 if key in {"text", "aria_label"} else 180
+            elif value.startswith(filter_text):
+                score += 140 if key in {"text", "aria_label"} else 100
+            elif filter_text in value:
+                score += 90 if key in {"text", "aria_label"} else 60
+        return score
 
     def _is_unsupported_result(self, result: Dict[str, Any]) -> bool:
         if not isinstance(result, dict):
@@ -735,8 +807,8 @@ class ManagedBrowserSession(BrowserSession):
         raw = self._run_script_result(self._generic_target_script(selector, by if target else "css", mode, limit=max(25, int(limit) * 4)), tab_id=tab_id)
         entries = raw if isinstance(raw, list) else []
         lowered_filter = str(text_filter or "").strip().lower()
-        candidates = []
-        for entry in entries:
+        ranked_entries = []
+        for index, entry in enumerate(entries):
             if not isinstance(entry, dict):
                 continue
             merged = " ".join(
@@ -750,6 +822,10 @@ class ManagedBrowserSession(BrowserSession):
             ).strip()
             if lowered_filter and lowered_filter not in merged.lower():
                 continue
+            ranked_entries.append((self._candidate_relevance_score(entry, text_filter=lowered_filter), index, entry))
+        ranked_entries.sort(key=lambda item: (-item[0], item[1]))
+        candidates = []
+        for score, _, entry in ranked_entries:
             ref = f"e{self._next_snapshot_ref}"
             self._next_snapshot_ref += 1
             deep_selector = str(entry.get("deep_selector", "") or "").strip()
@@ -760,6 +836,7 @@ class ManagedBrowserSession(BrowserSession):
                 "by": "deep_css" if deep_selector else "css",
                 "visible": bool(entry.get("visible")),
                 "enabled": bool(entry.get("enabled", True)),
+                "match_score": score,
                 **entry,
             }
             if not include_boxes:
