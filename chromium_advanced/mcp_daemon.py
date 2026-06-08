@@ -25,6 +25,7 @@ from chromium_advanced.chromium_profile_lib import (
     get_default_config_path,
     get_hidden_subprocess_kwargs,
     get_project_root,
+    get_runtime_launch_cwd,
     now_text,
 )
 
@@ -287,7 +288,7 @@ class WorkerManager:
             safe_print(f"[{now_text()}] [MCP-DAEMON] starting worker: {' '.join(command)}")
             self._process = subprocess.Popen(
                 command,
-                cwd=get_project_root(),
+                cwd=get_runtime_launch_cwd(command[0] if command else ""),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
