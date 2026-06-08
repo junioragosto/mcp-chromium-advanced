@@ -120,6 +120,8 @@ class ManagedBrowserSession(BrowserSession):
     def __init__(self, raw_session: BrowserSession):
         self._raw = raw_session
         self._capabilities = RuntimeCapabilities.from_legacy(self._safe_raw_capabilities())
+        if callable(getattr(self._raw, "get_interaction_context", None)):
+            self._capabilities.post_action_context = True
         self._snapshot_ref_map: Dict[str, Dict[str, Any]] = {}
         self._last_snapshot_text = ""
         self._next_snapshot_ref = 1
@@ -138,6 +140,133 @@ class ManagedBrowserSession(BrowserSession):
             "runtime_profile": self._capabilities.runtime_profile,
             "used_fallback": bool(used_fallback),
         }
+
+    def _supports_managed_post_action_context(self) -> bool:
+        return bool(self._capabilities.post_action_context)
+
+    def _compact_context_element(self, element: Any) -> Dict[str, Any]:
+        if not isinstance(element, dict):
+            return {}
+        allowed = ("tag_name", "text", "id", "name", "class", "aria_label", "role", "value", "href")
+        return {key: element.get(key) for key in allowed if key in element and element.get(key) not in {None, ""}}
+
+    def _fallback_interaction_context(self, action_name: str = "inspect", tab_id: str = "") -> Dict[str, Any]:
+        normalized_tab_id = str(tab_id or "").strip()
+        page: Dict[str, Any] = {}
+        tabs: list[Dict[str, Any]] = []
+        active_element: Dict[str, Any] = {}
+        try:
+            page = self._raw.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self._raw.get_current_url()
+        except Exception:
+            page = {}
+        try:
+            tabs = list(self._raw.list_tabs().get("tabs", []))
+        except Exception:
+            tabs = []
+        try:
+            active_raw = self._raw.get_active_element(tab_id=normalized_tab_id) if normalized_tab_id else self._raw.get_active_element()
+            active_element = self._compact_context_element(active_raw.get("element", {}))
+        except Exception as exc:
+            active_element = {"error": str(exc)}
+        active_tab_id = normalized_tab_id or str(page.get("tab_id", "") or "")
+        return {
+            "action_name": str(action_name or "inspect"),
+            "page": page,
+            "tabs": tabs,
+            "active_tab_id": active_tab_id,
+            "active_element": active_element,
+            "modal_state": {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []},
+            "snapshot": {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
+        }
+
+    def _normalize_interaction_context(self, payload: Any, action_name: str = "inspect", tab_id: str = "") -> Dict[str, Any]:
+        context = payload if isinstance(payload, dict) else {}
+        page = context.get("page", {})
+        if not isinstance(page, dict):
+            page = {}
+        tabs = context.get("tabs", [])
+        if not isinstance(tabs, list):
+            tabs = []
+        modal_state = context.get("modal_state", {})
+        if not isinstance(modal_state, dict):
+            modal_state = {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []}
+        snapshot = context.get("snapshot", {})
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        active_element = self._compact_context_element(context.get("active_element", {}))
+        if not active_element and isinstance(context.get("active_element"), dict) and context.get("active_element", {}).get("error"):
+            active_element = {"error": str(context.get("active_element", {}).get("error"))}
+        normalized_page = page or {}
+        if not normalized_page:
+            try:
+                normalized_page = self._raw.get_current_url(tab_id=str(tab_id or "").strip()) if str(tab_id or "").strip() else self._raw.get_current_url()
+            except Exception:
+                normalized_page = {}
+        active_tab_id = str(context.get("active_tab_id", "") or normalized_page.get("tab_id", "") or str(tab_id or "").strip())
+        return {
+            "action_name": str(context.get("action_name", "") or action_name or "inspect"),
+            "page": normalized_page,
+            "tabs": tabs,
+            "active_tab_id": active_tab_id,
+            "active_element": active_element,
+            "modal_state": {
+                "visible": bool(modal_state.get("visible", False)),
+                "count": int(modal_state.get("count", 0) or 0),
+                "primary_dialog": modal_state.get("primary_dialog", {}) if isinstance(modal_state.get("primary_dialog", {}), dict) else {},
+                "dialogs": modal_state.get("dialogs", []) if isinstance(modal_state.get("dialogs", []), list) else [],
+            },
+            "snapshot": snapshot or {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
+        }
+
+    def _build_post_action_context(self, action_name: str, tab_id: str = "") -> Dict[str, Any]:
+        normalized_tab_id = str(tab_id or "").strip()
+        if callable(getattr(self._raw, "get_interaction_context", None)):
+            try:
+                payload = self._raw.get_interaction_context(tab_id=normalized_tab_id) if normalized_tab_id else self._raw.get_interaction_context()
+                if isinstance(payload, dict):
+                    context = payload.get("interaction_context", payload)
+                    normalized = self._normalize_interaction_context(context, action_name=action_name, tab_id=normalized_tab_id)
+                    normalized["action_name"] = str(action_name or "inspect")
+                    return normalized
+            except Exception:
+                pass
+        return self._fallback_interaction_context(action_name=action_name, tab_id=normalized_tab_id)
+
+    def _should_attach_post_action_context(self, action_name: str) -> bool:
+        return action_name in {
+            "navigate",
+            "open_tab",
+            "activate_tab",
+            "close_tab",
+            "click",
+            "click_target",
+            "type_text",
+            "type_target",
+            "type_target_and_verify",
+            "press_key",
+            "mouse_move_xy",
+            "mouse_click_xy",
+            "mouse_drag_xy",
+        }
+
+    def _attach_post_action_context(self, action_name: str, payload: Dict[str, Any], *, failure: bool = False) -> Dict[str, Any]:
+        if not isinstance(payload, dict) or not self._supports_managed_post_action_context():
+            return payload
+        if "post_action_context" in payload and isinstance(payload.get("post_action_context"), dict) and payload.get("post_action_context"):
+            payload["post_action_context"] = self._normalize_interaction_context(
+                payload.get("post_action_context", {}),
+                action_name=str(payload.get("post_action_context", {}).get("action_name", "") or (f"{action_name}_failed" if failure else action_name)),
+                tab_id=str(payload.get("tab_id", "") or ""),
+            )
+            return payload
+        if not self._should_attach_post_action_context(action_name):
+            return payload
+        if payload.get("ok") is False or failure:
+            context_action = f"{action_name}_failed"
+        else:
+            context_action = action_name
+        payload["post_action_context"] = self._build_post_action_context(context_action, tab_id=str(payload.get("tab_id", "") or ""))
+        return payload
 
     def _infer_error_code(self, error_type: str, error_text: str) -> str:
         lowered = str(error_text or "").lower()
@@ -171,7 +300,7 @@ class ManagedBrowserSession(BrowserSession):
             payload.update(self._raw.get_current_url())
         except Exception:
             pass
-        return payload
+        return self._attach_post_action_context(action_name, payload, failure=True)
 
     def _normalize_result(self, action_name: str, result: Any, used_fallback: bool = False) -> Dict[str, Any]:
         if not isinstance(result, dict):
@@ -183,7 +312,7 @@ class ManagedBrowserSession(BrowserSession):
             normalized.setdefault("error_code", self._infer_error_code(error_type, error_text))
             normalized.setdefault("recoverable", normalized["error_code"] != "runtime_action_failed")
         normalized["action_meta"] = self._action_meta(action_name, used_fallback=used_fallback)
-        return normalized
+        return self._attach_post_action_context(action_name, normalized, failure=normalized.get("ok") is False)
 
     def _is_unsupported_result(self, result: Dict[str, Any]) -> bool:
         if not isinstance(result, dict):

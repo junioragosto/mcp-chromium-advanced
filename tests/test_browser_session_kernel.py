@@ -62,10 +62,20 @@ class FakeRawSession:
         raise NotImplementedError("inspect_elements is not implemented")
 
     def get_active_element(self, tab_id=""):
-        return {"element": {"tag_name": "input", "id": "name"}}
+        return {"element": {"tag_name": "input", "id": "name", "value": "hello", "role": "textbox"}}
 
     def get_interaction_context(self, tab_id=""):
-        return {"interaction_context": {"tabs": [], "active_element": {}}}
+        return {
+            "interaction_context": {
+                "action_name": "inspect",
+                "page": self.get_current_url(tab_id=tab_id),
+                "tabs": self.list_tabs().get("tabs", []),
+                "active_tab_id": tab_id or "tab-001",
+                "active_element": {"tag_name": "input", "id": "name", "value": "hello", "role": "textbox"},
+                "modal_state": {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []},
+                "snapshot": {"unsupported": True, "message": "fake runtime"},
+            }
+        }
 
     def snapshot(self, target="", by="css", depth=None, boxes=False, filename="", tab_id=""):
         return {"snapshot": {"unsupported": True, "message": "not supported"}}
@@ -274,6 +284,7 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertEqual(caps["runtime_profile"], "fast")
         self.assertEqual(caps["capability_version"], 2)
         self.assertIn("capabilities", caps)
+        self.assertTrue(caps["supports_post_action_context"])
 
     def test_list_candidates_falls_back_to_dom_script(self):
         session = ManagedBrowserSession(FakeRawSession(engine_name="selenium_uc"))
@@ -331,6 +342,15 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_code"], "runtime_action_failed")
         self.assertEqual(result["action_meta"]["engine_name"], "playwright_cli")
+        self.assertEqual(result["post_action_context"]["action_name"], "click_failed")
+
+    def test_action_result_gets_managed_post_action_context(self):
+        session = ManagedBrowserSession(FakeRawSession(engine_name="playwright_cli"))
+        result = session.click("#save")
+        self.assertTrue(result["clicked"])
+        self.assertEqual(result["post_action_context"]["action_name"], "click")
+        self.assertEqual(result["post_action_context"]["active_tab_id"], "tab-001")
+        self.assertEqual(result["post_action_context"]["active_element"]["id"], "name")
 
 
 if __name__ == "__main__":

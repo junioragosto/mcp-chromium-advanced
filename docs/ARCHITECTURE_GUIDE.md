@@ -113,6 +113,7 @@ Responsibilities:
 - preserve the external MCP tool surface while reducing engine-specific `NotImplementedError` leakage
 - cache fallback candidates as executable handles, not only plain CSS selectors, so later target actions can still resolve on complex pages
 - use deep selector replay for open shadow-root targets when plain CSS cannot safely cross runtime boundaries
+- synthesize normalized `post_action_context` for non-diagnostic runtimes so common action results remain structurally consistent across engines
 
 ### Packaging Layer
 

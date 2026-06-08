@@ -115,12 +115,14 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
             typed = session.type_text("#name", "Alice", by="css")
             self.assertTrue(typed.get("typed"))
+            self.assertEqual(typed.get("post_action_context", {}).get("action_name"), "type_text")
 
             verified = session.verify_target_value("#name", "Alice", by="css")
             self.assertTrue(verified.get("verified"))
 
             clicked = session.click_target(submit_ref)
             self.assertTrue(clicked.get("clicked"))
+            self.assertEqual(clicked.get("post_action_context", {}).get("action_name"), "click_target")
 
             waited = session.wait_for("#status.ready", by="css", timeout_seconds=5, condition="visible")
             self.assertTrue(waited.get("found"))
