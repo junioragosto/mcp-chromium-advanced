@@ -56,21 +56,25 @@ This module is the shared core used by both the GUI and the MCP side.
 Main directory:
 
 - `chromium_advanced/browser_engines/`
+- `chromium_advanced/browser_session_kernel.py`
 
 Responsibilities:
 
 - define a shared browser session interface for MCP operations
-- provide `selenium_uc` and `patchright` engine implementations
+- provide `selenium_uc`, `patchright`, and `playwright_cli` runtime implementations
 - keep profile/session ownership outside the engine layer
 - allow the GUI and MCP worker to select an execution backend without changing profile creation logic
 - keep keepalive separate for now so engine migration can happen incrementally
 - expose explicit tab lifecycle operations instead of relying on hidden browser focus
 - expose structured debug telemetry such as console messages, page errors, and network request summaries
+- expose runtime capability metadata separately from raw engine names
+- keep a managed action kernel between MCP tools and raw runtime sessions
 
 Engine-specific note:
 
 - `patchright` collects debug telemetry through per-tab CDP sessions, which makes console output, uncaught exceptions, and failed requests much closer to what a human would inspect in DevTools
 - `selenium_uc` collects similar signals from Chromium browser/performance logs when available, so the API surface is shared but the fidelity is lower
+- `playwright_cli` is treated as a fast runtime with lower native inspection fidelity, then lifted by managed fallbacks for generic DOM inspection, waiting, and snapshot-ref style targeting
 
 ### MCP Service Layer
 
@@ -88,6 +92,23 @@ Responsibilities:
 - prevent unsafe concurrent use
 - keep the daemon stable while allowing the worker to start on demand
 - route session creation through the selected browser engine
+- wrap raw runtime sessions through a managed session kernel before exposing them to MCP tools
+- keep busy-state governance ahead of engine startup so externally running Chromium processes cannot be bypassed by switching runtimes
+- distinguish managed worker reclaim from unexpected worker exit in daemon status reporting
+
+## Managed Action Kernel
+
+Main file:
+
+- `chromium_advanced/browser_session_kernel.py`
+
+Responsibilities:
+
+- normalize runtime capability output into a structured capability contract
+- normalize action failures into stable product-level error codes
+- attach consistent action metadata regardless of runtime
+- provide generic DOM-script fallbacks for runtimes that do not natively implement some higher-level tools
+- preserve the external MCP tool surface while reducing engine-specific `NotImplementedError` leakage
 
 ### Packaging Layer
 
@@ -100,6 +121,7 @@ Responsibilities:
 
 - provide the single public entry point for source usage
 - build the GUI executable and internal MCP helper executables for Windows packaging
+- keep desktop-delivered GUI, daemon, and worker artifacts aligned with the same managed runtime contract used in source mode
 
 ## Session Model
 

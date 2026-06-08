@@ -10,6 +10,10 @@ env/
 
 build/
 dist/
+build_stage/
+build_validate/
+dist_stage/
+dist_validate/
 *.spec
 *.ps1
 *.egg-info/
@@ -39,3 +43,5 @@ tmp/
 tmp_*/
 
 demo/
+.playwright-cli/
+.vscode/

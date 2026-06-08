@@ -9,6 +9,8 @@ def normalize_browser_engine_name(value: str) -> str:
     text = str(value or "").strip().lower()
     if text in {"patchright", "playwright_patchright"}:
         return "patchright"
+    if text in {"playwright_cli", "playwright-cli", "playwrightcli"}:
+        return "playwright_cli"
     return DEFAULT_BROWSER_ENGINE
 
 
@@ -18,6 +20,10 @@ def create_browser_engine(engine_name: str) -> object:
         from chromium_advanced.browser_engines.patchright_engine import PatchrightEngine
 
         return PatchrightEngine()
+    if normalized == "playwright_cli":
+        from chromium_advanced.browser_engines.playwright_cli_engine import PlaywrightCliEngine
+
+        return PlaywrightCliEngine()
     from chromium_advanced.browser_engines.selenium_uc_engine import SeleniumUCEngine
 
     return SeleniumUCEngine()

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import multiprocessing
 import os
 import platform
+import re
 import socket
 import subprocess
 import sys
@@ -32,6 +33,33 @@ HEALTHCHECK_TIMEOUT_SECONDS = 0.5
 WORKER_START_TIMEOUT_SECONDS = 15.0
 WATCHDOG_INTERVAL_SECONDS = 2.0
 ERROR_ALREADY_EXISTS = 183
+WORKER_SESSION_STARTED_PATTERN = re.compile(
+    r"\[MCP-WORKER\]\s+session\s+started:.*session_id=(?P<session_id>\S+)"
+)
+WORKER_SESSION_REUSED_PATTERN = re.compile(
+    r"\[MCP-WORKER\]\s+session\s+reused:.*session_id=(?P<session_id>\S+)"
+)
+WORKER_SESSION_CLOSED_PATTERN = re.compile(
+    r"\[MCP-WORKER\]\s+session\s+closed:.*session_id=(?P<session_id>\S+)"
+)
+
+
+def safe_print(text: str) -> None:
+    message = str(text or "")
+    data = (message + "\n").encode("utf-8", errors="replace")
+    stream = getattr(sys, "stdout", None)
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        try:
+            buffer.write(data)
+            buffer.flush()
+            return
+        except Exception:
+            pass
+    try:
+        print(message, flush=True)
+    except Exception:
+        pass
 
 
 def normalize_path(path: str) -> str:
@@ -163,6 +191,8 @@ class WorkerManager:
         self._last_exit_code: Optional[int] = None
         self._last_stop_reason = ""
         self._worker_ready_once = False
+        self._active_browser_session_ids: set[str] = set()
+        self._worker_log_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
         self._watchdog_thread.start()
@@ -188,6 +218,51 @@ class WorkerManager:
         with self._lock:
             self._last_activity_at = time.time()
 
+    def _handle_worker_log_line(self, line: str) -> None:
+        text = str(line or "").rstrip()
+        if not text:
+            return
+        safe_print(text)
+        started_match = WORKER_SESSION_STARTED_PATTERN.search(text)
+        if started_match:
+            session_id = str(started_match.group("session_id") or "").strip()
+            if session_id:
+                with self._lock:
+                    self._active_browser_session_ids.add(session_id)
+            return
+        reused_match = WORKER_SESSION_REUSED_PATTERN.search(text)
+        if reused_match:
+            session_id = str(reused_match.group("session_id") or "").strip()
+            if session_id:
+                with self._lock:
+                    self._active_browser_session_ids.add(session_id)
+            return
+        closed_match = WORKER_SESSION_CLOSED_PATTERN.search(text)
+        if closed_match:
+            session_id = str(closed_match.group("session_id") or "").strip()
+            if session_id:
+                with self._lock:
+                    self._active_browser_session_ids.discard(session_id)
+
+    def _start_worker_log_thread(self, process: subprocess.Popen) -> None:
+        if process.stdout is None:
+            return
+
+        def _pump() -> None:
+            try:
+                for raw_line in process.stdout:
+                    self._handle_worker_log_line(raw_line)
+            except Exception as exc:
+                safe_print(f"[{now_text()}] [MCP-DAEMON] worker log pump failed: {exc}")
+            finally:
+                try:
+                    process.stdout.close()
+                except Exception:
+                    pass
+
+        self._worker_log_thread = threading.Thread(target=_pump, daemon=True)
+        self._worker_log_thread.start()
+
     def ensure_worker_running(self) -> Dict:
         with self._lock:
             self._cleanup_dead_process_locked()
@@ -209,12 +284,20 @@ class WorkerManager:
                 log_level=self.log_level,
                 config_path=self.config_path,
             )
-            print(f"[{now_text()}] [MCP-DAEMON] starting worker: {' '.join(command)}", flush=True)
+            safe_print(f"[{now_text()}] [MCP-DAEMON] starting worker: {' '.join(command)}")
             self._process = subprocess.Popen(
                 command,
                 cwd=get_project_root(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
                 **get_hidden_subprocess_kwargs(),
             )
+            self._active_browser_session_ids.clear()
+            self._start_worker_log_thread(self._process)
             self._last_start_at = time.time()
             self._last_request_at = self._last_start_at
             self._last_activity_at = self._last_start_at
@@ -261,6 +344,8 @@ class WorkerManager:
                 "worker_listening": worker_listening,
                 "worker_port": self.worker_port,
                 "active_proxy_requests": self._active_proxy_requests,
+                "active_browser_session_count": len(self._active_browser_session_ids),
+                "active_browser_session_ids": sorted(self._active_browser_session_ids),
                 "idle_timeout_seconds": self.idle_timeout_seconds,
                 "idle_seconds": idle_seconds,
                 "last_request_at": self._last_request_at,
@@ -284,10 +369,7 @@ class WorkerManager:
         classify_as_unexpected = exited_during_active_request or exited_before_ready
         if classify_as_unexpected and exit_code != 0 and not self._last_error:
             self._last_error = f"worker exited unexpectedly with code {exit_code}"
-        print(
-            f"[{now_text()}] [MCP-DAEMON] worker exited: code={exit_code}",
-            flush=True,
-        )
+        safe_print(f"[{now_text()}] [MCP-DAEMON] worker exited: code={exit_code}")
         self._process = None
         self._last_stop_at = time.time()
         if not self._last_stop_reason:
@@ -306,10 +388,7 @@ class WorkerManager:
         if process is None:
             self._last_stop_at = time.time()
             return
-        print(
-            f"[{now_text()}] [MCP-DAEMON] stopping worker: reason={self._last_stop_reason}",
-            flush=True,
-        )
+        safe_print(f"[{now_text()}] [MCP-DAEMON] stopping worker: reason={self._last_stop_reason}")
         self._terminate_process_tree(process.pid)
         try:
             process.terminate()
@@ -320,9 +399,18 @@ class WorkerManager:
                 process.wait(timeout=5)
             except Exception:
                 pass
-        self._last_exit_code = process.poll()
+        raw_exit_code = process.poll()
+        # Managed shutdowns are daemon-orchestrated lifecycle events, not
+        # worker crashes. Avoid surfacing a synthetic non-zero exit code from a
+        # forced terminate/kill as if it were an unexpected worker failure.
+        if self._last_stop_reason in {"api_stop", "idle_timeout", "daemon_shutdown"}:
+            self._last_exit_code = None
+        else:
+            self._last_exit_code = raw_exit_code
         self._process = None
         self._worker_ready_once = False
+        self._active_browser_session_ids.clear()
+        self._worker_log_thread = None
         self._last_stop_at = time.time()
 
     def _terminate_process_tree(self, root_pid: int) -> None:
@@ -353,11 +441,19 @@ class WorkerManager:
                 self._cleanup_dead_process_locked()
                 if self._process is None:
                     continue
-                if self._last_activity_at <= 0:
+                if self._active_browser_session_ids:
                     continue
-                if (time.time() - self._last_activity_at) < self.idle_timeout_seconds:
+                last_idle_basis_at = self._last_request_at or self._last_start_at or self._last_activity_at
+                if last_idle_basis_at <= 0:
+                    continue
+                if (time.time() - last_idle_basis_at) < self.idle_timeout_seconds:
                     continue
                 self._stop_worker_locked("idle_timeout")
+
+    def is_worker_running(self) -> bool:
+        with self._lock:
+            self._cleanup_dead_process_locked()
+            return self._is_worker_healthy_locked()
 
 
 def create_daemon_app(
@@ -420,6 +516,7 @@ def create_daemon_app(
         return worker_manager.stop_worker("api_stop")
 
     async def proxy_to_worker(request: Request, tail: str = ""):
+        method_upper = request.method.upper()
         client_host = getattr(request.client, "host", "") or "-"
         client_port = getattr(request.client, "port", "") or "-"
         target_label = public_path if not tail else f"{public_path.rstrip('/')}/{tail.lstrip('/')}"
@@ -431,24 +528,34 @@ def create_daemon_app(
         ).strip()
         user_agent = (request.headers.get("user-agent") or "").strip()
         accept = (request.headers.get("accept") or "").strip()
-        print(
+        safe_print(
             (
                 f"[{now_text()}] [MCP-DAEMON] proxy request: {request.method} {target_label} "
                 f"from {client_host}:{client_port} session_id={'yes' if session_id else 'no'} "
                 f"user_agent={user_agent or '-'} accept={accept or '-'}"
-            ),
-            flush=True,
+            )
         )
 
         # Prevent generic localhost probes from waking the worker up. In
         # streamable-http mode, session streams and session deletion require a
         # session ID, while session creation starts with POST.
-        if transport == "streamable-http" and request.method.upper() != "POST" and not session_id:
+        if transport == "streamable-http" and method_upper != "POST" and not session_id:
             detail = {
                 "error": "Missing session ID",
                 "message": "This request must include an MCP session ID header.",
             }
-            status_code = 400 if request.method.upper() in {"GET", "HEAD", "DELETE"} else 405
+            status_code = 400 if method_upper in {"GET", "HEAD", "DELETE"} else 405
+            return JSONResponse(detail, status_code=status_code)
+
+        # Once the worker has been reclaimed, lingering streamable-http GET or
+        # DELETE requests for an old MCP session should not wake it back up.
+        # The client must create a fresh session via POST when it has new work.
+        if transport == "streamable-http" and method_upper != "POST" and not worker_manager.is_worker_running():
+            detail = {
+                "error": "MCP session is not active",
+                "message": "The worker is not running. Create a new MCP session with POST before retrying this request.",
+            }
+            status_code = 404 if method_upper in {"GET", "DELETE", "HEAD"} else 405
             return JSONResponse(detail, status_code=status_code)
 
         try:
@@ -491,14 +598,13 @@ def create_daemon_app(
 
         async def close_stream() -> None:
             worker_manager.end_proxy_request()
-            print(
-                f"[{now_text()}] [MCP-DAEMON] proxy request complete: {request.method} {target_label} from {client_host}:{client_port}",
-                flush=True,
+            safe_print(
+                f"[{now_text()}] [MCP-DAEMON] proxy request complete: {request.method} {target_label} from {client_host}:{client_port}"
             )
             await backend_response.aclose()
             await client.aclose()
 
-        if request.method.upper() == "HEAD":
+        if method_upper == "HEAD":
             data = await backend_response.aread()
             worker_manager.mark_proxy_activity()
             await close_stream()

@@ -1,0 +1,1158 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+import uuid
+from typing import Any, Dict, List, Optional
+
+from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
+from chromium_advanced.chromium_profile_lib import (
+    detect_fingerprint_extension_dir,
+    get_hidden_subprocess_kwargs,
+    now_text,
+    resolve_chromium_binary,
+)
+
+
+TAB_LINE_PATTERN = re.compile(r"^- (\d+): (?:(\(current\)) )?\[(.*)\]\((.*)\)$")
+CONSOLE_LINE_PATTERN = re.compile(r"^\[(?P<level>[A-Z]+)\]\s+(?P<text>.*?)(?:\s+@\s+(?P<url>.*?):(?P<line>\d+))?$")
+REQUEST_LINE_PATTERN = re.compile(
+    r"^(?P<index>\d+)\.\s+\[(?P<method>[A-Z]+)\]\s+(?P<url>\S+)(?:\s+=>\s+\[(?P<status>\d+)\](?:\s+.*)?)?\s*$"
+)
+SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
+
+
+def _slugify(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in str(value or ""))
+    return cleaned.strip("-") or "profile"
+
+
+def _parse_json_loose(text: str) -> Any:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"raw": raw}
+
+
+def _parse_nested_result(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped:
+        return value
+    if stripped[:1] in {'{', '[', '"'}:
+        try:
+            return json.loads(stripped)
+        except Exception:
+            return value
+    return value
+
+
+def _selector_to_target(selector: str, by: str = "css") -> str:
+    normalized_by = str(by or "css").strip().lower()
+    if normalized_by == "css":
+        return selector
+    if normalized_by == "xpath":
+        return f"xpath={selector}"
+    if normalized_by == "id":
+        return f"#{selector}"
+    if normalized_by == "name":
+        return f"[name={json.dumps(selector)}]"
+    if normalized_by == "tag":
+        return selector
+    if normalized_by == "class":
+        return f".{selector}"
+    if normalized_by in {"link_text", "partial_link_text"}:
+        return f"text={selector}"
+    raise ValueError(f"unsupported selector type: {by}")
+
+
+def _tab_id_for_index(index: int) -> str:
+    return f"tab-{int(index):03d}"
+
+
+class PlaywrightCliBrowserSession(BrowserSession):
+    engine_name = "playwright_cli"
+
+    def __init__(
+        self,
+        *,
+        cli_path: str,
+        session_name: str,
+        config_path: str,
+        output_root: str,
+        user_data_root: str,
+        profile_name: str,
+    ):
+        self.cli_path = cli_path
+        self.session_name = session_name
+        self.config_path = config_path
+        self.output_root = output_root
+        self.user_data_root = user_data_root
+        self.profile_name = profile_name
+        self._last_tabs: List[Dict[str, Any]] = []
+        self._console_offsets: Dict[str, int] = {"": 0}
+        self._request_offsets: Dict[str, int] = {"": 0}
+
+    def _parse_cli_json(self, stdout: str) -> Any:
+        return _parse_json_loose(stdout)
+
+    def _normalize_cli_error(self, result: Dict[str, Any]) -> RuntimeError:
+        parsed = result.get("parsed", {})
+        if isinstance(parsed, dict) and parsed.get("isError"):
+            message = str(parsed.get("error") or "playwright-cli action failed").strip()
+            return RuntimeError(message)
+        stderr = str(result.get("stderr") or "").strip()
+        stdout = str(result.get("stdout") or "").strip()
+        returncode = int(result.get("returncode", 0) or 0)
+        message = stderr or stdout or f"playwright-cli exited with {returncode}"
+        return RuntimeError(message)
+
+    def _run_cli(
+        self,
+        args: List[str],
+        *,
+        expect_process_success: bool = True,
+        expect_action_success: bool = True,
+    ) -> Dict[str, Any]:
+        command = [self.cli_path, f"-s={self.session_name}", *args]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            cwd=self.output_root,
+            **get_hidden_subprocess_kwargs(),
+        )
+        result = {
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "parsed": self._parse_cli_json(completed.stdout),
+        }
+        if expect_process_success and completed.returncode != 0:
+            raise self._normalize_cli_error(result)
+
+        if expect_action_success and isinstance(result["parsed"], dict) and result["parsed"].get("isError"):
+            raise self._normalize_cli_error(result)
+
+        return result
+
+    def _action_error_payload(
+        self,
+        action_name: str,
+        error: Exception,
+        *,
+        target: str = "",
+        selector: str = "",
+        by: str = "css",
+        text_filter: str = "",
+    ) -> Dict:
+        payload = {
+            "ok": False,
+            "action_name": action_name,
+            "error": str(error),
+            "error_type": type(error).__name__,
+            "target": str(target or "").strip(),
+            "selector": str(selector or "").strip(),
+            "by": str(by or "css"),
+            "text_filter": str(text_filter or "").strip(),
+        }
+        try:
+            payload.update(self.get_current_url())
+        except Exception:
+            payload.update({"url": "", "title": ""})
+        return payload
+
+    def _extract_result(self, payload: Dict[str, Any]) -> Any:
+        parsed = payload.get("parsed", {})
+        if isinstance(parsed, dict) and "result" in parsed:
+            return _parse_nested_result(parsed.get("result"))
+        if isinstance(parsed, dict) and "snapshot" in parsed:
+            return parsed.get("snapshot")
+        return parsed
+
+    def _refresh_tabs(self) -> List[Dict[str, Any]]:
+        payload = self._run_cli(["tab-list", "--json"])
+        result = self._extract_result(payload)
+        tabs: List[Dict[str, Any]] = []
+        if isinstance(result, str):
+            for raw_line in result.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                match = TAB_LINE_PATTERN.match(line)
+                if not match:
+                    continue
+                index = int(match.group(1))
+                active = bool(match.group(2))
+                title = str(match.group(3) or "")
+                url = str(match.group(4) or "")
+                tabs.append(
+                    {
+                        "tab_id": _tab_id_for_index(index),
+                        "index": index,
+                        "title": title,
+                        "url": url,
+                        "active": active,
+                        "alive": True,
+                    }
+                )
+        self._last_tabs = tabs
+        return tabs
+
+    def _resolve_index(self, tab_id: str = "", index: int = -1, title_contains: str = "", url_contains: str = "") -> int:
+        tabs = self._refresh_tabs()
+        if not tabs:
+            raise RuntimeError("No live tabs are available in the current session.")
+        normalized_tab_id = str(tab_id or "").strip()
+        if normalized_tab_id:
+            for tab in tabs:
+                if tab.get("tab_id") == normalized_tab_id:
+                    return int(tab.get("index", 0))
+            raise ValueError(f"Tab not found: {normalized_tab_id}")
+        if int(index) >= 0:
+            for tab in tabs:
+                if int(tab.get("index", -1)) == int(index):
+                    return int(index)
+            raise ValueError(f"Tab index out of range: {index}")
+        title_filter = str(title_contains or "").strip().lower()
+        if title_filter:
+            for tab in tabs:
+                if title_filter in str(tab.get("title", "") or "").lower():
+                    return int(tab.get("index", 0))
+        url_filter = str(url_contains or "").strip().lower()
+        if url_filter:
+            for tab in tabs:
+                if url_filter in str(tab.get("url", "") or "").lower():
+                    return int(tab.get("index", 0))
+        for tab in tabs:
+            if tab.get("active"):
+                return int(tab.get("index", 0))
+        return int(tabs[0].get("index", 0))
+
+    def _select_index(self, index: int) -> None:
+        self._run_cli(["tab-select", str(int(index)), "--json"])
+
+    def _ensure_tab_selected(self, tab_id: str = "", index: int = -1, title_contains: str = "", url_contains: str = "") -> int:
+        resolved_index = self._resolve_index(tab_id=tab_id, index=index, title_contains=title_contains, url_contains=url_contains)
+        self._select_index(resolved_index)
+        return resolved_index
+
+    def _build_eval_function(self, script: str) -> str:
+        stripped = str(script or "").strip()
+        if not stripped:
+            raise ValueError("script is required")
+        if "=>" in stripped or stripped.startswith("function") or stripped.startswith("async "):
+            return stripped
+        if stripped.startswith("return ") or "\n" in stripped or ";" in stripped:
+            return f"() => {{ {stripped} }}"
+        return f"() => ({stripped})"
+
+    def _read_target_value(self, target: str) -> str:
+        details = self._describe_target_via_eval(target)
+        return str(details.get("value", "") or "")
+
+    def _eval_json(self, func_text: str, tab_id: str = "") -> Any:
+        if str(tab_id or "").strip():
+            self._ensure_tab_selected(tab_id=tab_id)
+        payload = self._run_cli(["eval", func_text, "--json"])
+        return self._extract_result(payload)
+
+    def _describe_target_via_eval(self, target: str) -> Dict[str, Any]:
+        payload = self._run_cli(
+            [
+                "eval",
+                "(element) => { const rect = element.getBoundingClientRect(); return {tag_name: (element.tagName || '').toLowerCase(), text: (element.innerText || element.textContent || '').trim(), value: 'value' in element ? (element.value || '') : '', visible: !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length), enabled: !element.disabled, checked: 'checked' in element ? !!element.checked : null, selected: 'value' in element ? (element.value || '') : '', id: element.id || '', name: element.getAttribute('name') || '', class: element.getAttribute('class') || '', aria_label: element.getAttribute('aria-label') || '', role: element.getAttribute('role') || '', href: element.getAttribute('href') || '', outer_html: element.outerHTML || '', box: {x: rect.x, y: rect.y, width: rect.width, height: rect.height} }; }",
+                target,
+                "--json",
+            ]
+        )
+        result = self._extract_result(payload)
+        return result if isinstance(result, dict) else {"raw": result}
+
+    def _eval_on_target(self, target: str, func_text: str) -> Any:
+        payload = self._run_cli(["eval", func_text, target, "--json"])
+        return self._extract_result(payload)
+
+    def _global_console_offset(self, tab_id: str = "") -> int:
+        return int(self._console_offsets.get(str(tab_id or "").strip(), 0))
+
+    def _global_request_offset(self, tab_id: str = "") -> int:
+        return int(self._request_offsets.get(str(tab_id or "").strip(), 0))
+
+    def get_summary(self) -> BrowserSessionSummary:
+        try:
+            result = self._eval_json("() => ({url: location.href, title: document.title})")
+            if isinstance(result, dict):
+                return BrowserSessionSummary(
+                    current_url=str(result.get("url", "") or ""),
+                    title=str(result.get("title", "") or ""),
+                    alive=True,
+                )
+        except Exception:
+            pass
+        return BrowserSessionSummary(alive=False)
+
+    def get_capabilities(self) -> Dict:
+        return {
+            "engine_name": self.engine_name,
+            "supports_snapshot": True,
+            "supports_snapshot_refs": False,
+            "supports_target_actions": True,
+            "supports_selector_actions": True,
+            "supports_highlight": False,
+            "supports_coordinates": False,
+            "supports_post_action_context": False,
+            "supports_tabs": True,
+            "supports_console_messages": True,
+            "supports_page_errors": True,
+            "supports_network_requests": True,
+        }
+
+    def list_tabs(self) -> Dict:
+        tabs = self._refresh_tabs()
+        active_tab = next((tab for tab in tabs if tab.get("active")), {})
+        return {
+            **self.get_current_url(tab_id=str(active_tab.get("tab_id", ""))),
+            "active_tab_id": str(active_tab.get("tab_id", "")),
+            "count": len(tabs),
+            "tabs": tabs,
+        }
+
+    def open_tab(
+        self,
+        url: str = "",
+        activate: bool = True,
+        wait_for_ready: bool = True,
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        del wait_for_ready, timeout_seconds
+        original_tabs = self._refresh_tabs()
+        original_active = next((tab for tab in original_tabs if tab.get("active")), {})
+        original_index = int(original_active.get("index", 0)) if original_active else 0
+        self._run_cli(["tab-new", "--json"])
+        tabs_after_open = self._refresh_tabs()
+        if not tabs_after_open:
+            raise RuntimeError("No tabs found after opening a new tab.")
+        new_tab = max(tabs_after_open, key=lambda item: int(item.get("index", -1)))
+        new_index = int(new_tab.get("index", 0))
+        self._select_index(new_index)
+        if str(url or "").strip():
+            self._run_cli(["goto", str(url).strip(), "--json"])
+            tabs_after_open = self._refresh_tabs()
+            new_tab = next((item for item in tabs_after_open if int(item.get("index", -1)) == new_index), new_tab)
+        if not activate:
+            self._select_index(original_index)
+        tabs_final = self._refresh_tabs()
+        return {
+            **self.get_current_url(),
+            "opened": True,
+            "activated": bool(activate),
+            "tab": new_tab,
+            "tabs": tabs_final,
+        }
+
+    def activate_tab(
+        self,
+        tab_id: str = "",
+        index: int = -1,
+        title_contains: str = "",
+        url_contains: str = "",
+    ) -> Dict:
+        resolved_index = self._ensure_tab_selected(
+            tab_id=tab_id,
+            index=index,
+            title_contains=title_contains,
+            url_contains=url_contains,
+        )
+        tabs = self._refresh_tabs()
+        active_tab = next((tab for tab in tabs if int(tab.get("index", -1)) == resolved_index), {})
+        return {
+            **self.get_current_url(tab_id=str(active_tab.get("tab_id", ""))),
+            "activated": True,
+            "tab": active_tab,
+            "tabs": tabs,
+        }
+
+    def close_tab(self, tab_id: str = "", index: int = -1) -> Dict:
+        resolved_index = self._resolve_index(tab_id=tab_id, index=index)
+        tabs_before = self._refresh_tabs()
+        closed_tab = next((tab for tab in tabs_before if int(tab.get("index", -1)) == resolved_index), {})
+        self._select_index(resolved_index)
+        self._run_cli(["tab-close", str(resolved_index), "--json"])
+        tabs_after = self._refresh_tabs()
+        return {
+            **self.get_current_url(),
+            "closed": True,
+            "closed_tab": closed_tab,
+            "tabs": tabs_after,
+        }
+
+    def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        del wait_for_ready, timeout_seconds
+        if str(tab_id or "").strip():
+            self._ensure_tab_selected(tab_id=tab_id)
+        self._run_cli(["goto", str(url).strip(), "--json"])
+        return self.get_current_url(tab_id=tab_id)
+
+    def get_current_url(self, tab_id: str = "") -> Dict:
+        result = self._eval_json("() => ({url: location.href, title: document.title})", tab_id=tab_id)
+        if not isinstance(result, dict):
+            result = {}
+        active_index = self._resolve_index(tab_id=tab_id) if self._refresh_tabs() else 0
+        return {
+            "tab_id": _tab_id_for_index(active_index),
+            "url": str(result.get("url", "") or ""),
+            "title": str(result.get("title", "") or ""),
+        }
+
+    def get_page_text(self, tab_id: str = "") -> Dict:
+        result = self._eval_json("() => document.body ? document.body.innerText : ''", tab_id=tab_id)
+        return {**self.get_current_url(tab_id=tab_id), "text": str(result or "")}
+
+    def get_page_html(self, tab_id: str = "") -> Dict:
+        result = self._eval_json("() => document.documentElement ? document.documentElement.outerHTML : ''", tab_id=tab_id)
+        return {**self.get_current_url(tab_id=tab_id), "html": str(result or "")}
+
+    def inspect_elements(self, selector: str, by: str = "css", limit: int = 10, tab_id: str = "") -> Dict:
+        raise NotImplementedError("inspect_elements is not implemented for playwright_cli in v1.")
+
+    def get_active_element(self, tab_id: str = "") -> Dict:
+        result = self._eval_json(
+            "() => { const el = document.activeElement; if (!el) return {}; return {tag_name: (el.tagName || '').toLowerCase(), text: (el.innerText || el.textContent || '').trim(), id: el.id || '', class: el.className || '', value: 'value' in el ? (el.value || '') : ''}; }",
+            tab_id=tab_id,
+        )
+        return {**self.get_current_url(tab_id=tab_id), "element": result if isinstance(result, dict) else {}}
+
+    def get_interaction_context(self, tab_id: str = "") -> Dict:
+        return {
+            **self.get_current_url(tab_id=tab_id),
+            "interaction_context": {
+                "tabs": self._refresh_tabs(),
+                "active_element": self.get_active_element(tab_id=tab_id).get("element", {}),
+            },
+        }
+
+    def snapshot(
+        self,
+        target: str = "",
+        by: str = "css",
+        depth: int | None = None,
+        boxes: bool = False,
+        filename: str = "",
+        tab_id: str = "",
+    ) -> Dict:
+        if str(tab_id or "").strip():
+            self._ensure_tab_selected(tab_id=tab_id)
+        args = ["snapshot"]
+        if str(target or "").strip():
+            args.append(target if SNAPSHOT_REF_PATTERN.match(str(target).strip()) else _selector_to_target(str(target).strip(), by))
+        if str(filename or "").strip():
+            args.append(f"--filename={str(filename).strip()}")
+        if depth is not None and int(depth) > 0:
+            args.append(f"--depth={int(depth)}")
+        if boxes:
+            args.append("--boxes")
+        args.append("--json")
+        payload = self._run_cli(args)
+        parsed = payload.get("parsed", {})
+        return {**self.get_current_url(tab_id=tab_id), **(parsed if isinstance(parsed, dict) else {"snapshot": parsed})}
+
+    def list_candidates(
+        self,
+        target: str = "",
+        by: str = "css",
+        text_filter: str = "",
+        limit: int = 25,
+        include_boxes: bool = True,
+        tab_id: str = "",
+    ) -> Dict:
+        raise NotImplementedError("list_candidates is not implemented for playwright_cli in v1.")
+
+    def wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict:
+        raise NotImplementedError("wait_for is not implemented for playwright_cli in v1.")
+
+    def click(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
+        del timeout_seconds
+        target = _selector_to_target(selector, by)
+        try:
+            payload = self._run_cli(["click", target, "--json"])
+            result = payload.get("parsed", {})
+            return {**self.get_current_url(), **(result if isinstance(result, dict) else {"result": result}), "clicked": True}
+        except Exception as exc:
+            return self._action_error_payload("click", exc, selector=selector, by=by, text_filter=selector)
+
+    def click_target(
+        self,
+        target: str,
+        element: str = "",
+        by: str = "css",
+        timeout_seconds: int = 20,
+        double_click: bool = False,
+    ) -> Dict:
+        del element, timeout_seconds
+        resolved_target = str(target or "").strip()
+        if not SNAPSHOT_REF_PATTERN.match(resolved_target):
+            resolved_target = _selector_to_target(resolved_target, by)
+        command_name = "dblclick" if double_click else "click"
+        try:
+            payload = self._run_cli([command_name, resolved_target, "--json"])
+            result = payload.get("parsed", {})
+            return {**self.get_current_url(), **(result if isinstance(result, dict) else {"result": result}), "clicked": True}
+        except Exception as exc:
+            return self._action_error_payload("click_target", exc, target=target, by=by, text_filter=target)
+
+    def type_text(
+        self,
+        selector: str,
+        text: str,
+        by: str = "css",
+        clear_first: bool = True,
+        submit: bool = False,
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        del clear_first, timeout_seconds
+        target = _selector_to_target(selector, by)
+        args = ["fill", target, str(text), "--json"]
+        if submit:
+            args.insert(3, "--submit")
+        try:
+            payload = self._run_cli(args)
+            result = payload.get("parsed", {})
+            actual_value = self._read_target_value(target)
+            return {
+                **self.get_current_url(),
+                **(result if isinstance(result, dict) else {"result": result}),
+                "typed": True,
+                "submitted": bool(submit),
+                "actual_value": actual_value,
+                "value_matches": actual_value == str(text),
+            }
+        except Exception as exc:
+            return self._action_error_payload("type_text", exc, selector=selector, by=by, text_filter=text)
+
+    def type_target(
+        self,
+        target: str,
+        text: str,
+        element: str = "",
+        by: str = "css",
+        clear_first: bool = True,
+        submit: bool = False,
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        del element, clear_first, timeout_seconds
+        resolved_target = str(target or "").strip()
+        if not SNAPSHOT_REF_PATTERN.match(resolved_target):
+            resolved_target = _selector_to_target(resolved_target, by)
+        args = ["fill", resolved_target, str(text), "--json"]
+        if submit:
+            args.insert(3, "--submit")
+        try:
+            payload = self._run_cli(args)
+            result = payload.get("parsed", {})
+            actual_value = self._read_target_value(resolved_target)
+            return {
+                **self.get_current_url(),
+                **(result if isinstance(result, dict) else {"result": result}),
+                "typed": True,
+                "submitted": bool(submit),
+                "actual_value": actual_value,
+                "value_matches": actual_value == str(text),
+            }
+        except Exception as exc:
+            return self._action_error_payload("type_target", exc, target=target, by=by, text_filter=text)
+
+    def type_target_and_verify(
+        self,
+        target: str,
+        text: str,
+        element: str = "",
+        by: str = "css",
+        clear_first: bool = True,
+        submit: bool = False,
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        type_result = self.type_target(
+            target=target,
+            text=text,
+            element=element,
+            by=by,
+            clear_first=clear_first,
+            submit=submit,
+            timeout_seconds=timeout_seconds,
+        )
+        if not type_result.get("typed"):
+            return type_result
+        verify_result = self.verify_target_value(target=target, expected_value=text, element=element, by=by)
+        return {
+            **self.get_current_url(),
+            "typed": True,
+            "verified": bool(verify_result.get("verified")),
+            "submitted": bool(submit),
+            "target": str(target or "").strip(),
+            "type_result": type_result,
+            "verify_result": verify_result,
+        }
+
+    def press_key(
+        self,
+        key: str,
+        count: int = 1,
+        selector: str = "",
+        by: str = "css",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        del timeout_seconds
+        try:
+            if str(selector or "").strip():
+                click_result = self.click(selector, by=by)
+                if not click_result.get("clicked"):
+                    return click_result
+            repeat = max(1, int(count))
+            for _ in range(repeat):
+                self._run_cli(["press", str(key), "--json"])
+            return {**self.get_current_url(), "pressed": True, "key": key, "count": repeat}
+        except Exception as exc:
+            return self._action_error_payload("press_key", exc, selector=selector, by=by, text_filter=key)
+
+    def run_script(self, script: str, tab_id: str = "") -> Dict:
+        result = self._eval_json(self._build_eval_function(script), tab_id=tab_id)
+        return {**self.get_current_url(tab_id=tab_id), "result": result}
+
+    def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:
+        if str(tab_id or "").strip():
+            self._ensure_tab_selected(tab_id=tab_id)
+        payload = self._run_cli(["console", "--json"])
+        raw_result = self._extract_result(payload)
+        messages: List[Dict[str, Any]] = []
+        if isinstance(raw_result, str):
+            for line in raw_result.splitlines():
+                line = line.strip()
+                if not line or line.startswith("Total messages:"):
+                    continue
+                match = CONSOLE_LINE_PATTERN.match(line)
+                if not match:
+                    continue
+                message_level = str(match.group("level") or "").lower()
+                message = {
+                    "timestamp": 0,
+                    "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+                    "type": message_level,
+                    "text": str(match.group("text") or "").strip(),
+                    "location": {
+                        "url": str(match.group("url") or ""),
+                        "line_number": int(match.group("line")) if match.group("line") else None,
+                        "column_number": None,
+                    },
+                }
+                messages.append(message)
+        offset = self._global_console_offset(tab_id=tab_id)
+        messages = messages[offset:]
+        normalized_level = str(level or "").strip().lower()
+        if normalized_level:
+            messages = [item for item in messages if item.get("type") == normalized_level]
+        messages = messages[-max(1, int(limit)) :]
+        return {
+            **self.get_current_url(tab_id=tab_id),
+            "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+            "level": normalized_level,
+            "count": len(messages),
+            "messages": messages,
+            "raw_result": raw_result if isinstance(raw_result, str) else "",
+        }
+
+    def get_page_errors(self, tab_id: str = "", limit: int = 100) -> Dict:
+        console_messages = self.get_console_messages(tab_id=tab_id, limit=max(1, int(limit) * 4)).get("messages", [])
+        errors = []
+        for item in console_messages:
+            if str(item.get("type", "") or "").lower() not in {"error"}:
+                continue
+            location = item.get("location", {}) if isinstance(item.get("location"), dict) else {}
+            errors.append(
+                {
+                    "timestamp": item.get("timestamp", 0),
+                    "tab_id": item.get("tab_id", ""),
+                    "message": str(item.get("text", "") or ""),
+                    "url": str(location.get("url", "") or ""),
+                    "line_number": location.get("line_number"),
+                    "column_number": location.get("column_number"),
+                }
+            )
+        errors = errors[-max(1, int(limit)) :]
+        return {
+            **self.get_current_url(tab_id=tab_id),
+            "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+            "count": len(errors),
+            "errors": errors,
+        }
+
+    def get_network_requests(self, tab_id: str = "", limit: int = 100, failed_only: bool = False) -> Dict:
+        if str(tab_id or "").strip():
+            self._ensure_tab_selected(tab_id=tab_id)
+        payload = self._run_cli(["requests", "--json"])
+        raw_result = self._extract_result(payload)
+        requests: List[Dict[str, Any]] = []
+        if isinstance(raw_result, str):
+            for line in raw_result.splitlines():
+                line = line.strip()
+                if not line or line.startswith("Note:"):
+                    continue
+                match = REQUEST_LINE_PATTERN.match(line)
+                if not match:
+                    continue
+                status_value = int(match.group("status")) if match.group("status") else None
+                request_item = {
+                    "index": int(match.group("index")),
+                    "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+                    "event": "response" if status_value is not None else "request",
+                    "method": str(match.group("method") or ""),
+                    "url": str(match.group("url") or ""),
+                    "status": status_value,
+                    "ok": status_value is None or status_value < 400,
+                    "failure": "",
+                }
+                requests.append(request_item)
+        offset = self._global_request_offset(tab_id=tab_id)
+        requests = requests[offset:]
+        if bool(failed_only):
+            requests = [item for item in requests if item.get("ok") is False]
+        requests = requests[-max(1, int(limit)) :]
+        return {
+            **self.get_current_url(tab_id=tab_id),
+            "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+            "failed_only": bool(failed_only),
+            "count": len(requests),
+            "requests": requests,
+            "raw_result": raw_result if isinstance(raw_result, str) else "",
+        }
+
+    def clear_debug_buffers(self, tab_id: str = "") -> Dict:
+        normalized_tab_id = str(tab_id or "").strip()
+        console_payload = self._run_cli(["console", "--json"])
+        raw_console = self._extract_result(console_payload)
+        console_count = 0
+        if isinstance(raw_console, str):
+            console_count = sum(
+                1 for line in raw_console.splitlines() if line.strip().startswith("[") and not line.strip().startswith("[Screenshot")
+            )
+        request_payload = self._run_cli(["requests", "--json"])
+        raw_requests = self._extract_result(request_payload)
+        request_count = 0
+        if isinstance(raw_requests, str):
+            request_count = sum(1 for line in raw_requests.splitlines() if REQUEST_LINE_PATTERN.match(line.strip()))
+        self._console_offsets[normalized_tab_id] = console_count
+        self._request_offsets[normalized_tab_id] = request_count
+        if not normalized_tab_id:
+            active_tab_id = self.get_current_url().get("tab_id", "")
+            if active_tab_id:
+                self._console_offsets[active_tab_id] = console_count
+                self._request_offsets[active_tab_id] = request_count
+        return {
+            **(self.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self.get_current_url()),
+            "cleared": True,
+            "tab_id": normalized_tab_id,
+        }
+
+    def diagnose_page(self, tab_id: str = "") -> Dict:
+        resolved = self.get_current_url(tab_id=tab_id)
+        console_messages = self.get_console_messages(tab_id=tab_id, limit=20).get("messages", [])
+        page_errors = self.get_page_errors(tab_id=tab_id, limit=20).get("errors", [])
+        failed_requests = self.get_network_requests(tab_id=tab_id, limit=30, failed_only=True).get("requests", [])
+        all_requests = self.get_network_requests(tab_id=tab_id, limit=30, failed_only=False).get("requests", [])
+        bad_responses = [
+            item
+            for item in all_requests
+            if isinstance(item.get("status"), int) and int(item.get("status")) >= 400
+        ]
+        return {
+            **resolved,
+            "tab_id": resolved.get("tab_id", ""),
+            "diagnosis": {
+                "interaction_context": self.get_interaction_context(tab_id=tab_id).get("interaction_context", {}),
+                "console_messages": console_messages,
+                "page_errors": page_errors,
+                "failed_requests": failed_requests,
+                "bad_responses": bad_responses[-20:],
+            },
+        }
+
+    def verify_text(self, text: str) -> Dict:
+        try:
+            page_text = self.get_page_text().get("text", "")
+            if str(text) not in str(page_text):
+                raise ValueError(f'Text not visible: "{text}"')
+            return {**self.get_current_url(), "verified": True, "text": str(text)}
+        except Exception as exc:
+            return self._action_error_payload("verify_text", exc, text_filter=str(text))
+
+    def verify_dialog(self, accessible_name: str = "", text: str = "") -> Dict:
+        try:
+            result = self._eval_json(
+                "() => { const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = el => { const style = window.getComputedStyle(el); if (!style || style.visibility === 'hidden' || style.display === 'none') return false; const rect = el.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; }; const selectors = ['dialog[open]', '[role=\"dialog\"]', 'details-dialog', '.Overlay--modal', '.Popover-message']; const dialogs = []; for (const selector of selectors) { for (const el of document.querySelectorAll(selector)) { if (!isVisible(el)) continue; dialogs.push({ tag_name: (el.tagName || '').toLowerCase(), role: normalize(el.getAttribute('role') || ''), aria_label: normalize(el.getAttribute('aria-label') || ''), text: normalize(el.innerText || el.textContent || '') }); } } return dialogs; }"
+            )
+            dialogs = result if isinstance(result, list) else []
+            expected_name = str(accessible_name or "").strip().lower()
+            expected_text = str(text or "").strip().lower()
+            matched = []
+            for dialog in dialogs:
+                dialog_name = str(dialog.get("aria_label", "") or "").strip().lower()
+                dialog_text = str(dialog.get("text", "") or "").strip().lower()
+                if expected_name and expected_name not in dialog_name:
+                    continue
+                if expected_text and expected_text not in dialog_text:
+                    continue
+                matched.append(dialog)
+            if not matched:
+                raise ValueError("Dialog not visible or did not match the expected name/text.")
+            return {**self.get_current_url(), "verified": True, "count": len(matched), "dialog": matched[0], "dialogs": matched}
+        except Exception as exc:
+            return self._action_error_payload("verify_dialog", exc, text_filter=str(accessible_name or text or "dialog"))
+
+    def verify_active_element(self, target: str = "", by: str = "css", element: str = "") -> Dict:
+        del element
+        try:
+            active = self.get_active_element().get("element", {})
+            if str(target or "").strip():
+                resolved_target = str(target or "").strip()
+                if SNAPSHOT_REF_PATTERN.match(resolved_target):
+                    raise NotImplementedError("verify_active_element does not support snapshot refs for playwright_cli.")
+                selector_target = _selector_to_target(resolved_target, by)
+                is_active = bool(
+                    self._eval_on_target(selector_target, "(element) => element === document.activeElement")
+                )
+                if not is_active:
+                    raise ValueError(f'Active element did not match target: "{target}"')
+                return {**self.get_current_url(), "verified": True, "target": str(target), "element": self._describe_target_via_eval(selector_target)}
+            if not active:
+                raise ValueError("No active element found.")
+            return {**self.get_current_url(), "verified": True, "element": active}
+        except Exception as exc:
+            return self._action_error_payload("verify_active_element", exc, target=target, by=by, text_filter=target or "active element")
+
+    def verify_target_value(self, target: str, expected_value: str, element: str = "", by: str = "css") -> Dict:
+        del element
+        try:
+            resolved_target = str(target or "").strip()
+            if not SNAPSHOT_REF_PATTERN.match(resolved_target):
+                resolved_target = _selector_to_target(resolved_target, by)
+            details = self._describe_target_via_eval(resolved_target)
+            actual_value = str(details.get("value", "") or "")
+            if actual_value != str(expected_value):
+                raise ValueError(
+                    f'Value mismatch for target "{target}": expected "{expected_value}", got "{actual_value}"'
+                )
+            return {
+                **self.get_current_url(),
+                "verified": True,
+                "target": str(target or "").strip(),
+                "expected_value": str(expected_value),
+                "actual_value": actual_value,
+            }
+        except Exception as exc:
+            return self._action_error_payload("verify_target_value", exc, target=target, by=by, text_filter=expected_value)
+
+    def verify_target_visible(self, target: str, element: str = "", by: str = "css") -> Dict:
+        del element
+        try:
+            resolved_target = str(target or "").strip()
+            if not SNAPSHOT_REF_PATTERN.match(resolved_target):
+                resolved_target = _selector_to_target(resolved_target, by)
+            details = self._describe_target_via_eval(resolved_target)
+            visible = bool(details.get("visible"))
+            if not visible:
+                raise ValueError(f'Target not visible: "{target}"')
+            return {
+                **self.get_current_url(),
+                "verified": True,
+                "target": str(target or "").strip(),
+                "visible": True,
+                "tag_name": details.get("tag_name", ""),
+                "text": details.get("text", ""),
+            }
+        except Exception as exc:
+            return self._action_error_payload("verify_target_visible", exc, target=target, by=by, text_filter=target)
+
+    def describe_target(self, target: str, element: str = "", by: str = "css", include_box: bool = True) -> Dict:
+        del element
+        resolved_target = str(target or "").strip()
+        result = {
+            **self.get_current_url(),
+            "target": resolved_target,
+        }
+        if SNAPSHOT_REF_PATTERN.match(resolved_target):
+            result.update(
+                {
+                    "visible": False,
+                    "enabled": False,
+                    "message": "snapshot ref diagnostics are not supported for playwright_cli in v1.",
+                }
+            )
+            return result
+        selector_target = _selector_to_target(resolved_target, by)
+        details = self._describe_target_via_eval(selector_target)
+        result.update(
+            {
+                "visible": bool(details.get("visible")),
+                "enabled": bool(details.get("enabled", True)),
+                "tag_name": details.get("tag_name", ""),
+                "text": details.get("text", ""),
+                "id": details.get("id", ""),
+                "name": details.get("name", ""),
+                "class": details.get("class", ""),
+                "aria_label": details.get("aria_label", ""),
+                "role": details.get("role", ""),
+                "value": details.get("value", ""),
+                "href": details.get("href", ""),
+                "outer_html": details.get("outer_html", ""),
+            }
+        )
+        if include_box:
+            result["box"] = details.get("box", {})
+        return result
+
+    def diagnose_target(
+        self,
+        target: str,
+        element: str = "",
+        by: str = "css",
+        text_filter: str = "",
+        limit: int = 10,
+    ) -> Dict:
+        del element, limit
+        resolved_target = str(target or "").strip()
+        diagnosis = {
+            **self.get_current_url(),
+            "target": resolved_target,
+            "by": str(by or "css"),
+            "text_filter": str(text_filter or ""),
+            "is_snapshot_ref": bool(SNAPSHOT_REF_PATTERN.match(resolved_target)),
+        }
+        if SNAPSHOT_REF_PATTERN.match(resolved_target):
+            diagnosis.update(
+                {
+                    "status": "unsupported_snapshot_ref",
+                    "message": "Snapshot ref diagnostics are not supported for playwright_cli in v1.",
+                    "interaction_context": self.get_interaction_context().get("interaction_context", {}),
+                }
+            )
+            return diagnosis
+        try:
+            diagnosis["details"] = self.describe_target(resolved_target, by=by, include_box=True)
+            diagnosis["status"] = "resolved"
+            diagnosis["message"] = "target resolved successfully"
+        except Exception as exc:
+            diagnosis["status"] = "resolve_failed"
+            diagnosis["message"] = str(exc)
+        diagnosis["interaction_context"] = self.get_interaction_context().get("interaction_context", {})
+        return diagnosis
+
+    def verify_element(self, role: str, accessible_name: str) -> Dict:
+        try:
+            result = self._eval_json(
+                f"""() => {{
+                    const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim();
+                    const expectedRole = {json.dumps(str(role or ""))};
+                    const expectedName = {json.dumps(str(accessible_name or ""))};
+                    const getName = el => normalize(el.getAttribute('aria-label') || el.innerText || el.textContent || el.getAttribute('title') || '');
+                    const selectorsByRole = {{
+                        button: 'button, input[type=\"button\"], input[type=\"submit\"], input[type=\"reset\"], [role=\"button\"]',
+                        link: 'a[href], [role=\"link\"]',
+                        textbox: 'textarea, input[type=\"text\"], input[type=\"email\"], input[type=\"search\"], input[type=\"url\"], input[type=\"tel\"], input[type=\"password\"], input[type=\"number\"], [role=\"textbox\"]',
+                        checkbox: 'input[type=\"checkbox\"], [role=\"checkbox\"]',
+                        radio: 'input[type=\"radio\"], [role=\"radio\"]',
+                        combobox: 'select, [role=\"combobox\"]',
+                        dialog: 'dialog[open], [role=\"dialog\"]'
+                    }};
+                    const selector = selectorsByRole[expectedRole] || `[role="${{expectedRole}}"]`;
+                    const nodes = Array.from(document.querySelectorAll(selector));
+                    const matches = nodes.filter(el => getName(el) === expectedName && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                    return matches.map(el => {{
+                        const rect = el.getBoundingClientRect();
+                        return {{ box: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }} }};
+                    }});
+                }}"""
+            )
+            matches = result if isinstance(result, list) else []
+            if not matches:
+                raise ValueError(f'Element not visible: role="{role}" accessible_name="{accessible_name}"')
+            return {
+                **self.get_current_url(),
+                "verified": True,
+                "role": str(role),
+                "accessible_name": str(accessible_name),
+                "count": len(matches),
+                "box": matches[0].get("box", {}),
+            }
+        except Exception as exc:
+            return self._action_error_payload("verify_element", exc, text_filter=str(accessible_name or role))
+
+    def highlight_target(self, target: str, element: str = "", by: str = "css", style: str = "") -> Dict:
+        raise NotImplementedError("highlight_target is not implemented for playwright_cli in v1.")
+
+    def clear_highlights(self) -> Dict:
+        raise NotImplementedError("clear_highlights is not implemented for playwright_cli in v1.")
+
+    def mouse_move_xy(self, x: float, y: float) -> Dict:
+        raise NotImplementedError("mouse_move_xy is not implemented for playwright_cli in v1.")
+
+    def mouse_click_xy(
+        self,
+        x: float,
+        y: float,
+        button: str = "left",
+        click_count: int = 1,
+        delay_ms: int = 0,
+    ) -> Dict:
+        raise NotImplementedError("mouse_click_xy is not implemented for playwright_cli in v1.")
+
+    def mouse_drag_xy(self, start_x: float, start_y: float, end_x: float, end_y: float) -> Dict:
+        raise NotImplementedError("mouse_drag_xy is not implemented for playwright_cli in v1.")
+
+    def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
+        if str(tab_id or "").strip():
+            self._ensure_tab_selected(tab_id=tab_id)
+        output_path = str(filename or "").strip()
+        if not output_path:
+            output_path = os.path.join(self.output_root, "page.png")
+        payload = self._run_cli(["screenshot", f"--filename={output_path}", "--json"])
+        result = payload.get("parsed", {})
+        return {**self.get_current_url(tab_id=tab_id), **(result if isinstance(result, dict) else {"result": result}), "path": output_path}
+
+    def close(self) -> None:
+        try:
+            self._run_cli(["close", "--json"], expect_process_success=True, expect_action_success=False)
+        finally:
+            try:
+                shutil.rmtree(self.output_root, ignore_errors=True)
+            except Exception:
+                pass
+
+
+class PlaywrightCliEngine(BrowserEngine):
+    engine_name = "playwright_cli"
+
+    def create_session(self, config: Dict, profile_name: str) -> BrowserSession:
+        cli_path = shutil.which("playwright-cli") or shutil.which("playwright-cli.CMD")
+        if not cli_path:
+            raise RuntimeError("playwright-cli was not found on PATH. Install it with: npm install -g @playwright/cli")
+
+        paths = config.get("paths", {})
+        launch_settings = config.get("launch", {})
+        chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
+        user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
+        if not chromium_binary or not os.path.exists(chromium_binary):
+            raise FileNotFoundError(f"chromium browser not found: {chromium_binary or paths.get('chromium_dir', '')}")
+        if not os.path.isdir(user_data_root):
+            raise FileNotFoundError(f"UserData root not found: {user_data_root}")
+        if not os.path.isdir(os.path.join(user_data_root, profile_name)):
+            raise FileNotFoundError(f"Profile directory not found: {os.path.join(user_data_root, profile_name)}")
+
+        output_root = tempfile.mkdtemp(prefix=f"chromium-advanced-playwright-cli-{_slugify(profile_name)}-")
+        session_name = f"playwright-cli-{_slugify(profile_name)}-{uuid.uuid4().hex[:8]}"
+        config_path = os.path.join(output_root, "cli.config.json")
+        launch_args = [
+            "--no-first-run",
+            "--no-default-browser-check",
+            f"--profile-directory={profile_name}",
+        ]
+        if bool(launch_settings.get("start_maximized", True)):
+            launch_args.append("--start-maximized")
+        window_size = str(launch_settings.get("window_size", "") or "").strip()
+        if window_size:
+            launch_args.append(f"--window-size={window_size}")
+        extension_dir = ""
+        if bool(launch_settings.get("load_fingerprint_extension", True)):
+            extension_dir = detect_fingerprint_extension_dir(paths.get("fingerprint_zip_path", ""))
+            if extension_dir:
+                launch_args.append(f"--load-extension={extension_dir}")
+        extra_args = launch_settings.get("extra_args", [])
+        if isinstance(extra_args, list):
+            launch_args.extend([str(item).strip() for item in extra_args if str(item).strip()])
+        cli_config = {
+            "browser": {
+                "browserName": "chromium",
+                "userDataDir": user_data_root,
+                "launchOptions": {
+                    "executablePath": chromium_binary,
+                    "headless": False,
+                    "args": launch_args,
+                },
+            }
+        }
+        try:
+            with open(config_path, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(cli_config, handle, ensure_ascii=False, indent=2)
+
+            print(
+                (
+                    f"[{now_text()}] [PLAYWRIGHT-CLI] create_session begin: "
+                    f"profile={profile_name} cli={cli_path} chromium={chromium_binary} "
+                    f"user_data_root={user_data_root}"
+                ),
+                flush=True,
+            )
+            command = [
+                cli_path,
+                f"-s={session_name}",
+                "--config",
+                config_path,
+                "open",
+                "about:blank",
+                "--persistent",
+                "--json",
+                "--headed",
+            ]
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                cwd=output_root,
+                **get_hidden_subprocess_kwargs(),
+            )
+            result = {
+                "command": command,
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+                "parsed": _parse_json_loose(completed.stdout),
+            }
+            if completed.returncode != 0:
+                message = str(completed.stderr or completed.stdout or f"playwright-cli exited with {completed.returncode}").strip()
+                raise RuntimeError(message)
+            parsed = result["parsed"]
+            nested_result = parsed.get("result") if isinstance(parsed, dict) else None
+            if isinstance(nested_result, dict) and nested_result.get("isError"):
+                raise RuntimeError(str(nested_result.get("error", "playwright-cli open failed")))
+
+            session = PlaywrightCliBrowserSession(
+                cli_path=cli_path,
+                session_name=session_name,
+                config_path=config_path,
+                output_root=output_root,
+                user_data_root=user_data_root,
+                profile_name=profile_name,
+            )
+            print(
+                f"[{now_text()}] [PLAYWRIGHT-CLI] create_session ready: profile={profile_name} session={session_name}",
+                flush=True,
+            )
+            return session
+        except Exception:
+            shutil.rmtree(output_root, ignore_errors=True)
+            raise

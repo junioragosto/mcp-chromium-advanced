@@ -27,6 +27,12 @@ For the Chromium Profile Manager service on this machine:
 5. Before starting a browser session, still check occupancy and confirm the identity parameter with the user if it is not specified.
 6. For multi-tab or debug-heavy tasks, use the same explicit tab activation and structured debug tools as the normal browser identity MCP workflow.
 
+For the Chromium Profile Manager service on this machine, the supported engine values remain:
+
+- `selenium_uc`
+- `patchright`
+- `playwright_cli`
+
 ## Typical Host Discovery
 
 Inside WSL, the Windows host is often the default gateway:
@@ -58,3 +64,4 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - If WSL cannot reach the service, check Windows firewall rules and listening host configuration before debugging MCP semantics.
 - After connectivity is confirmed, follow the same identity confirmation and occupancy rules as the normal browser identity MCP workflow.
 - After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, and `browser_diagnose_page` over screenshot-only diagnosis.
+- If the Windows side reports `external_chromium_running`, treat it as a real governance block, not a WSL networking issue.
