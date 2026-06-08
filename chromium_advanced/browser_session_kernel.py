@@ -12,6 +12,7 @@ from chromium_advanced.browser_engines.base import BrowserSession, BrowserSessio
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
 SNAPSHOT_LINE_REF_PATTERN = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
 HTML_PREVIEW_LIMIT = 12000
+RECENT_ACTION_LIMIT = 40
 
 CAPABILITY_MATRIX = {
     "snapshot": "supports_snapshot",
@@ -126,6 +127,7 @@ class ManagedBrowserSession(BrowserSession):
         self._snapshot_ref_map: Dict[str, Dict[str, Any]] = {}
         self._last_snapshot_text = ""
         self._next_snapshot_ref = 1
+        self._recent_actions: list[Dict[str, Any]] = []
 
     def _safe_raw_capabilities(self) -> Dict[str, Any]:
         try:
@@ -141,6 +143,40 @@ class ManagedBrowserSession(BrowserSession):
             "runtime_profile": self._capabilities.runtime_profile,
             "used_fallback": bool(used_fallback),
         }
+
+    def _record_action_trace(self, action_name: str, payload: Dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        trace = {
+            "timestamp": round(time.time(), 3),
+            "action_name": str(action_name or ""),
+            "ok": payload.get("ok") is not False,
+            "engine_name": self._capabilities.engine_name,
+            "runtime_profile": self._capabilities.runtime_profile,
+            "used_fallback": bool((payload.get("action_meta") or {}).get("used_fallback")),
+            "tab_id": str(payload.get("tab_id", "") or ""),
+            "url": str(payload.get("url", "") or ""),
+            "title": str(payload.get("title", "") or ""),
+            "target": str(payload.get("target", "") or payload.get("selector", "") or ""),
+            "error_code": str(payload.get("error_code", "") or ""),
+            "error_type": str(payload.get("error_type", "") or ""),
+            "recoverable": bool(payload.get("recoverable", False)),
+        }
+        self._recent_actions.append(trace)
+        overflow = len(self._recent_actions) - RECENT_ACTION_LIMIT
+        if overflow > 0:
+            del self._recent_actions[:overflow]
+
+    def _recent_actions_payload(self, limit: int = 10) -> list[Dict[str, Any]]:
+        bounded = max(1, int(limit))
+        return [dict(item) for item in self._recent_actions[-bounded:]]
+
+    def _recent_actions_excluding_current(self, action_name: str, limit: int = 10) -> list[Dict[str, Any]]:
+        items = [dict(item) for item in self._recent_actions]
+        if items and str(items[-1].get("action_name", "") or "") == str(action_name or ""):
+            items = items[:-1]
+        bounded = max(1, int(limit))
+        return items[-bounded:]
 
     def _supports_managed_post_action_context(self) -> bool:
         return bool(self._capabilities.post_action_context)
@@ -178,6 +214,7 @@ class ManagedBrowserSession(BrowserSession):
             "active_element": active_element,
             "modal_state": {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []},
             "snapshot": {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
+            "recent_actions": self._recent_actions_payload(limit=8),
         }
 
     def _normalize_interaction_context(self, payload: Any, action_name: str = "inspect", tab_id: str = "") -> Dict[str, Any]:
@@ -217,6 +254,9 @@ class ManagedBrowserSession(BrowserSession):
                 "dialogs": modal_state.get("dialogs", []) if isinstance(modal_state.get("dialogs", []), list) else [],
             },
             "snapshot": snapshot or {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
+            "recent_actions": context.get("recent_actions", self._recent_actions_payload(limit=8))
+            if isinstance(context.get("recent_actions", None), list)
+            else self._recent_actions_payload(limit=8),
         }
 
     def _build_post_action_context(self, action_name: str, tab_id: str = "") -> Dict[str, Any]:
@@ -301,7 +341,11 @@ class ManagedBrowserSession(BrowserSession):
             payload.update(self._raw.get_current_url())
         except Exception:
             pass
-        return self._attach_post_action_context(action_name, payload, failure=True)
+        normalized = self._attach_post_action_context(action_name, payload, failure=True)
+        self._record_action_trace(action_name, normalized)
+        if isinstance(normalized.get("post_action_context"), dict):
+            normalized["post_action_context"]["recent_actions"] = self._recent_actions_payload(limit=8)
+        return normalized
 
     def _normalize_result(self, action_name: str, result: Any, used_fallback: bool = False) -> Dict[str, Any]:
         if not isinstance(result, dict):
@@ -315,7 +359,38 @@ class ManagedBrowserSession(BrowserSession):
         if action_name == "get_page_html":
             normalized = self._normalize_html_payload(normalized)
         normalized["action_meta"] = self._action_meta(action_name, used_fallback=used_fallback)
-        return self._attach_post_action_context(action_name, normalized, failure=normalized.get("ok") is False)
+        normalized = self._attach_post_action_context(action_name, normalized, failure=normalized.get("ok") is False)
+        self._record_action_trace(action_name, normalized)
+        if isinstance(normalized.get("post_action_context"), dict):
+            normalized["post_action_context"]["recent_actions"] = self._recent_actions_payload(limit=8)
+        return normalized
+
+    def _augment_diagnosis_payload(self, action_name: str, payload: Dict[str, Any], *, target: str = "", by: str = "css", text_filter: str = "") -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return payload
+        interaction_context = payload.get("interaction_context")
+        if isinstance(interaction_context, dict):
+            payload["interaction_context"] = self._normalize_interaction_context(
+                interaction_context,
+                action_name=action_name,
+                tab_id=str(payload.get("tab_id", "") or ""),
+            )
+        elif action_name == "diagnose_target":
+            payload["interaction_context"] = self._build_post_action_context("diagnose_target", tab_id=str(payload.get("tab_id", "") or ""))
+        elif action_name == "diagnose_page":
+            payload["interaction_context"] = self._build_post_action_context("diagnose_page", tab_id=str(payload.get("tab_id", "") or ""))
+        payload["recent_actions"] = self._recent_actions_excluding_current(action_name, limit=12)
+        payload["recent_failures"] = [item for item in self._recent_actions_excluding_current(action_name, limit=12) if not item.get("ok")]
+        payload["managed_diagnostics"] = {
+            "engine_name": self._capabilities.engine_name,
+            "runtime_profile": self._capabilities.runtime_profile,
+            "recent_action_count": len(self._recent_actions),
+            "recent_failure_count": len([item for item in self._recent_actions if not item.get("ok")]),
+            "target": str(target or ""),
+            "by": str(by or "css"),
+            "text_filter": str(text_filter or ""),
+        }
+        return payload
 
     def _normalize_html_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         html = payload.get("html")
@@ -1109,7 +1184,15 @@ class ManagedBrowserSession(BrowserSession):
         return self._dispatch("get_active_element", lambda: self._raw.get_active_element(tab_id=tab_id))
 
     def get_interaction_context(self, tab_id: str = "") -> Dict:
-        return self._dispatch("get_interaction_context", lambda: self._raw.get_interaction_context(tab_id=tab_id))
+        result = self._dispatch("get_interaction_context", lambda: self._raw.get_interaction_context(tab_id=tab_id))
+        interaction_context = result.get("interaction_context")
+        if isinstance(interaction_context, dict):
+            result["interaction_context"] = self._normalize_interaction_context(
+                interaction_context,
+                action_name="inspect",
+                tab_id=str(result.get("tab_id", "") or tab_id or ""),
+            )
+        return result
 
     def snapshot(self, target: str = "", by: str = "css", depth: int | None = None, boxes: bool = False, filename: str = "", tab_id: str = "") -> Dict:
         if self._capabilities.engine_name != "playwright_cli" and not self._capabilities.snapshot_refs:
@@ -1243,7 +1326,8 @@ class ManagedBrowserSession(BrowserSession):
         return self._dispatch("clear_debug_buffers", lambda: self._raw.clear_debug_buffers(tab_id=tab_id))
 
     def diagnose_page(self, tab_id: str = "") -> Dict:
-        return self._dispatch("diagnose_page", lambda: self._raw.diagnose_page(tab_id=tab_id))
+        result = self._dispatch("diagnose_page", lambda: self._raw.diagnose_page(tab_id=tab_id))
+        return self._augment_diagnosis_payload("diagnose_page", result)
 
     def verify_text(self, text: str) -> Dict:
         return self._dispatch("verify_text", lambda: self._raw.verify_text(text))
@@ -1280,11 +1364,12 @@ class ManagedBrowserSession(BrowserSession):
         )
 
     def diagnose_target(self, target: str, element: str = "", by: str = "css", text_filter: str = "", limit: int = 10) -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "diagnose_target",
             lambda: self._raw.diagnose_target(target=target, element=element, by=by, text_filter=text_filter, limit=limit),
             fallback=lambda: self._fallback_diagnose_target(target=target, element=element, by=by, text_filter=text_filter, limit=limit),
         )
+        return self._augment_diagnosis_payload("diagnose_target", result, target=target, by=by, text_filter=text_filter)
 
     def verify_element(self, role: str, accessible_name: str) -> Dict:
         return self._dispatch("verify_element", lambda: self._raw.verify_element(role=role, accessible_name=accessible_name))
