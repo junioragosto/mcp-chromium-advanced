@@ -151,6 +151,8 @@ Status: verified by unit test and local runtime integration test
 - managed runtime now records a bounded recent-action trace with timestamps, target hints, fallback usage, and normalized failure codes
 - `diagnose_page` and `diagnose_target` now include managed diagnostic metadata plus recent action history instead of relying only on raw engine-specific payloads
 - diagnostic payloads exclude the current diagnose call from the history view so the returned trace stays focused on the causal user/runtime actions
+- interaction contexts and diagnosis payloads now include a normalized `session_health` snapshot with liveness, recent failure counts, and generic recovery hints
+- fallback candidate ranking now boosts transient UI controls such as popup/menu/listbox actions so overlay-heavy frontends are less dependent on exploratory retries
 
 Status: verified by unit test and local runtime integration test
 

@@ -360,6 +360,9 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertEqual(result["post_action_context"]["active_tab_id"], "tab-001")
         self.assertEqual(result["post_action_context"]["active_element"]["id"], "name")
         self.assertGreaterEqual(len(result["post_action_context"]["recent_actions"]), 1)
+        self.assertIn("session_health", result["post_action_context"])
+        self.assertTrue(result["post_action_context"]["session_health"]["alive"])
+        self.assertEqual(result["post_action_context"]["session_health"]["recovery_hint"], "none")
 
     def test_get_page_html_is_truncated_and_summarized_for_large_pages(self):
         raw = FakeRawSession(engine_name="playwright_cli")
@@ -421,6 +424,10 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertGreaterEqual(len(result["recent_actions"]), 2)
         self.assertEqual(result["recent_actions"][-1]["action_name"], "type_text")
         self.assertIn("managed_diagnostics", result)
+        self.assertIn("session_health", result)
+        self.assertTrue(result["session_health"]["alive"])
+        self.assertEqual(result["session_health"]["recovery_hint"], "none")
+        self.assertIn("session_health", result["interaction_context"])
 
     def test_diagnose_target_includes_managed_metadata(self):
         session = ManagedBrowserSession(FakeRawSession(engine_name="selenium_uc"))
@@ -430,6 +437,73 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertEqual(result["managed_diagnostics"]["target"], "#save")
         self.assertEqual(result["managed_diagnostics"]["by"], "css")
         self.assertIn("recent_actions", result)
+        self.assertIn("session_health", result)
+        self.assertTrue(result["session_health"]["alive"])
+
+    def test_interaction_context_exposes_session_health(self):
+        session = ManagedBrowserSession(FakeRawSession(engine_name="playwright_cli"))
+        result = session.get_interaction_context()
+        context = result["interaction_context"]
+        self.assertIn("session_health", context)
+        self.assertTrue(context["session_health"]["alive"])
+        self.assertEqual(context["session_health"]["engine_name"], "playwright_cli")
+        self.assertEqual(context["session_health"]["runtime_profile"], "fast")
+
+    def test_session_health_suggests_refresh_for_target_failures(self):
+        raw = FakeRawSession(engine_name="playwright_cli")
+        raw.raise_click = RuntimeError("element is not visible")
+        session = ManagedBrowserSession(raw)
+        result = session.click("#missing")
+        health = result["post_action_context"]["session_health"]
+        self.assertEqual(result["error_code"], "target_not_interactable")
+        self.assertEqual(health["recent_failure_count"], 1)
+        self.assertEqual(health["recovery_hint"], "refresh_candidates_or_snapshot")
+
+    def test_list_candidates_boosts_transient_popup_controls(self):
+        raw = FakeRawSession(engine_name="selenium_uc")
+        raw.candidate_entries = [
+            {
+                "tag_name": "button",
+                "text": "Newest",
+                "value": "",
+                "visible": True,
+                "enabled": True,
+                "id": "newest-button",
+                "name": "",
+                "class": "btn",
+                "aria_label": "Newest",
+                "aria_expanded": "",
+                "aria_haspopup": "",
+                "role": "button",
+                "href": "",
+                "outer_html": "<button>Newest</button>",
+                "selector": "#newest-button",
+                "box": {"x": 1, "y": 2, "width": 100, "height": 20},
+            },
+            {
+                "tag_name": "div",
+                "text": "Newest first",
+                "value": "",
+                "visible": True,
+                "enabled": True,
+                "id": "newest-item",
+                "name": "",
+                "class": "dropdown-menu overlay-item",
+                "aria_label": "Newest first",
+                "aria_expanded": "true",
+                "aria_haspopup": "menu",
+                "role": "menuitem",
+                "href": "",
+                "outer_html": "<div role='menuitem'>Newest first</div>",
+                "selector": "#newest-item",
+                "box": {"x": 1, "y": 2, "width": 100, "height": 20},
+            },
+        ]
+        session = ManagedBrowserSession(raw)
+        result = session.list_candidates(text_filter="newest", limit=5)
+        self.assertEqual(result["candidates"][0]["id"], "newest-item")
+        self.assertEqual(result["candidates"][0]["role"], "menuitem")
+        self.assertGreater(result["candidates"][0]["match_score"], result["candidates"][1]["match_score"])
 
 
 if __name__ == "__main__":
