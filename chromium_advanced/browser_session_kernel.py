@@ -178,6 +178,48 @@ class ManagedBrowserSession(BrowserSession):
         bounded = max(1, int(limit))
         return items[-bounded:]
 
+    def _build_session_health_snapshot(self) -> Dict[str, Any]:
+        try:
+            summary = self._raw.get_summary()
+            alive = bool(summary.alive)
+            current_url = str(summary.current_url or "")
+            title = str(summary.title or "")
+        except Exception as exc:
+            return {
+                "alive": False,
+                "current_url": "",
+                "title": "",
+                "engine_name": self._capabilities.engine_name,
+                "runtime_profile": self._capabilities.runtime_profile,
+                "recent_action_count": len(self._recent_actions),
+                "recent_failure_count": len([item for item in self._recent_actions if not item.get("ok")]),
+                "last_action_name": str(self._recent_actions[-1].get("action_name", "") or "") if self._recent_actions else "",
+                "recovery_hint": "recreate_session",
+                "summary_error": str(exc),
+            }
+        last_failure = next((item for item in reversed(self._recent_actions) if not item.get("ok")), {})
+        recovery_hint = "none" if alive else "recreate_session"
+        if alive and last_failure:
+            error_code = str(last_failure.get("error_code", "") or "")
+            if error_code == "timeout":
+                recovery_hint = "retry_or_diagnose_page"
+            elif error_code in {"target_not_found", "target_not_interactable"}:
+                recovery_hint = "refresh_candidates_or_snapshot"
+            else:
+                recovery_hint = "diagnose_page"
+        return {
+            "alive": alive,
+            "current_url": current_url,
+            "title": title,
+            "engine_name": self._capabilities.engine_name,
+            "runtime_profile": self._capabilities.runtime_profile,
+            "recent_action_count": len(self._recent_actions),
+            "recent_failure_count": len([item for item in self._recent_actions if not item.get("ok")]),
+            "last_action_name": str(self._recent_actions[-1].get("action_name", "") or "") if self._recent_actions else "",
+            "last_failure": dict(last_failure) if last_failure else {},
+            "recovery_hint": recovery_hint,
+        }
+
     def _supports_managed_post_action_context(self) -> bool:
         return bool(self._capabilities.post_action_context)
 
@@ -215,6 +257,7 @@ class ManagedBrowserSession(BrowserSession):
             "modal_state": {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []},
             "snapshot": {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
             "recent_actions": self._recent_actions_payload(limit=8),
+            "session_health": self._build_session_health_snapshot(),
         }
 
     def _normalize_interaction_context(self, payload: Any, action_name: str = "inspect", tab_id: str = "") -> Dict[str, Any]:
@@ -257,6 +300,9 @@ class ManagedBrowserSession(BrowserSession):
             "recent_actions": context.get("recent_actions", self._recent_actions_payload(limit=8))
             if isinstance(context.get("recent_actions", None), list)
             else self._recent_actions_payload(limit=8),
+            "session_health": context.get("session_health", self._build_session_health_snapshot())
+            if isinstance(context.get("session_health", None), dict)
+            else self._build_session_health_snapshot(),
         }
 
     def _build_post_action_context(self, action_name: str, tab_id: str = "") -> Dict[str, Any]:
@@ -345,6 +391,7 @@ class ManagedBrowserSession(BrowserSession):
         self._record_action_trace(action_name, normalized)
         if isinstance(normalized.get("post_action_context"), dict):
             normalized["post_action_context"]["recent_actions"] = self._recent_actions_payload(limit=8)
+            normalized["post_action_context"]["session_health"] = self._build_session_health_snapshot()
         return normalized
 
     def _normalize_result(self, action_name: str, result: Any, used_fallback: bool = False) -> Dict[str, Any]:
@@ -363,6 +410,7 @@ class ManagedBrowserSession(BrowserSession):
         self._record_action_trace(action_name, normalized)
         if isinstance(normalized.get("post_action_context"), dict):
             normalized["post_action_context"]["recent_actions"] = self._recent_actions_payload(limit=8)
+            normalized["post_action_context"]["session_health"] = self._build_session_health_snapshot()
         return normalized
 
     def _augment_diagnosis_payload(self, action_name: str, payload: Dict[str, Any], *, target: str = "", by: str = "css", text_filter: str = "") -> Dict[str, Any]:
@@ -390,6 +438,7 @@ class ManagedBrowserSession(BrowserSession):
             "by": str(by or "css"),
             "text_filter": str(text_filter or ""),
         }
+        payload["session_health"] = self._build_session_health_snapshot()
         return payload
 
     def _normalize_html_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -435,8 +484,23 @@ class ManagedBrowserSession(BrowserSession):
         role = str(entry.get("role", "") or "").lower()
         if tag_name in {"button", "a", "input", "textarea", "select", "summary"}:
             score += 12
-        if role in {"button", "link", "textbox", "option", "menuitem", "tab"}:
+        if role in {"button", "link", "textbox", "option", "menuitem", "tab", "combobox", "listbox"}:
             score += 10
+        if str(entry.get("aria_haspopup", "") or "").strip():
+            score += 16
+        if str(entry.get("aria_expanded", "") or "").strip().lower() == "true":
+            score += 18
+        if role in {"menuitem", "option"}:
+            score += 24
+        classes = str(entry.get("class", "") or "").lower()
+        if any(token in classes for token in ("menu", "dropdown", "popup", "dialog", "sheet", "overlay")):
+            score += 10
+        if role in {"menuitem", "option", "listbox"} and (
+            str(entry.get("aria_haspopup", "") or "").strip()
+            or str(entry.get("aria_expanded", "") or "").strip().lower() == "true"
+            or any(token in classes for token in ("menu", "dropdown", "popup", "dialog", "sheet", "overlay"))
+        ):
+            score += 140
         filter_text = str(text_filter or "").strip().lower()
         if not filter_text:
             return score
@@ -637,6 +701,8 @@ class ManagedBrowserSession(BrowserSession):
             name: normalize(el.getAttribute('name') || ''),
             class: normalize(el.getAttribute('class') || ''),
             aria_label: normalize(el.getAttribute('aria-label') || ''),
+            aria_expanded: normalize(el.getAttribute('aria-expanded') || ''),
+            aria_haspopup: normalize(el.getAttribute('aria-haspopup') || ''),
             role: normalize(el.getAttribute('role') || ''),
             href: normalize(el.getAttribute('href') || ''),
             outer_html: el.outerHTML || '',
@@ -695,6 +761,8 @@ class ManagedBrowserSession(BrowserSession):
           name: normalize(el.getAttribute('name') || ''),
           class: normalize(el.getAttribute('class') || ''),
           aria_label: normalize(el.getAttribute('aria-label') || ''),
+          aria_expanded: normalize(el.getAttribute('aria-expanded') || ''),
+          aria_haspopup: normalize(el.getAttribute('aria-haspopup') || ''),
           role: normalize(el.getAttribute('role') || ''),
           href: normalize(el.getAttribute('href') || ''),
           selector: buildSelectorWithinRoot(el, el.getRootNode()),

@@ -119,6 +119,8 @@ Responsibilities:
 - compress oversized HTML reads into managed previews plus summaries so high-noise pages do not flood downstream tool context
 - maintain a managed recent-action trace so page and target diagnostics can include the causal steps that led to the current state
 - enrich `diagnose_page` and `diagnose_target` with engine-agnostic managed metadata instead of only forwarding raw backend payloads
+- expose a normalized `session_health` snapshot so action contexts and diagnostics can surface liveness, recent failure pressure, and recovery hints without backend-specific interpretation
+- prioritize transient UI controls such as menu items, popup options, combobox/listbox entries, and overlay-backed actions when managed fallback candidate scoring is used on complex frontends
 
 ### Packaging Layer
 
@@ -159,7 +161,8 @@ For blocked or unstable pages, the intended diagnostic flow is:
 2. inspect recent console messages
 3. inspect recent page errors
 4. inspect recent failed or bad network requests
-5. use the bundled page diagnosis payload before falling back to screenshots
+5. inspect `session_health.recovery_hint` to decide whether to retry, refresh candidates, or recreate the session
+6. use the bundled page diagnosis payload before falling back to screenshots
 
 ## Why Not a Generic Browser Sandbox
 
