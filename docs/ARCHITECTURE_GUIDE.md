@@ -121,6 +121,12 @@ Responsibilities:
 - enrich `diagnose_page` and `diagnose_target` with engine-agnostic managed metadata instead of only forwarding raw backend payloads
 - expose a normalized `session_health` snapshot so action contexts and diagnostics can surface liveness, recent failure pressure, and recovery hints without backend-specific interpretation
 - prioritize transient UI controls such as menu items, popup options, combobox/listbox entries, and overlay-backed actions when managed fallback candidate scoring is used on complex frontends
+- run a unified target-resolution pipeline for `list_candidates`, `describe_target`, `wait_for`, and `diagnose_target` so scoring, scope hints, and fallback stage reporting stay consistent across tools
+- expose `resolution_trace` metadata on managed fallback reads so callers can tell whether the hit came from direct selector resolution, ranked DOM fallback, cached snapshot refs, or snapshot-text scanning
+- enrich fallback DOM extraction with `accessible_name`, `text_preview`, `control_type`, placeholder/title fields, ancestry tags, and overlay/dialog signals so complex component trees do not have to be reduced to raw page text
+- keep `playwright_cli` on short target-scoped eval paths for explicit selectors, while using snapshot-backed enumeration for untargeted candidate scans to avoid oversized CLI eval payloads
+- classify failure pressure into recovery-oriented buckets such as `target_resolution`, `page_synchronization`, `capability_gap`, and `session_lost` so diagnostics can recommend the next action instead of only reporting raw errors
+- detect tab/page drift separately from generic runtime failures so diagnostics can recommend `reactivate_expected_tab`, `reopen_expected_url`, or `retry_on_sticky_tab` without site-specific logic
 
 ### Packaging Layer
 
@@ -134,6 +140,10 @@ Responsibilities:
 - provide the single public entry point for source usage
 - build the GUI executable and internal MCP helper executables for Windows packaging
 - keep desktop-delivered GUI, daemon, and worker artifacts aligned with the same managed runtime contract used in source mode
+
+Packaging note:
+
+- the desktop GUI is built with PyInstaller `--onefile`, so seeing a short-lived parent `ChromiumProfileManager.exe` process plus the real child GUI process is expected bootstrap behavior, not a duplicate second instance of the UI
 
 ## Session Model
 
@@ -162,7 +172,10 @@ For blocked or unstable pages, the intended diagnostic flow is:
 3. inspect recent page errors
 4. inspect recent failed or bad network requests
 5. inspect `session_health.recovery_hint` to decide whether to retry, refresh candidates, or recreate the session
-6. use the bundled page diagnosis payload before falling back to screenshots
+6. inspect `session_health.recovery_actions` and `failure_classification` to decide whether the next step is a scoped retry, page resync, or full session recreation
+7. inspect `resolution_trace` on target-oriented reads to see whether the runtime hit directly, fell back to ranked DOM search, or had to rely on snapshot text
+8. use the bundled page diagnosis payload before falling back to screenshots
+9. if `session_health.failure_classification == "page_drift"`, prefer recovering the expected tab/page before changing selectors or recreating the full session
 
 ## Why Not a Generic Browser Sandbox
 

@@ -102,6 +102,104 @@ class PlaywrightCliBrowserSession(BrowserSession):
         self._last_tabs: List[Dict[str, Any]] = []
         self._console_offsets: Dict[str, int] = {"": 0}
         self._request_offsets: Dict[str, int] = {"": 0}
+        self._sticky_tab_id: str = ""
+        self._expected_page_by_tab: Dict[str, Dict[str, str]] = {}
+        self._last_observed_page_by_tab: Dict[str, Dict[str, str]] = {}
+
+    def _remember_page(self, tab_id: str, url: str = "", title: str = "") -> None:
+        self._commit_expected_page(tab_id=tab_id, url=url, title=title)
+
+    def _commit_expected_page(self, tab_id: str, url: str = "", title: str = "") -> None:
+        normalized_tab_id = str(tab_id or "").strip()
+        if not normalized_tab_id:
+            return
+        self._sticky_tab_id = normalized_tab_id
+        page = {
+            "url": str(url or "").strip(),
+            "title": str(title or "").strip(),
+        }
+        self._expected_page_by_tab[normalized_tab_id] = dict(page)
+        self._last_observed_page_by_tab[normalized_tab_id] = dict(page)
+
+    def _observe_page(self, tab_id: str, url: str = "", title: str = "") -> None:
+        normalized_tab_id = str(tab_id or "").strip()
+        if not normalized_tab_id:
+            return
+        self._sticky_tab_id = normalized_tab_id
+        self._last_observed_page_by_tab[normalized_tab_id] = {
+            "url": str(url or "").strip(),
+            "title": str(title or "").strip(),
+        }
+
+    def _page_memory(self, tab_id: str) -> Dict[str, str]:
+        return dict(self._expected_page_by_tab.get(str(tab_id or "").strip(), {}))
+
+    def _last_observed_page(self, tab_id: str) -> Dict[str, str]:
+        return dict(self._last_observed_page_by_tab.get(str(tab_id or "").strip(), {}))
+
+    def _build_page_drift(self, tab_id: str, current_url: str, current_title: str) -> Dict[str, Any]:
+        memory = self._page_memory(tab_id)
+        expected_url = str(memory.get("url", "") or "")
+        expected_title = str(memory.get("title", "") or "")
+        return {
+            "tab_id": str(tab_id or "").strip(),
+            "drifted": bool(expected_url and str(current_url or "").strip() and expected_url != str(current_url or "").strip()),
+            "expected_url": expected_url,
+            "current_url": str(current_url or "").strip(),
+            "expected_title": expected_title,
+            "current_title": str(current_title or "").strip(),
+        }
+
+    def _attach_page_drift(self, payload: Dict[str, Any], tab_id: str, url: str, title: str) -> Dict[str, Any]:
+        if isinstance(payload, dict):
+            payload["page_drift"] = self._build_page_drift(tab_id=tab_id, current_url=url, current_title=title)
+        return payload
+
+    def _should_promote_observed_page(self, *, action_name: str, tab_id: str, url: str, title: str) -> bool:
+        normalized_action = str(action_name or "").strip().lower()
+        normalized_tab_id = str(tab_id or "").strip()
+        current_url = str(url or "").strip()
+        current_title = str(title or "").strip()
+        if not normalized_tab_id or not current_url:
+            return False
+        if normalized_action in {"navigate", "open_tab", "activate_tab", "close_tab"}:
+            return True
+        if normalized_action not in {"click", "click_target", "type_text", "type_target", "type_target_and_verify", "press_key"}:
+            return False
+        expected = self._page_memory(normalized_tab_id)
+        expected_url = str(expected.get("url", "") or "")
+        expected_title = str(expected.get("title", "") or "")
+        if not expected_url:
+            return True
+        if expected_url == current_url:
+            return False
+        expected_base = expected_url.split("?", 1)[0]
+        current_base = current_url.split("?", 1)[0]
+        if expected_base and expected_base == current_base:
+            return True
+        if expected_title and current_title and expected_title == current_title:
+            return True
+        return False
+
+    def _current_page_payload(self, tab_id: str = "", *, commit_expected: bool = False, action_name: str = "") -> Dict[str, Any]:
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        result = self._eval_json("() => ({url: location.href, title: document.title})", tab_id=effective_tab_id)
+        if not isinstance(result, dict):
+            result = {}
+        active_index = self._resolve_index(tab_id=effective_tab_id) if self._refresh_tabs() else 0
+        resolved_tab_id = _tab_id_for_index(active_index)
+        url = str(result.get("url", "") or "")
+        title = str(result.get("title", "") or "")
+        if commit_expected or self._should_promote_observed_page(action_name=action_name, tab_id=resolved_tab_id, url=url, title=title):
+            self._commit_expected_page(resolved_tab_id, url=url, title=title)
+        else:
+            self._observe_page(resolved_tab_id, url=url, title=title)
+        payload = {
+            "tab_id": resolved_tab_id,
+            "url": url,
+            "title": title,
+        }
+        return self._attach_page_drift(payload, tab_id=resolved_tab_id, url=url, title=title)
 
     def _parse_cli_json(self, stdout: str) -> Any:
         return _parse_json_loose(stdout)
@@ -211,7 +309,25 @@ class PlaywrightCliBrowserSession(BrowserSession):
                     }
                 )
         self._last_tabs = tabs
+        if tabs and self._sticky_tab_id and not any(str(tab.get("tab_id", "")) == self._sticky_tab_id for tab in tabs):
+            active_tab = next((tab for tab in tabs if tab.get("active")), tabs[0])
+            self._sticky_tab_id = str(active_tab.get("tab_id", "") or "")
         return tabs
+
+    def _preferred_tab_id(self, tab_id: str = "") -> str:
+        explicit = str(tab_id or "").strip()
+        if explicit:
+            return explicit
+        if self._sticky_tab_id:
+            tabs = self._last_tabs or self._refresh_tabs()
+            if any(str(tab.get("tab_id", "")) == self._sticky_tab_id for tab in tabs):
+                return self._sticky_tab_id
+        tabs = self._last_tabs or self._refresh_tabs()
+        active_tab = next((tab for tab in tabs if tab.get("active")), tabs[0] if tabs else {})
+        resolved = str(active_tab.get("tab_id", "") or "")
+        if resolved:
+            self._sticky_tab_id = resolved
+        return resolved
 
     def _resolve_index(self, tab_id: str = "", index: int = -1, title_contains: str = "", url_contains: str = "") -> int:
         tabs = self._refresh_tabs()
@@ -247,8 +363,10 @@ class PlaywrightCliBrowserSession(BrowserSession):
         self._run_cli(["tab-select", str(int(index)), "--json"])
 
     def _ensure_tab_selected(self, tab_id: str = "", index: int = -1, title_contains: str = "", url_contains: str = "") -> int:
-        resolved_index = self._resolve_index(tab_id=tab_id, index=index, title_contains=title_contains, url_contains=url_contains)
+        resolved_tab_id = str(tab_id or "").strip() or self._preferred_tab_id()
+        resolved_index = self._resolve_index(tab_id=resolved_tab_id, index=index, title_contains=title_contains, url_contains=url_contains)
         self._select_index(resolved_index)
+        self._sticky_tab_id = _tab_id_for_index(resolved_index)
         return resolved_index
 
     def _build_eval_function(self, script: str) -> str:
@@ -266,8 +384,9 @@ class PlaywrightCliBrowserSession(BrowserSession):
         return str(details.get("value", "") or "")
 
     def _eval_json(self, func_text: str, tab_id: str = "") -> Any:
-        if str(tab_id or "").strip():
-            self._ensure_tab_selected(tab_id=tab_id)
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        if effective_tab_id:
+            self._ensure_tab_selected(tab_id=effective_tab_id)
         payload = self._run_cli(["eval", func_text, "--json"])
         return self._extract_result(payload)
 
@@ -295,7 +414,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
 
     def get_summary(self) -> BrowserSessionSummary:
         try:
-            result = self._eval_json("() => ({url: location.href, title: document.title})")
+            result = self._current_page_payload()
             if isinstance(result, dict):
                 return BrowserSessionSummary(
                     current_url=str(result.get("url", "") or ""),
@@ -325,8 +444,9 @@ class PlaywrightCliBrowserSession(BrowserSession):
     def list_tabs(self) -> Dict:
         tabs = self._refresh_tabs()
         active_tab = next((tab for tab in tabs if tab.get("active")), {})
+        active_tab_id = str(active_tab.get("tab_id", "") or self._preferred_tab_id())
         return {
-            **self.get_current_url(tab_id=str(active_tab.get("tab_id", ""))),
+            **self.get_current_url(tab_id=active_tab_id),
             "active_tab_id": str(active_tab.get("tab_id", "")),
             "count": len(tabs),
             "tabs": tabs,
@@ -350,15 +470,18 @@ class PlaywrightCliBrowserSession(BrowserSession):
         new_tab = max(tabs_after_open, key=lambda item: int(item.get("index", -1)))
         new_index = int(new_tab.get("index", 0))
         self._select_index(new_index)
+        self._sticky_tab_id = _tab_id_for_index(new_index)
         if str(url or "").strip():
             self._run_cli(["goto", str(url).strip(), "--json"])
             tabs_after_open = self._refresh_tabs()
             new_tab = next((item for item in tabs_after_open if int(item.get("index", -1)) == new_index), new_tab)
         if not activate:
             self._select_index(original_index)
+            self._sticky_tab_id = _tab_id_for_index(original_index)
         tabs_final = self._refresh_tabs()
+        current_tab_id = str(new_tab.get("tab_id", "") or _tab_id_for_index(new_index if activate else original_index))
         return {
-            **self.get_current_url(),
+            **self._current_page_payload(tab_id=current_tab_id, commit_expected=True, action_name="open_tab"),
             "opened": True,
             "activated": bool(activate),
             "tab": new_tab,
@@ -380,8 +503,9 @@ class PlaywrightCliBrowserSession(BrowserSession):
         )
         tabs = self._refresh_tabs()
         active_tab = next((tab for tab in tabs if int(tab.get("index", -1)) == resolved_index), {})
+        self._sticky_tab_id = str(active_tab.get("tab_id", "") or _tab_id_for_index(resolved_index))
         return {
-            **self.get_current_url(tab_id=str(active_tab.get("tab_id", ""))),
+            **self._current_page_payload(tab_id=str(active_tab.get("tab_id", "")), commit_expected=True, action_name="activate_tab"),
             "activated": True,
             "tab": active_tab,
             "tabs": tabs,
@@ -394,8 +518,10 @@ class PlaywrightCliBrowserSession(BrowserSession):
         self._select_index(resolved_index)
         self._run_cli(["tab-close", str(resolved_index), "--json"])
         tabs_after = self._refresh_tabs()
+        remaining_active = next((tab for tab in tabs_after if tab.get("active")), tabs_after[0] if tabs_after else {})
+        self._sticky_tab_id = str(remaining_active.get("tab_id", "") or "")
         return {
-            **self.get_current_url(),
+            **self._current_page_payload(tab_id=self._sticky_tab_id, commit_expected=True, action_name="close_tab"),
             "closed": True,
             "closed_tab": closed_tab,
             "tabs": tabs_after,
@@ -403,46 +529,43 @@ class PlaywrightCliBrowserSession(BrowserSession):
 
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         del wait_for_ready, timeout_seconds
-        if str(tab_id or "").strip():
-            self._ensure_tab_selected(tab_id=tab_id)
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        if effective_tab_id:
+            self._ensure_tab_selected(tab_id=effective_tab_id)
         self._run_cli(["goto", str(url).strip(), "--json"])
-        return self.get_current_url(tab_id=tab_id)
+        return self._current_page_payload(tab_id=effective_tab_id, commit_expected=True, action_name="navigate")
 
     def get_current_url(self, tab_id: str = "") -> Dict:
-        result = self._eval_json("() => ({url: location.href, title: document.title})", tab_id=tab_id)
-        if not isinstance(result, dict):
-            result = {}
-        active_index = self._resolve_index(tab_id=tab_id) if self._refresh_tabs() else 0
-        return {
-            "tab_id": _tab_id_for_index(active_index),
-            "url": str(result.get("url", "") or ""),
-            "title": str(result.get("title", "") or ""),
-        }
+        return self._current_page_payload(tab_id=tab_id)
 
     def get_page_text(self, tab_id: str = "") -> Dict:
-        result = self._eval_json("() => document.body ? document.body.innerText : ''", tab_id=tab_id)
-        return {**self.get_current_url(tab_id=tab_id), "text": str(result or "")}
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        result = self._eval_json("() => document.body ? document.body.innerText : ''", tab_id=effective_tab_id)
+        return {**self.get_current_url(tab_id=effective_tab_id), "text": str(result or "")}
 
     def get_page_html(self, tab_id: str = "") -> Dict:
-        result = self._eval_json("() => document.documentElement ? document.documentElement.outerHTML : ''", tab_id=tab_id)
-        return {**self.get_current_url(tab_id=tab_id), "html": str(result or "")}
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        result = self._eval_json("() => document.documentElement ? document.documentElement.outerHTML : ''", tab_id=effective_tab_id)
+        return {**self.get_current_url(tab_id=effective_tab_id), "html": str(result or "")}
 
     def inspect_elements(self, selector: str, by: str = "css", limit: int = 10, tab_id: str = "") -> Dict:
         raise NotImplementedError("inspect_elements is not implemented for playwright_cli in v1.")
 
     def get_active_element(self, tab_id: str = "") -> Dict:
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
         result = self._eval_json(
             "() => { const el = document.activeElement; if (!el) return {}; return {tag_name: (el.tagName || '').toLowerCase(), text: (el.innerText || el.textContent || '').trim(), id: el.id || '', class: el.className || '', value: 'value' in el ? (el.value || '') : ''}; }",
-            tab_id=tab_id,
+            tab_id=effective_tab_id,
         )
-        return {**self.get_current_url(tab_id=tab_id), "element": result if isinstance(result, dict) else {}}
+        return {**self.get_current_url(tab_id=effective_tab_id), "element": result if isinstance(result, dict) else {}}
 
     def get_interaction_context(self, tab_id: str = "") -> Dict:
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
         return {
-            **self.get_current_url(tab_id=tab_id),
+            **self.get_current_url(tab_id=effective_tab_id),
             "interaction_context": {
                 "tabs": self._refresh_tabs(),
-                "active_element": self.get_active_element(tab_id=tab_id).get("element", {}),
+                "active_element": self.get_active_element(tab_id=effective_tab_id).get("element", {}),
             },
         }
 
@@ -455,8 +578,9 @@ class PlaywrightCliBrowserSession(BrowserSession):
         filename: str = "",
         tab_id: str = "",
     ) -> Dict:
-        if str(tab_id or "").strip():
-            self._ensure_tab_selected(tab_id=tab_id)
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        if effective_tab_id:
+            self._ensure_tab_selected(tab_id=effective_tab_id)
         args = ["snapshot"]
         if str(target or "").strip():
             args.append(target if SNAPSHOT_REF_PATTERN.match(str(target).strip()) else _selector_to_target(str(target).strip(), by))
@@ -469,7 +593,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
         args.append("--json")
         payload = self._run_cli(args)
         parsed = payload.get("parsed", {})
-        return {**self.get_current_url(tab_id=tab_id), **(parsed if isinstance(parsed, dict) else {"snapshot": parsed})}
+        return {**self.get_current_url(tab_id=effective_tab_id), **(parsed if isinstance(parsed, dict) else {"snapshot": parsed})}
 
     def list_candidates(
         self,
@@ -488,10 +612,17 @@ class PlaywrightCliBrowserSession(BrowserSession):
     def click(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
         del timeout_seconds
         target = _selector_to_target(selector, by)
+        effective_tab_id = self._preferred_tab_id()
         try:
+            if effective_tab_id:
+                self._ensure_tab_selected(tab_id=effective_tab_id)
             payload = self._run_cli(["click", target, "--json"])
             result = payload.get("parsed", {})
-            return {**self.get_current_url(), **(result if isinstance(result, dict) else {"result": result}), "clicked": True}
+            return {
+                **self._current_page_payload(tab_id=effective_tab_id, action_name="click"),
+                **(result if isinstance(result, dict) else {"result": result}),
+                "clicked": True,
+            }
         except Exception as exc:
             return self._action_error_payload("click", exc, selector=selector, by=by, text_filter=selector)
 
@@ -508,10 +639,17 @@ class PlaywrightCliBrowserSession(BrowserSession):
         if not SNAPSHOT_REF_PATTERN.match(resolved_target):
             resolved_target = _selector_to_target(resolved_target, by)
         command_name = "dblclick" if double_click else "click"
+        effective_tab_id = self._preferred_tab_id()
         try:
+            if effective_tab_id:
+                self._ensure_tab_selected(tab_id=effective_tab_id)
             payload = self._run_cli([command_name, resolved_target, "--json"])
             result = payload.get("parsed", {})
-            return {**self.get_current_url(), **(result if isinstance(result, dict) else {"result": result}), "clicked": True}
+            return {
+                **self._current_page_payload(tab_id=effective_tab_id, action_name="click_target"),
+                **(result if isinstance(result, dict) else {"result": result}),
+                "clicked": True,
+            }
         except Exception as exc:
             return self._action_error_payload("click_target", exc, target=target, by=by, text_filter=target)
 
@@ -526,15 +664,18 @@ class PlaywrightCliBrowserSession(BrowserSession):
     ) -> Dict:
         del clear_first, timeout_seconds
         target = _selector_to_target(selector, by)
+        effective_tab_id = self._preferred_tab_id()
         args = ["fill", target, str(text), "--json"]
         if submit:
             args.insert(3, "--submit")
         try:
+            if effective_tab_id:
+                self._ensure_tab_selected(tab_id=effective_tab_id)
             payload = self._run_cli(args)
             result = payload.get("parsed", {})
             actual_value = self._read_target_value(target)
             return {
-                **self.get_current_url(),
+                **self._current_page_payload(tab_id=effective_tab_id, action_name="type_text"),
                 **(result if isinstance(result, dict) else {"result": result}),
                 "typed": True,
                 "submitted": bool(submit),
@@ -558,15 +699,18 @@ class PlaywrightCliBrowserSession(BrowserSession):
         resolved_target = str(target or "").strip()
         if not SNAPSHOT_REF_PATTERN.match(resolved_target):
             resolved_target = _selector_to_target(resolved_target, by)
+        effective_tab_id = self._preferred_tab_id()
         args = ["fill", resolved_target, str(text), "--json"]
         if submit:
             args.insert(3, "--submit")
         try:
+            if effective_tab_id:
+                self._ensure_tab_selected(tab_id=effective_tab_id)
             payload = self._run_cli(args)
             result = payload.get("parsed", {})
             actual_value = self._read_target_value(resolved_target)
             return {
-                **self.get_current_url(),
+                **self._current_page_payload(tab_id=effective_tab_id, action_name="type_target"),
                 **(result if isinstance(result, dict) else {"result": result}),
                 "typed": True,
                 "submitted": bool(submit),
@@ -599,7 +743,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
             return type_result
         verify_result = self.verify_target_value(target=target, expected_value=text, element=element, by=by)
         return {
-            **self.get_current_url(),
+            **self._current_page_payload(action_name="type_target_and_verify"),
             "typed": True,
             "verified": bool(verify_result.get("verified")),
             "submitted": bool(submit),
@@ -625,17 +769,24 @@ class PlaywrightCliBrowserSession(BrowserSession):
             repeat = max(1, int(count))
             for _ in range(repeat):
                 self._run_cli(["press", str(key), "--json"])
-            return {**self.get_current_url(), "pressed": True, "key": key, "count": repeat}
+            return {
+                **self._current_page_payload(tab_id=self._preferred_tab_id(), action_name="press_key"),
+                "pressed": True,
+                "key": key,
+                "count": repeat,
+            }
         except Exception as exc:
             return self._action_error_payload("press_key", exc, selector=selector, by=by, text_filter=key)
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:
-        result = self._eval_json(self._build_eval_function(script), tab_id=tab_id)
-        return {**self.get_current_url(tab_id=tab_id), "result": result}
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        result = self._eval_json(self._build_eval_function(script), tab_id=effective_tab_id)
+        return {**self.get_current_url(tab_id=effective_tab_id), "result": result}
 
     def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:
-        if str(tab_id or "").strip():
-            self._ensure_tab_selected(tab_id=tab_id)
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        if effective_tab_id:
+            self._ensure_tab_selected(tab_id=effective_tab_id)
         payload = self._run_cli(["console", "--json"])
         raw_result = self._extract_result(payload)
         messages: List[Dict[str, Any]] = []
@@ -650,7 +801,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 message_level = str(match.group("level") or "").lower()
                 message = {
                     "timestamp": 0,
-                    "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+                    "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
                     "type": message_level,
                     "text": str(match.group("text") or "").strip(),
                     "location": {
@@ -660,15 +811,15 @@ class PlaywrightCliBrowserSession(BrowserSession):
                     },
                 }
                 messages.append(message)
-        offset = self._global_console_offset(tab_id=tab_id)
+        offset = self._global_console_offset(tab_id=effective_tab_id)
         messages = messages[offset:]
         normalized_level = str(level or "").strip().lower()
         if normalized_level:
             messages = [item for item in messages if item.get("type") == normalized_level]
         messages = messages[-max(1, int(limit)) :]
         return {
-            **self.get_current_url(tab_id=tab_id),
-            "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+            **self.get_current_url(tab_id=effective_tab_id),
+            "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
             "level": normalized_level,
             "count": len(messages),
             "messages": messages,
@@ -676,7 +827,8 @@ class PlaywrightCliBrowserSession(BrowserSession):
         }
 
     def get_page_errors(self, tab_id: str = "", limit: int = 100) -> Dict:
-        console_messages = self.get_console_messages(tab_id=tab_id, limit=max(1, int(limit) * 4)).get("messages", [])
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        console_messages = self.get_console_messages(tab_id=effective_tab_id, limit=max(1, int(limit) * 4)).get("messages", [])
         errors = []
         for item in console_messages:
             if str(item.get("type", "") or "").lower() not in {"error"}:
@@ -694,15 +846,16 @@ class PlaywrightCliBrowserSession(BrowserSession):
             )
         errors = errors[-max(1, int(limit)) :]
         return {
-            **self.get_current_url(tab_id=tab_id),
-            "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+            **self.get_current_url(tab_id=effective_tab_id),
+            "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
             "count": len(errors),
             "errors": errors,
         }
 
     def get_network_requests(self, tab_id: str = "", limit: int = 100, failed_only: bool = False) -> Dict:
-        if str(tab_id or "").strip():
-            self._ensure_tab_selected(tab_id=tab_id)
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        if effective_tab_id:
+            self._ensure_tab_selected(tab_id=effective_tab_id)
         payload = self._run_cli(["requests", "--json"])
         raw_result = self._extract_result(payload)
         requests: List[Dict[str, Any]] = []
@@ -717,7 +870,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 status_value = int(match.group("status")) if match.group("status") else None
                 request_item = {
                     "index": int(match.group("index")),
-                    "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+                    "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
                     "event": "response" if status_value is not None else "request",
                     "method": str(match.group("method") or ""),
                     "url": str(match.group("url") or ""),
@@ -726,14 +879,14 @@ class PlaywrightCliBrowserSession(BrowserSession):
                     "failure": "",
                 }
                 requests.append(request_item)
-        offset = self._global_request_offset(tab_id=tab_id)
+        offset = self._global_request_offset(tab_id=effective_tab_id)
         requests = requests[offset:]
         if bool(failed_only):
             requests = [item for item in requests if item.get("ok") is False]
         requests = requests[-max(1, int(limit)) :]
         return {
-            **self.get_current_url(tab_id=tab_id),
-            "tab_id": self.get_current_url(tab_id=tab_id).get("tab_id", ""),
+            **self.get_current_url(tab_id=effective_tab_id),
+            "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
             "failed_only": bool(failed_only),
             "count": len(requests),
             "requests": requests,
@@ -741,7 +894,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
         }
 
     def clear_debug_buffers(self, tab_id: str = "") -> Dict:
-        normalized_tab_id = str(tab_id or "").strip()
+        normalized_tab_id = self._preferred_tab_id(tab_id=tab_id)
         console_payload = self._run_cli(["console", "--json"])
         raw_console = self._extract_result(console_payload)
         console_count = 0
@@ -768,21 +921,28 @@ class PlaywrightCliBrowserSession(BrowserSession):
         }
 
     def diagnose_page(self, tab_id: str = "") -> Dict:
-        resolved = self.get_current_url(tab_id=tab_id)
-        console_messages = self.get_console_messages(tab_id=tab_id, limit=20).get("messages", [])
-        page_errors = self.get_page_errors(tab_id=tab_id, limit=20).get("errors", [])
-        failed_requests = self.get_network_requests(tab_id=tab_id, limit=30, failed_only=True).get("requests", [])
-        all_requests = self.get_network_requests(tab_id=tab_id, limit=30, failed_only=False).get("requests", [])
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        resolved = self.get_current_url(tab_id=effective_tab_id)
+        console_messages = self.get_console_messages(tab_id=effective_tab_id, limit=20).get("messages", [])
+        page_errors = self.get_page_errors(tab_id=effective_tab_id, limit=20).get("errors", [])
+        failed_requests = self.get_network_requests(tab_id=effective_tab_id, limit=30, failed_only=True).get("requests", [])
+        all_requests = self.get_network_requests(tab_id=effective_tab_id, limit=30, failed_only=False).get("requests", [])
+        final_page = self.get_current_url(tab_id=effective_tab_id)
         bad_responses = [
             item
             for item in all_requests
             if isinstance(item.get("status"), int) and int(item.get("status")) >= 400
         ]
         return {
-            **resolved,
+            **final_page,
             "tab_id": resolved.get("tab_id", ""),
             "diagnosis": {
-                "interaction_context": self.get_interaction_context(tab_id=tab_id).get("interaction_context", {}),
+                "page_drift": {
+                    "started": resolved,
+                    "ended": final_page,
+                    "drifted": str(resolved.get("url", "") or "") != str(final_page.get("url", "") or ""),
+                },
+                "interaction_context": self.get_interaction_context(tab_id=effective_tab_id).get("interaction_context", {}),
                 "console_messages": console_messages,
                 "page_errors": page_errors,
                 "failed_requests": failed_requests,
