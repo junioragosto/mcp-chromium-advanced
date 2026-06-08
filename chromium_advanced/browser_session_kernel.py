@@ -120,7 +120,7 @@ class ManagedBrowserSession(BrowserSession):
     def __init__(self, raw_session: BrowserSession):
         self._raw = raw_session
         self._capabilities = RuntimeCapabilities.from_legacy(self._safe_raw_capabilities())
-        self._snapshot_ref_map: Dict[str, Dict[str, str]] = {}
+        self._snapshot_ref_map: Dict[str, Dict[str, Any]] = {}
         self._last_snapshot_text = ""
         self._next_snapshot_ref = 1
 
@@ -234,74 +234,127 @@ class ManagedBrowserSession(BrowserSession):
     def _encode_js_string(self, value: str) -> str:
         return json.dumps(str(value or ""))
 
-    def _selector_query_js(self, selector: str, by: str) -> str:
-        escaped_selector = self._encode_js_string(selector)
-        escaped_by = self._encode_js_string(by)
-        return f"""
-        const selector = {escaped_selector};
-        const by = {escaped_by}.toLowerCase();
+    def _dom_runtime_helpers_js(self) -> str:
+        return """
         const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim();
         const pickSingle = value => value ? [value] : [];
-        const queryAll = () => {{
-          if (by === 'css') return Array.from(document.querySelectorAll(selector));
-          if (by === 'id') return pickSingle(document.getElementById(selector));
-          if (by === 'name') return Array.from(document.getElementsByName(selector));
-          if (by === 'tag') return Array.from(document.getElementsByTagName(selector));
-          if (by === 'class') return Array.from(document.getElementsByClassName(selector));
-          if (by === 'xpath') {{
-            const nodes = [];
-            const result = document.evaluate(selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-            for (let i = 0; i < result.snapshotLength; i += 1) nodes.push(result.snapshotItem(i));
-            return nodes;
-          }}
-          if (by === 'link_text' || by === 'partial_link_text') {{
-            const anchors = Array.from(document.querySelectorAll('a'));
-            return anchors.filter(el => {{
-              const text = normalize(el.innerText || el.textContent || '');
-              return by === 'link_text' ? text === selector : text.includes(selector);
-            }});
-          }}
-          return [];
-        }};
-        """
-
-    def _generic_target_script(self, selector: str, by: str, mode: str, limit: int = 25) -> str:
-        query_js = self._selector_query_js(selector, by)
-        return f"""
-        {query_js}
-        const isVisible = el => {{
-          if (!el) return false;
-          const style = window.getComputedStyle(el);
-          if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
-          const rect = el.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
-        }};
-        const buildSelector = el => {{
+        const getSearchRoots = () => {
+          const roots = [document];
+          const stack = [document.documentElement].filter(Boolean);
+          while (stack.length) {
+            const node = stack.pop();
+            if (!node || node.nodeType !== Node.ELEMENT_NODE) continue;
+            if (node.shadowRoot) {
+              roots.push(node.shadowRoot);
+              const shadowChildren = Array.from(node.shadowRoot.children || []);
+              for (let i = shadowChildren.length - 1; i >= 0; i -= 1) stack.push(shadowChildren[i]);
+            }
+            const children = Array.from(node.children || []);
+            for (let i = children.length - 1; i >= 0; i -= 1) stack.push(children[i]);
+          }
+          return roots;
+        };
+        const dedupeElements = items => {
+          const seen = new Set();
+          const result = [];
+          for (const item of items || []) {
+            if (!item || item.nodeType !== Node.ELEMENT_NODE || seen.has(item)) continue;
+            seen.add(item);
+            result.push(item);
+          }
+          return result;
+        };
+        const buildSelectorWithinRoot = (el, root) => {
           if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
-          if (el.id) return '#' + CSS.escape(el.id);
-          const parts = [];
+          const segments = [];
           let current = el;
-          while (current && current.nodeType === Node.ELEMENT_NODE && current !== document.body) {{
+          while (current && current.nodeType === Node.ELEMENT_NODE) {
             let part = (current.tagName || '').toLowerCase();
+            if (!part) break;
+            if (current.id) {
+              part += '#' + CSS.escape(current.id);
+              segments.unshift(part);
+              break;
+            }
             const classList = Array.from(current.classList || []).slice(0, 2);
             if (classList.length) part += classList.map(name => '.' + CSS.escape(name)).join('');
             const parent = current.parentElement;
-            if (parent) {{
-              const siblings = Array.from(parent.children).filter(child => (child.tagName || '').toLowerCase() === (current.tagName || '').toLowerCase());
-              if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(current) + 1) + ')';
-            }}
-            parts.unshift(part);
+            const siblingsSource = parent ? Array.from(parent.children || []) : Array.from((root && root.children) || []);
+            const sameTag = siblingsSource.filter(child => (child.tagName || '').toLowerCase() === (current.tagName || '').toLowerCase());
+            if (sameTag.length > 1) part += ':nth-of-type(' + (sameTag.indexOf(current) + 1) + ')';
+            segments.unshift(part);
+            if (!parent) break;
+            if (root === document && parent === document.documentElement) {
+              segments.unshift((parent.tagName || '').toLowerCase());
+              break;
+            }
             current = parent;
-          }}
-          return parts.join(' > ');
-        }};
-        const describe = el => {{
+            if (current === root) break;
+          }
+          return segments.join(' > ');
+        };
+        const buildDeepSelector = el => {
+          if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
+          const segments = [];
+          let current = el;
+          while (current && current.nodeType === Node.ELEMENT_NODE) {
+            const root = current.getRootNode();
+            segments.unshift(buildSelectorWithinRoot(current, root));
+            if (root instanceof ShadowRoot && root.host) {
+              current = root.host;
+              continue;
+            }
+            break;
+          }
+          return segments.filter(Boolean).join(' >>> ');
+        };
+        const resolveDeepSelector = selector => {
+          const parts = String(selector || '').split(/\\s*>>>\\s*/).map(part => part.trim()).filter(Boolean);
+          if (!parts.length) return null;
+          let root = document;
+          let current = null;
+          for (let i = 0; i < parts.length; i += 1) {
+            current = root.querySelector(parts[i]);
+            if (!current) return null;
+            if (i < parts.length - 1) {
+              root = current.shadowRoot;
+              if (!root) return null;
+            }
+          }
+          return current;
+        };
+        const queryAllDeep = (selector, by) => {
+          const roots = getSearchRoots();
+          if (by === 'deep_css') return pickSingle(resolveDeepSelector(selector));
+          if (by === 'css') return dedupeElements(roots.flatMap(root => Array.from(root.querySelectorAll(selector))));
+          if (by === 'id') return dedupeElements(roots.flatMap(root => Array.from(root.querySelectorAll('#' + CSS.escape(selector)))));
+          if (by === 'name') return dedupeElements(roots.flatMap(root => Array.from(root.querySelectorAll('[name=\"' + CSS.escape(selector) + '\"]'))));
+          if (by === 'tag') return dedupeElements(roots.flatMap(root => Array.from(root.querySelectorAll(selector))));
+          if (by === 'class') return dedupeElements(roots.flatMap(root => Array.from(root.querySelectorAll('.' + CSS.escape(selector)))));
+          if (by === 'xpath') {
+            const nodes = [];
+            const result = document.evaluate(selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+            for (let i = 0; i < result.snapshotLength; i += 1) nodes.push(result.snapshotItem(i));
+            return dedupeElements(nodes);
+          }
+          if (by === 'link_text' || by === 'partial_link_text') {
+            const anchors = dedupeElements(roots.flatMap(root => Array.from(root.querySelectorAll('a'))));
+            return anchors.filter(el => {
+              const text = normalize(el.innerText || el.textContent || '');
+              return by === 'link_text' ? text === selector : text.includes(selector);
+            });
+          }
+          return [];
+        };
+        const describeElement = el => {
           const rect = el.getBoundingClientRect();
-          return {{
+          const style = window.getComputedStyle(el);
+          const visible = !!style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+          return {
             tag_name: (el.tagName || '').toLowerCase(),
             text: normalize(el.innerText || el.textContent || ''),
             value: 'value' in el ? String(el.value || '') : '',
-            visible: isVisible(el),
+            visible,
             enabled: !el.disabled && el.getAttribute('aria-disabled') !== 'true',
             checked: 'checked' in el ? !!el.checked : null,
             id: normalize(el.id || ''),
@@ -311,16 +364,33 @@ class ManagedBrowserSession(BrowserSession):
             role: normalize(el.getAttribute('role') || ''),
             href: normalize(el.getAttribute('href') || ''),
             outer_html: el.outerHTML || '',
-            selector: buildSelector(el),
-            box: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }}
-          }};
-        }};
+            selector: buildSelectorWithinRoot(el, el.getRootNode()),
+            deep_selector: buildDeepSelector(el),
+            box: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+          };
+        };
+        """
+
+    def _selector_query_js(self, selector: str, by: str) -> str:
+        escaped_selector = self._encode_js_string(selector)
+        escaped_by = self._encode_js_string(by)
+        return f"""
+        {self._dom_runtime_helpers_js()}
+        const selector = {escaped_selector};
+        const by = {escaped_by}.toLowerCase();
+        const queryAll = () => queryAllDeep(selector, by);
+        """
+
+    def _generic_target_script(self, selector: str, by: str, mode: str, limit: int = 25) -> str:
+        query_js = self._selector_query_js(selector, by)
+        return f"""
+        {query_js}
         const nodes = queryAll();
         if ({self._encode_js_string(mode)} === 'describe') {{
           const el = nodes[0];
-          return el ? describe(el) : null;
+          return el ? describeElement(el) : null;
         }}
-        return nodes.slice(0, {max(1, int(limit))}).map(describe);
+        return nodes.slice(0, {max(1, int(limit))}).map(describeElement);
         """
 
     def _cli_simple_query_script(self, selector: str, by: str, include_box: bool = True) -> str:
@@ -331,23 +401,10 @@ class ManagedBrowserSession(BrowserSession):
             "const box = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };"
         ) if include_box else "const box = null;"
         return f"""
+        {self._dom_runtime_helpers_js()}
         const selector = {escaped_selector};
         const by = {escaped_by}.toLowerCase();
-        const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim();
-        let el = null;
-        if (by === 'css') el = document.querySelector(selector);
-        else if (by === 'id') el = document.getElementById(selector);
-        else if (by === 'name') el = document.getElementsByName(selector)[0] || null;
-        else if (by === 'tag') el = document.getElementsByTagName(selector)[0] || null;
-        else if (by === 'class') el = document.getElementsByClassName(selector)[0] || null;
-        else if (by === 'xpath') el = document.evaluate(selector, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-        else if (by === 'link_text' || by === 'partial_link_text') {{
-          const anchors = Array.from(document.querySelectorAll('a'));
-          el = anchors.find(node => {{
-            const text = normalize(node.innerText || node.textContent || '');
-            return by === 'link_text' ? text === selector : text.includes(selector);
-          }}) || null;
-        }}
+        const el = queryAllDeep(selector, by)[0] || null;
         if (!el) return null;
         const style = window.getComputedStyle(el);
         {box_code}
@@ -364,8 +421,72 @@ class ManagedBrowserSession(BrowserSession):
           aria_label: normalize(el.getAttribute('aria-label') || ''),
           role: normalize(el.getAttribute('role') || ''),
           href: normalize(el.getAttribute('href') || ''),
+          selector: buildSelectorWithinRoot(el, el.getRootNode()),
+          deep_selector: buildDeepSelector(el),
           box
         }};
+        """
+
+    def _cli_wait_query_script(self, selector: str, by: str) -> str:
+        escaped_selector = self._encode_js_string(selector)
+        escaped_by = self._encode_js_string(by)
+        return f"""
+        {self._dom_runtime_helpers_js()}
+        const selector = {escaped_selector};
+        const by = {escaped_by}.toLowerCase();
+        const el = queryAllDeep(selector, by)[0] || null;
+        if (!el) return {{ found: false }};
+        const details = describeElement(el);
+        return {{ found: true, ...details }};
+        """
+
+    def _managed_target_action_script(
+        self,
+        selector: str,
+        by: str,
+        action: str,
+        text: str = "",
+        clear_first: bool = True,
+        submit: bool = False,
+    ) -> str:
+        escaped_selector = self._encode_js_string(selector)
+        escaped_by = self._encode_js_string(by)
+        escaped_action = self._encode_js_string(action)
+        escaped_text = self._encode_js_string(text)
+        return f"""
+        {self._dom_runtime_helpers_js()}
+        const selector = {escaped_selector};
+        const by = {escaped_by}.toLowerCase();
+        const action = {escaped_action};
+        const text = {escaped_text};
+        const clearFirst = {str(bool(clear_first)).lower()};
+        const submit = {str(bool(submit)).lower()};
+        const el = queryAllDeep(selector, by)[0] || null;
+        if (!el) {{
+          return {{ ok: false, error: `Target not found: ${{selector}}`, error_type: 'ValueError' }};
+        }}
+        if (action === 'click') {{
+          el.scrollIntoView({{ block: 'center', inline: 'center' }});
+          if (typeof el.click === 'function') el.click();
+          else el.dispatchEvent(new MouseEvent('click', {{ bubbles: true, cancelable: true, composed: true }}));
+          return {{ ok: true, clicked: true, target: selector, by, details: describeElement(el) }};
+        }}
+        if (action === 'type') {{
+          el.scrollIntoView({{ block: 'center', inline: 'center' }});
+          if (typeof el.focus === 'function') el.focus();
+          const nextValue = clearFirst ? text : String(('value' in el ? el.value : '') || '') + text;
+          if ('value' in el) el.value = nextValue;
+          else el.textContent = nextValue;
+          el.dispatchEvent(new Event('input', {{ bubbles: true, composed: true }}));
+          el.dispatchEvent(new Event('change', {{ bubbles: true, composed: true }}));
+          if (submit) {{
+            el.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', bubbles: true, composed: true }}));
+            el.dispatchEvent(new KeyboardEvent('keyup', {{ key: 'Enter', bubbles: true, composed: true }}));
+            if (el.form && typeof el.form.requestSubmit === 'function') el.form.requestSubmit();
+          }}
+          return {{ ok: true, typed: true, target: selector, by, value: 'value' in el ? String(el.value || '') : String(el.textContent || ''), details: describeElement(el) }};
+        }}
+        return {{ ok: false, error: `Unsupported managed action: ${{action}}`, error_type: 'NotImplementedError' }};
         """
 
     def _resolve_snapshot_ref(self, target: str) -> Dict[str, str]:
@@ -378,9 +499,51 @@ class ManagedBrowserSession(BrowserSession):
         for candidate in candidates:
             ref = str(candidate.get("ref", "") or "").strip()
             selector = str(candidate.get("selector", "") or "").strip()
-            if not ref or not selector:
+            deep_selector = str(candidate.get("deep_selector", "") or "").strip()
+            if not ref:
                 continue
-            self._snapshot_ref_map[ref] = {"selector": selector, "by": "css"}
+            if deep_selector:
+                self._snapshot_ref_map[ref] = {"selector": deep_selector, "by": "deep_css"}
+            elif selector:
+                self._snapshot_ref_map[ref] = {"selector": selector, "by": "css"}
+
+    def _execute_managed_target_action(
+        self,
+        action_name: str,
+        selector: str,
+        by: str,
+        *,
+        text: str = "",
+        clear_first: bool = True,
+        submit: bool = False,
+    ) -> Dict[str, Any]:
+        raw = self._run_script_result(
+            self._managed_target_action_script(
+                selector,
+                by,
+                "click" if action_name == "click_target" else "type",
+                text=text,
+                clear_first=clear_first,
+                submit=submit,
+            )
+        )
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"Managed target action returned invalid payload for {action_name}")
+        if raw.get("ok") is False:
+            error_type = str(raw.get("error_type", "") or "RuntimeError")
+            error_text = str(raw.get("error", "") or f"Managed target action failed: {action_name}")
+            if error_type == "NotImplementedError":
+                raise NotImplementedError(error_text)
+            raise ValueError(error_text) if error_type == "ValueError" else RuntimeError(error_text)
+        details = raw.get("details", {}) if isinstance(raw.get("details"), dict) else {}
+        result = {
+            **self._raw.get_current_url(),
+            **{k: v for k, v in raw.items() if k not in {"ok", "details"}},
+            **details,
+        }
+        if action_name == "type_target_and_verify":
+            result["verified"] = True
+        return result
 
     def _parse_snapshot_candidates(self, snapshot_text: str, limit: int = 25) -> list[Dict[str, Any]]:
         candidates: list[Dict[str, Any]] = []
@@ -460,11 +623,12 @@ class ManagedBrowserSession(BrowserSession):
                 continue
             ref = f"e{self._next_snapshot_ref}"
             self._next_snapshot_ref += 1
+            deep_selector = str(entry.get("deep_selector", "") or "").strip()
             candidate = {
                 "source": "dom_fallback",
                 "target": ref,
                 "ref": ref,
-                "by": "css",
+                "by": "deep_css" if deep_selector else "css",
                 "visible": bool(entry.get("visible")),
                 "enabled": bool(entry.get("enabled", True)),
                 **entry,
@@ -513,12 +677,12 @@ class ManagedBrowserSession(BrowserSession):
 
     def _fallback_wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict[str, Any]:
         if self._capabilities.engine_name == "playwright_cli" and hasattr(self._raw, "_eval_json"):
-            script = " ".join(self._cli_simple_query_script(selector, by, include_box=True).strip().splitlines())
+            script = " ".join(self._cli_wait_query_script(selector, by).strip().splitlines())
             deadline = time.time() + max(1, int(timeout_seconds))
             last_entry: Dict[str, Any] | None = None
             while time.time() < deadline:
                 entry = getattr(self._raw, "_eval_json")(f"() => {{ {script} }}")
-                if isinstance(entry, dict) and entry:
+                if isinstance(entry, dict) and entry.get("found"):
                     last_entry = entry
                     if condition == "present":
                         break
@@ -780,14 +944,18 @@ class ManagedBrowserSession(BrowserSession):
     def click_target(self, target: str, element: str = "", by: str = "css", timeout_seconds: int = 20, double_click: bool = False) -> Dict:
         resolved_target = target
         resolved_by = by
+        managed_fallback = None
         if SNAPSHOT_REF_PATTERN.match(str(target or "").strip()) and not self._capabilities.snapshot_refs:
             cached = self._resolve_snapshot_ref(target)
             if cached.get("by") != "snapshot_ref":
                 resolved_target = cached["selector"]
                 resolved_by = cached["by"]
+                if resolved_by == "deep_css":
+                    managed_fallback = lambda: self._execute_managed_target_action("click_target", resolved_target, resolved_by)
         return self._dispatch(
             "click_target",
             lambda: self._raw.click_target(resolved_target, element=element, by=resolved_by, timeout_seconds=timeout_seconds, double_click=double_click),
+            fallback=managed_fallback,
         )
 
     def type_text(self, selector: str, text: str, by: str = "css", clear_first: bool = True, submit: bool = False, timeout_seconds: int = 20) -> Dict:
@@ -799,27 +967,49 @@ class ManagedBrowserSession(BrowserSession):
     def type_target(self, target: str, text: str, element: str = "", by: str = "css", clear_first: bool = True, submit: bool = False, timeout_seconds: int = 20) -> Dict:
         resolved_target = target
         resolved_by = by
+        managed_fallback = None
         if SNAPSHOT_REF_PATTERN.match(str(target or "").strip()) and not self._capabilities.snapshot_refs:
             cached = self._resolve_snapshot_ref(target)
             if cached.get("by") != "snapshot_ref":
                 resolved_target = cached["selector"]
                 resolved_by = cached["by"]
+                if resolved_by == "deep_css":
+                    managed_fallback = lambda: self._execute_managed_target_action(
+                        "type_target",
+                        resolved_target,
+                        resolved_by,
+                        text=text,
+                        clear_first=clear_first,
+                        submit=submit,
+                    )
         return self._dispatch(
             "type_target",
             lambda: self._raw.type_target(resolved_target, text, element=element, by=resolved_by, clear_first=clear_first, submit=submit, timeout_seconds=timeout_seconds),
+            fallback=managed_fallback,
         )
 
     def type_target_and_verify(self, target: str, text: str, element: str = "", by: str = "css", clear_first: bool = True, submit: bool = False, timeout_seconds: int = 20) -> Dict:
         resolved_target = target
         resolved_by = by
+        managed_fallback = None
         if SNAPSHOT_REF_PATTERN.match(str(target or "").strip()) and not self._capabilities.snapshot_refs:
             cached = self._resolve_snapshot_ref(target)
             if cached.get("by") != "snapshot_ref":
                 resolved_target = cached["selector"]
                 resolved_by = cached["by"]
+                if resolved_by == "deep_css":
+                    managed_fallback = lambda: self._execute_managed_target_action(
+                        "type_target_and_verify",
+                        resolved_target,
+                        resolved_by,
+                        text=text,
+                        clear_first=clear_first,
+                        submit=submit,
+                    )
         return self._dispatch(
             "type_target_and_verify",
             lambda: self._raw.type_target_and_verify(resolved_target, text, element=element, by=resolved_by, clear_first=clear_first, submit=submit, timeout_seconds=timeout_seconds),
+            fallback=managed_fallback,
         )
 
     def press_key(self, key: str, count: int = 1, selector: str = "", by: str = "css", timeout_seconds: int = 20) -> Dict:

@@ -9,9 +9,11 @@ class FakeRawSession:
         self.engine_name = engine_name
         self.clicked_targets = []
         self.typed_targets = []
+        self.managed_actions = []
         self.run_script_calls = 0
         self.visible_after = 1
         self.raise_click = None
+        self.deep_candidate = False
 
     def get_summary(self):
         return BrowserSessionSummary(current_url="https://example.com", title="Example", alive=True)
@@ -81,6 +83,8 @@ class FakeRawSession:
         return {"clicked": True}
 
     def click_target(self, target, element="", by="css", timeout_seconds=20, double_click=False):
+        if by == "deep_css":
+            raise NotImplementedError("deep_css target actions are not implemented")
         self.clicked_targets.append((target, by))
         return {"clicked": True, "target": target}
 
@@ -89,10 +93,14 @@ class FakeRawSession:
         return {"typed": True}
 
     def type_target(self, target, text, element="", by="css", clear_first=True, submit=False, timeout_seconds=20):
+        if by == "deep_css":
+            raise NotImplementedError("deep_css target actions are not implemented")
         self.typed_targets.append((target, text, by))
         return {"typed": True, "target": target}
 
     def type_target_and_verify(self, target, text, element="", by="css", clear_first=True, submit=False, timeout_seconds=20):
+        if by == "deep_css":
+            raise NotImplementedError("deep_css target actions are not implemented")
         return {"typed": True, "verified": True}
 
     def press_key(self, key, count=1, selector="", by="css", timeout_seconds=20):
@@ -100,6 +108,57 @@ class FakeRawSession:
 
     def run_script(self, script, tab_id=""):
         self.run_script_calls += 1
+        if 'const action = "click"' in script:
+            self.managed_actions.append(("click", script))
+            return {
+                "result": {
+                    "ok": True,
+                    "clicked": True,
+                    "target": "app-shell#root >>> button.save",
+                    "by": "deep_css",
+                    "details": {
+                        "tag_name": "button",
+                        "text": "Save",
+                        "value": "",
+                        "visible": True,
+                        "enabled": True,
+                        "id": "save",
+                        "name": "",
+                        "class": "save",
+                        "aria_label": "Save",
+                        "role": "button",
+                        "href": "",
+                        "selector": "button.save",
+                        "deep_selector": "app-shell#root >>> button.save",
+                    },
+                }
+            }
+        if 'const action = "type"' in script:
+            self.managed_actions.append(("type", script))
+            return {
+                "result": {
+                    "ok": True,
+                    "typed": True,
+                    "target": "app-shell#root >>> input.name",
+                    "by": "deep_css",
+                    "value": "Alice",
+                    "details": {
+                        "tag_name": "input",
+                        "text": "",
+                        "value": "Alice",
+                        "visible": True,
+                        "enabled": True,
+                        "id": "name",
+                        "name": "name",
+                        "class": "name",
+                        "aria_label": "Name",
+                        "role": "textbox",
+                        "href": "",
+                        "selector": "input.name",
+                        "deep_selector": "app-shell#root >>> input.name",
+                    },
+                }
+            }
         if "\"describe\" === 'describe'" in script:
             visible = self.run_script_calls >= self.visible_after
             return {
@@ -121,6 +180,7 @@ class FakeRawSession:
                 }
             }
         if "nodes.slice(0" in script:
+            deep_selector = "app-shell#root >>> button.save" if self.deep_candidate else ""
             return {
                 "result": [
                     {
@@ -137,6 +197,7 @@ class FakeRawSession:
                         "href": "",
                         "outer_html": "<button id='save'>Save</button>",
                         "selector": "#save",
+                        "deep_selector": deep_selector,
                         "box": {"x": 1, "y": 2, "width": 100, "height": 20},
                     }
                 ]
@@ -229,6 +290,30 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         result = session.click_target(ref)
         self.assertTrue(result["clicked"])
         self.assertEqual(raw.clicked_targets[-1], ("#save", "css"))
+
+    def test_list_candidates_preserves_deep_selector_and_click_uses_managed_action(self):
+        raw = FakeRawSession(engine_name="selenium_uc")
+        raw.deep_candidate = True
+        session = ManagedBrowserSession(raw)
+        result = session.list_candidates(text_filter="save", limit=5)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["by"], "deep_css")
+        self.assertEqual(session._snapshot_ref_map[candidate["ref"]]["by"], "deep_css")
+        clicked = session.click_target(candidate["ref"])
+        self.assertTrue(clicked["clicked"])
+        self.assertEqual(len(raw.clicked_targets), 0)
+        self.assertEqual(raw.managed_actions[-1][0], "click")
+
+    def test_snapshot_ref_type_uses_managed_action_for_deep_selector(self):
+        raw = FakeRawSession(engine_name="selenium_uc")
+        session = ManagedBrowserSession(raw)
+        session._snapshot_ref_map["e9"] = {"selector": "app-shell#root >>> input.name", "by": "deep_css"}
+        result = session.type_target_and_verify("e9", "Alice")
+        self.assertTrue(result["typed"])
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["value"], "Alice")
+        self.assertEqual(len(raw.typed_targets), 0)
+        self.assertEqual(raw.managed_actions[-1][0], "type")
 
     def test_wait_for_falls_back_and_observes_visibility(self):
         raw = FakeRawSession(engine_name="playwright_cli")
