@@ -153,6 +153,11 @@ Status: verified by unit test and local runtime integration test
 - diagnostic payloads exclude the current diagnose call from the history view so the returned trace stays focused on the causal user/runtime actions
 - interaction contexts and diagnosis payloads now include a normalized `session_health` snapshot with liveness, recent failure counts, and generic recovery hints
 - fallback candidate ranking now boosts transient UI controls such as popup/menu/listbox actions so overlay-heavy frontends are less dependent on exploratory retries
+- `session_health` now exposes `failure_classification`, `recovery_actions`, and average recent action duration so recovery decisions are machine-readable instead of string-only
+- managed target-oriented fallbacks now expose `resolution_trace`, which reports the active resolution source and stage such as `cli_selector`, `dom_fallback`, `snapshot_cache`, or `snapshot_text`
+- fallback DOM extraction now carries richer structure such as `accessible_name`, `control_type`, text previews, placeholder/title fields, ancestry paths, and overlay/custom-element hints
+- `playwright_cli` now uses short target-scoped eval calls for explicit selector describe/wait flows and snapshot-backed candidate scans for untargeted search, avoiding oversized CLI eval payloads on Windows
+- managed `session_health` now distinguishes `page_drift` from ordinary action failures and exposes concrete recovery actions such as `reactivate_expected_tab`, `reopen_expected_url`, and `retry_on_sticky_tab`
 
 Status: verified by unit test and local runtime integration test
 
@@ -167,5 +172,6 @@ Status: verified against built executables
 - desktop `ChromiumProfileManager.exe` can be replaced with the rebuilt artifact
 - rebuilt desktop daemon responds on the configured MCP endpoint
 - real busy-state governance still blocks unsafe startup when the configured Chromium root is already running
+- the desktop GUI still shows a parent/child `ChromiumProfileManager.exe` process pair after launch, which has been confirmed as expected PyInstaller `--onefile` bootstrap behavior rather than a duplicate second GUI instance
 
 Status: verified on the Windows desktop delivery path

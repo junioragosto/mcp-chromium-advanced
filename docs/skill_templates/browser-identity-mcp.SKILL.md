@@ -91,6 +91,9 @@ If an action fails and the page looks dynamic or broken, prefer structured diagn
 3. `browser_get_page_errors`
 4. `browser_get_network_requests`
 5. `browser_diagnose_page`
+6. inspect `session_health.recovery_hint`, `session_health.recovery_actions`, and `failure_classification`
+7. when a target-oriented read fails or looks ambiguous, inspect `resolution_trace` before retrying with different selectors
+8. if `failure_classification == "page_drift"`, recover the expected tab/page first instead of immediately changing selectors or recreating the session
 
 If `can_start_profile_session(profile_name)` reports `allowed=false` but also reports the same identity as reusable, treat that as "do not start a second session automatically." Only use `reuse_existing=true` when the current project explicitly supports it and the user intends that reuse.
 
@@ -114,6 +117,9 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 - If the same profile is already occupied, prefer surfacing that state first. Reuse should be explicit, not implicit.
 - For multi-tab tasks, do not assume a newly opened tab became the effective action target unless you explicitly activated it or the tool says it was activated.
 - When diagnosing broken pages, prefer the MCP debug tools over manual screenshots of DevTools whenever possible.
+- The managed runtime now exposes `session_health.recovery_actions` and `resolution_trace`; use them to decide whether to retry directly, refresh candidate search, or recreate the session.
+- `session_health.page_drift` is a first-class signal. When it reports `drifted=true`, prefer `reactivate_expected_tab`, `reopen_expected_url`, or `retry_on_sticky_tab` before assuming the selector itself is bad.
+- For `playwright_cli`, untargeted candidate discovery is intentionally snapshot-backed while explicit selector reads use shorter target-scoped evals. Treat that split as the expected fast path, not as degraded behavior.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.
 - `playwright_cli` is a supported parallel engine, but it still obeys the same profile governance and busy-state rules as the other runtimes.

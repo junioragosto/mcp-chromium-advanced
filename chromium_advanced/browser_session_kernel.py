@@ -13,6 +13,7 @@ SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
 SNAPSHOT_LINE_REF_PATTERN = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
 HTML_PREVIEW_LIMIT = 12000
 RECENT_ACTION_LIMIT = 40
+SNAPSHOT_REF_CACHE_LIMIT = 5000
 
 CAPABILITY_MATRIX = {
     "snapshot": "supports_snapshot",
@@ -129,6 +130,12 @@ class ManagedBrowserSession(BrowserSession):
         self._next_snapshot_ref = 1
         self._recent_actions: list[Dict[str, Any]] = []
 
+    def _safe_int(self, value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
+
     def _safe_raw_capabilities(self) -> Dict[str, Any]:
         try:
             raw = self._raw.get_capabilities()
@@ -147,6 +154,14 @@ class ManagedBrowserSession(BrowserSession):
     def _record_action_trace(self, action_name: str, payload: Dict[str, Any]) -> None:
         if not isinstance(payload, dict):
             return
+        resolution_trace = payload.get("resolution_trace", {})
+        resolution_mode = ""
+        resolution_stage = ""
+        resolution_scoped = False
+        if isinstance(resolution_trace, dict):
+            resolution_mode = str(resolution_trace.get("source", "") or "")
+            resolution_stage = str(resolution_trace.get("stage", "") or "")
+            resolution_scoped = bool(resolution_trace.get("scoped", False))
         trace = {
             "timestamp": round(time.time(), 3),
             "action_name": str(action_name or ""),
@@ -154,6 +169,7 @@ class ManagedBrowserSession(BrowserSession):
             "engine_name": self._capabilities.engine_name,
             "runtime_profile": self._capabilities.runtime_profile,
             "used_fallback": bool((payload.get("action_meta") or {}).get("used_fallback")),
+            "duration_ms": self._safe_int(payload.get("duration_ms", 0), default=0),
             "tab_id": str(payload.get("tab_id", "") or ""),
             "url": str(payload.get("url", "") or ""),
             "title": str(payload.get("title", "") or ""),
@@ -161,6 +177,9 @@ class ManagedBrowserSession(BrowserSession):
             "error_code": str(payload.get("error_code", "") or ""),
             "error_type": str(payload.get("error_type", "") or ""),
             "recoverable": bool(payload.get("recoverable", False)),
+            "resolution_mode": resolution_mode,
+            "resolution_stage": resolution_stage,
+            "resolution_scoped": resolution_scoped,
         }
         self._recent_actions.append(trace)
         overflow = len(self._recent_actions) - RECENT_ACTION_LIMIT
@@ -178,7 +197,108 @@ class ManagedBrowserSession(BrowserSession):
         bounded = max(1, int(limit))
         return items[-bounded:]
 
-    def _build_session_health_snapshot(self) -> Dict[str, Any]:
+    def _recent_target_hints(self, limit: int = 6) -> list[str]:
+        hints: list[str] = []
+        for item in reversed(self._recent_actions[-max(1, int(limit) * 2) :]):
+            target = str(item.get("target", "") or "").strip().lower()
+            if not target:
+                continue
+            target = re.sub(r"[^a-z0-9:_\-\s>#.]+", " ", target)
+            for token in re.split(r"[\s>#.]+", target):
+                token = token.strip()
+                if len(token) < 3:
+                    continue
+                if token not in hints:
+                    hints.append(token)
+                if len(hints) >= max(1, int(limit)):
+                    return hints
+        return hints
+
+    def _build_resolution_scope(self, action_name: str, target: str = "", by: str = "css", text_filter: str = "") -> Dict[str, Any]:
+        filter_terms: list[str] = []
+        for source in (text_filter, target if by in {"link_text", "partial_link_text"} else ""):
+            normalized = re.sub(r"\s+", " ", str(source or "").strip().lower())
+            if not normalized:
+                continue
+            for token in normalized.split(" "):
+                token = token.strip()
+                if len(token) >= 2 and token not in filter_terms:
+                    filter_terms.append(token)
+        combined = " ".join(filter_terms)
+        recent_hints = self._recent_target_hints(limit=6)
+        transient_terms = ("menu", "dropdown", "popup", "dialog", "sheet", "overlay", "sort", "filter", "newest", "latest", "option")
+        prefer_overlay = any(term in combined for term in transient_terms)
+        prefer_dialog = any(term in combined for term in ("dialog", "modal", "confirm", "sheet", "popup"))
+        prefer_expanded = any(term in combined for term in ("sort", "filter", "menu", "dropdown", "option", "newest", "latest"))
+        if not (prefer_overlay or prefer_dialog or prefer_expanded):
+            recent_text = " ".join(recent_hints)
+            prefer_overlay = any(term in recent_text for term in ("menu", "dropdown", "popup", "sort", "filter"))
+            prefer_dialog = any(term in recent_text for term in ("dialog", "modal", "sheet"))
+            prefer_expanded = any(term in recent_text for term in ("expanded", "sort", "filter", "menu"))
+        return {
+            "action_name": str(action_name or ""),
+            "target": str(target or ""),
+            "by": str(by or "css"),
+            "text_filter": str(text_filter or ""),
+            "filter_terms": filter_terms,
+            "recent_target_hints": recent_hints,
+            "prefer_overlay": prefer_overlay,
+            "prefer_dialog": prefer_dialog,
+            "prefer_expanded": prefer_expanded,
+            "explicit_target": bool(str(target or "").strip()),
+        }
+
+    def _normalize_page_drift(self, payload: Any) -> Dict[str, Any]:
+        drift = payload if isinstance(payload, dict) else {}
+        return {
+            "tab_id": str(drift.get("tab_id", "") or ""),
+            "drifted": bool(drift.get("drifted", False)),
+            "expected_url": str(drift.get("expected_url", "") or ""),
+            "current_url": str(drift.get("current_url", "") or ""),
+            "expected_title": str(drift.get("expected_title", "") or ""),
+            "current_title": str(drift.get("current_title", "") or ""),
+        }
+
+    def _extract_page_drift(self, payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return self._normalize_page_drift({})
+        if isinstance(payload.get("page_drift"), dict):
+            return self._normalize_page_drift(payload.get("page_drift"))
+        page = payload.get("page", {})
+        if isinstance(page, dict) and isinstance(page.get("page_drift"), dict):
+            return self._normalize_page_drift(page.get("page_drift"))
+        return self._normalize_page_drift({})
+
+    def _classify_failure(self, error_code: str, alive: bool = True, page_drift: Optional[Dict[str, Any]] = None) -> str:
+        normalized = str(error_code or "").strip()
+        drift = self._normalize_page_drift(page_drift)
+        if alive and drift.get("drifted"):
+            return "page_drift"
+        if not alive or normalized == "session_not_alive":
+            return "session_lost"
+        if normalized in {"target_not_found", "target_not_interactable"}:
+            return "target_resolution"
+        if normalized == "timeout":
+            return "page_synchronization"
+        if normalized == "action_not_supported_by_runtime":
+            return "capability_gap"
+        return "runtime_failure"
+
+    def _recovery_actions_for_failure(self, error_code: str, alive: bool = True, page_drift: Optional[Dict[str, Any]] = None) -> list[str]:
+        classification = self._classify_failure(error_code, alive=alive, page_drift=page_drift)
+        if classification == "page_drift":
+            return ["reactivate_expected_tab", "reopen_expected_url", "retry_on_sticky_tab", "diagnose_page"]
+        if classification == "session_lost":
+            return ["recreate_session", "reopen_target_page"]
+        if classification == "target_resolution":
+            return ["refresh_candidates_or_snapshot", "retry_with_scoped_targeting", "diagnose_page"]
+        if classification == "page_synchronization":
+            return ["wait_and_retry", "refresh_page_state", "diagnose_page"]
+        if classification == "capability_gap":
+            return ["switch_to_managed_fallback", "use_supported_action_path"]
+        return ["diagnose_page", "retry_action", "recreate_session_if_repeatable"]
+
+    def _build_session_health_snapshot(self, page_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
             summary = self._raw.get_summary()
             alive = bool(summary.alive)
@@ -194,12 +314,32 @@ class ManagedBrowserSession(BrowserSession):
                 "recent_action_count": len(self._recent_actions),
                 "recent_failure_count": len([item for item in self._recent_actions if not item.get("ok")]),
                 "last_action_name": str(self._recent_actions[-1].get("action_name", "") or "") if self._recent_actions else "",
+                "failure_classification": "session_lost",
                 "recovery_hint": "recreate_session",
+                "recovery_actions": ["recreate_session", "reopen_target_page"],
                 "summary_error": str(exc),
+                "page_drift": self._normalize_page_drift({}),
             }
+        drift_source = page_payload if isinstance(page_payload, dict) else {}
+        if not drift_source:
+            try:
+                drift_source = self._raw.get_current_url()
+            except Exception:
+                drift_source = {}
+        page_drift = self._extract_page_drift(drift_source)
+        if not current_url:
+            current_url = str(page_drift.get("current_url", "") or current_url)
+        if not title:
+            title = str(page_drift.get("current_title", "") or title)
         last_failure = next((item for item in reversed(self._recent_actions) if not item.get("ok")), {})
         recovery_hint = "none" if alive else "recreate_session"
-        if alive and last_failure:
+        failure_classification = (
+            self._classify_failure(str(last_failure.get("error_code", "") or ""), alive=alive, page_drift=page_drift) if last_failure else "healthy"
+        )
+        if alive and page_drift.get("drifted"):
+            failure_classification = "page_drift"
+            recovery_hint = "reactivate_expected_tab"
+        elif alive and last_failure:
             error_code = str(last_failure.get("error_code", "") or "")
             if error_code == "timeout":
                 recovery_hint = "retry_or_diagnose_page"
@@ -207,6 +347,11 @@ class ManagedBrowserSession(BrowserSession):
                 recovery_hint = "refresh_candidates_or_snapshot"
             else:
                 recovery_hint = "diagnose_page"
+        average_duration_ms = 0
+        if self._recent_actions:
+            average_duration_ms = int(
+                round(sum(self._safe_int(item.get("duration_ms", 0), 0) for item in self._recent_actions) / max(1, len(self._recent_actions)))
+            )
         return {
             "alive": alive,
             "current_url": current_url,
@@ -215,9 +360,15 @@ class ManagedBrowserSession(BrowserSession):
             "runtime_profile": self._capabilities.runtime_profile,
             "recent_action_count": len(self._recent_actions),
             "recent_failure_count": len([item for item in self._recent_actions if not item.get("ok")]),
+            "average_action_duration_ms": average_duration_ms,
             "last_action_name": str(self._recent_actions[-1].get("action_name", "") or "") if self._recent_actions else "",
             "last_failure": dict(last_failure) if last_failure else {},
+            "failure_classification": failure_classification,
             "recovery_hint": recovery_hint,
+            "recovery_actions": []
+            if not last_failure and alive and not page_drift.get("drifted")
+            else self._recovery_actions_for_failure(str(last_failure.get("error_code", "") or ""), alive=alive, page_drift=page_drift),
+            "page_drift": page_drift,
         }
 
     def _supports_managed_post_action_context(self) -> bool:
@@ -226,14 +377,217 @@ class ManagedBrowserSession(BrowserSession):
     def _compact_context_element(self, element: Any) -> Dict[str, Any]:
         if not isinstance(element, dict):
             return {}
-        allowed = ("tag_name", "text", "id", "name", "class", "aria_label", "role", "value", "href")
+        allowed = ("tag_name", "text", "id", "name", "class", "aria_label", "role", "value", "href", "accessible_name")
         return {key: element.get(key) for key in allowed if key in element and element.get(key) not in {None, ""}}
+
+    def _fallback_modal_state(self, tab_id: str = "") -> Dict[str, Any]:
+        try:
+            result = self._run_script_result(
+                """
+                const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim();
+                const getDeepActiveElement = () => {
+                  let current = document.activeElement;
+                  let guard = 0;
+                  while (current && current.shadowRoot && current.shadowRoot.activeElement && guard < 20) {
+                    current = current.shadowRoot.activeElement;
+                    guard += 1;
+                  }
+                  return current;
+                };
+                const roots = [document];
+                const stack = [document.documentElement].filter(Boolean);
+                const seenRoots = new Set([document]);
+                while (stack.length) {
+                  const node = stack.pop();
+                  if (!node || !node.children) continue;
+                  if (node.shadowRoot && !seenRoots.has(node.shadowRoot)) {
+                    seenRoots.add(node.shadowRoot);
+                    roots.push(node.shadowRoot);
+                    if (node.shadowRoot.children) {
+                      for (const child of Array.from(node.shadowRoot.children)) stack.push(child);
+                    }
+                  }
+                  for (const child of Array.from(node.children)) stack.push(child);
+                }
+                const candidates = [];
+                const candidateKeys = new Set();
+                const selectors = ['dialog', '[role="dialog"]', '[aria-modal="true"]', '[role="listbox"]', '[role="menu"]'];
+                for (const root of roots) {
+                  for (const selector of selectors) {
+                    for (const el of Array.from(root.querySelectorAll(selector))) {
+                      const key = `${selector}:${normalize(el.id || '')}:${normalize(el.getAttribute('role') || '')}:${normalize(el.innerText || el.textContent || '').slice(0, 120)}`;
+                      if (!candidateKeys.has(key)) {
+                        candidateKeys.add(key);
+                        candidates.push(el);
+                      }
+                    }
+                  }
+                }
+                const activeAncestors = [];
+                let activeNode = getDeepActiveElement();
+                while (activeNode && activeNode.nodeType === Node.ELEMENT_NODE) {
+                  activeAncestors.push(activeNode);
+                  activeNode = activeNode.parentElement || ((activeNode.getRootNode() instanceof ShadowRoot) ? activeNode.getRootNode().host : null);
+                }
+                for (const el of activeAncestors) {
+                  const role = normalize(el.getAttribute && el.getAttribute('role'));
+                  const ariaModal = normalize(el.getAttribute && el.getAttribute('aria-modal'));
+                  if (role === 'dialog' || role === 'listbox' || role === 'menu' || ariaModal === 'true' || (el.tagName || '').toLowerCase() === 'dialog') {
+                    const key = `active:${normalize(el.id || '')}:${role}:${normalize(el.innerText || el.textContent || '').slice(0, 120)}`;
+                    if (!candidateKeys.has(key)) {
+                      candidateKeys.add(key);
+                      candidates.push(el);
+                    }
+                  }
+                }
+                const rankCandidate = item => {
+                  let score = 0;
+                  if (item.containsActive) score += 300;
+                  if (item.role === 'dialog') score += 240;
+                  else if (item.role === 'listbox') score += 180;
+                  else if (item.role === 'menu') score += 80;
+                  if (item.position === 'fixed') score += 90;
+                  else if (item.position === 'absolute') score += 50;
+                  const zIndex = Number.parseInt(item.z_index || '0', 10);
+                  if (Number.isFinite(zIndex)) score += Math.max(0, Math.min(zIndex, 3000)) / 20;
+                  if ((item.tag_name || '') === 'tp-yt-paper-dialog' || /dialog/.test(item.class || '')) score += 100;
+                  if (/listbox|selection-group|paper-listbox|overlay|popup|dropdown|menu-popup/.test(`${item.class} ${item.id}`)) score += 80;
+                  if (/navigation|drawer|sidebar/.test(`${item.class} ${item.id}`)) score -= 220;
+                  if (item.box && item.box.width >= 240 && item.box.x <= 8) score -= 120;
+                  if (!item.containsActive && item.role === 'menu' && !/overlay|popup|dropdown/.test(`${item.class} ${item.id}`)) score -= 90;
+                  return score;
+                };
+                const visibleDialogs = candidates
+                  .filter(el => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                  })
+                  .map(el => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return {
+                      tag_name: (el.tagName || '').toLowerCase(),
+                      role: normalize(el.getAttribute('role') || ''),
+                      text: normalize(el.innerText || el.textContent || '').slice(0, 240),
+                      aria_label: normalize(el.getAttribute('aria-label') || ''),
+                      id: normalize(el.id || ''),
+                      class: normalize(el.getAttribute('class') || ''),
+                      z_index: style.zIndex || '',
+                      position: style.position || '',
+                      containsActive: !!(getDeepActiveElement() && el.contains(getDeepActiveElement())),
+                      box: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                    };
+                  })
+                  .map(item => ({ ...item, score: rankCandidate(item) }))
+                  .filter(item => item.score >= 0)
+                  .sort((a, b) => (b.score - a.score) || ((b.box?.width || 0) * (b.box?.height || 0) - (a.box?.width || 0) * (a.box?.height || 0)));
+                return {
+                  visible: visibleDialogs.length > 0,
+                  count: visibleDialogs.length,
+                  primary_dialog: visibleDialogs[0] || {},
+                  dialogs: visibleDialogs.slice(0, 8),
+                };
+                """,
+                tab_id=tab_id,
+            )
+            if isinstance(result, dict):
+                return {
+                    "visible": bool(result.get("visible", False)),
+                    "count": int(result.get("count", 0) or 0),
+                    "primary_dialog": result.get("primary_dialog", {}) if isinstance(result.get("primary_dialog"), dict) else {},
+                    "dialogs": result.get("dialogs", []) if isinstance(result.get("dialogs"), list) else [],
+                }
+        except Exception:
+            pass
+        return {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []}
+
+    def _fallback_diagnose_page(self, tab_id: str = "") -> Dict[str, Any]:
+        normalized_tab_id = str(tab_id or "").strip()
+        current = self._raw.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self._raw.get_current_url()
+        payload: Dict[str, Any] = {
+            **(current if isinstance(current, dict) else {}),
+            "diagnosis": {
+                "mode": "managed_fast_path",
+                "engine_name": self._capabilities.engine_name,
+                "runtime_profile": self._capabilities.runtime_profile,
+            },
+            "interaction_context": self._fallback_interaction_context(action_name="diagnose_page", tab_id=normalized_tab_id),
+        }
+        try:
+            payload["console"] = self._raw.get_console_messages(tab_id=normalized_tab_id, limit=40)
+        except Exception:
+            payload["console"] = {"count": 0, "messages": []}
+        try:
+            payload["page_errors"] = self._raw.get_page_errors(tab_id=normalized_tab_id, limit=40)
+        except Exception:
+            payload["page_errors"] = {"count": 0, "errors": []}
+        try:
+            payload["network"] = self._raw.get_network_requests(tab_id=normalized_tab_id, limit=40, failed_only=True)
+        except Exception:
+            payload["network"] = {"count": 0, "requests": []}
+        return payload
+
+    def _extract_structured_page_data(self, text: str, snapshot_text: str = "") -> Dict[str, Any]:
+        lines = [line.strip() for line in str(text or "").splitlines()]
+        cleaned = [line for line in lines if line]
+        headings = [line for line in cleaned if len(line) <= 80 and not line.startswith("@")][:20]
+        comments: list[Dict[str, Any]] = []
+        index = 0
+        while index < len(cleaned):
+            line = cleaned[index]
+            match = re.match(r"^(@\S+)\s+•\s+(.+)$", line)
+            if not match:
+                index += 1
+                continue
+            author = match.group(1).strip()
+            age = match.group(2).strip()
+            comment_lines: list[str] = []
+            video_title = ""
+            reply_count = ""
+            lookahead = index + 1
+            while lookahead < len(cleaned):
+                current = cleaned[lookahead]
+                if re.match(r"^@\S+\s+•\s+.+$", current):
+                    break
+                if current.lower().startswith("reply"):
+                    lookahead += 1
+                    continue
+                if re.match(r"^\d+\s+repl(?:y|ies)$", current.lower()):
+                    reply_count = current
+                    lookahead += 1
+                    continue
+                if not comment_lines:
+                    comment_lines.append(current)
+                elif not video_title:
+                    video_title = current
+                else:
+                    break
+                lookahead += 1
+            comments.append(
+                {
+                    "author": author,
+                    "age": age,
+                    "comment": " ".join(comment_lines).strip(),
+                    "video_title": video_title,
+                    "reply_count": reply_count,
+                }
+            )
+            index = lookahead
+        snapshot_refs = re.findall(r"\[ref=((?:f\d+)?e\d+)\]", str(snapshot_text or ""))
+        return {
+            "headings": headings,
+            "comment_threads": comments[:12],
+            "comment_thread_count": len(comments),
+            "snapshot_ref_count": len(snapshot_refs),
+        }
 
     def _fallback_interaction_context(self, action_name: str = "inspect", tab_id: str = "") -> Dict[str, Any]:
         normalized_tab_id = str(tab_id or "").strip()
         page: Dict[str, Any] = {}
         tabs: list[Dict[str, Any]] = []
         active_element: Dict[str, Any] = {}
+        modal_state = {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []}
         try:
             page = self._raw.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self._raw.get_current_url()
         except Exception:
@@ -247,6 +601,7 @@ class ManagedBrowserSession(BrowserSession):
             active_element = self._compact_context_element(active_raw.get("element", {}))
         except Exception as exc:
             active_element = {"error": str(exc)}
+        modal_state = self._fallback_modal_state(tab_id=normalized_tab_id)
         active_tab_id = normalized_tab_id or str(page.get("tab_id", "") or "")
         return {
             "action_name": str(action_name or "inspect"),
@@ -254,10 +609,10 @@ class ManagedBrowserSession(BrowserSession):
             "tabs": tabs,
             "active_tab_id": active_tab_id,
             "active_element": active_element,
-            "modal_state": {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []},
+            "modal_state": modal_state,
             "snapshot": {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
             "recent_actions": self._recent_actions_payload(limit=8),
-            "session_health": self._build_session_health_snapshot(),
+            "session_health": self._build_session_health_snapshot(page_payload=page),
         }
 
     def _normalize_interaction_context(self, payload: Any, action_name: str = "inspect", tab_id: str = "") -> Dict[str, Any]:
@@ -283,6 +638,10 @@ class ManagedBrowserSession(BrowserSession):
                 normalized_page = self._raw.get_current_url(tab_id=str(tab_id or "").strip()) if str(tab_id or "").strip() else self._raw.get_current_url()
             except Exception:
                 normalized_page = {}
+        if self._capabilities.engine_name == "playwright_cli" and not bool(modal_state.get("visible", False)):
+            refreshed_modal_state = self._fallback_modal_state(tab_id=str(tab_id or "").strip())
+            if bool(refreshed_modal_state.get("visible", False)):
+                modal_state = refreshed_modal_state
         active_tab_id = str(context.get("active_tab_id", "") or normalized_page.get("tab_id", "") or str(tab_id or "").strip())
         return {
             "action_name": str(context.get("action_name", "") or action_name or "inspect"),
@@ -300,9 +659,9 @@ class ManagedBrowserSession(BrowserSession):
             "recent_actions": context.get("recent_actions", self._recent_actions_payload(limit=8))
             if isinstance(context.get("recent_actions", None), list)
             else self._recent_actions_payload(limit=8),
-            "session_health": context.get("session_health", self._build_session_health_snapshot())
+            "session_health": context.get("session_health", self._build_session_health_snapshot(page_payload=normalized_page))
             if isinstance(context.get("session_health", None), dict)
-            else self._build_session_health_snapshot(),
+            else self._build_session_health_snapshot(page_payload=normalized_page),
         }
 
     def _build_post_action_context(self, action_name: str, tab_id: str = "") -> Dict[str, Any]:
@@ -372,7 +731,13 @@ class ManagedBrowserSession(BrowserSession):
             return "session_not_alive"
         return "runtime_action_failed"
 
-    def _normalize_failure(self, action_name: str, error: Exception, used_fallback: bool = False) -> Dict[str, Any]:
+    def _normalize_failure(
+        self,
+        action_name: str,
+        error: Exception,
+        used_fallback: bool = False,
+        duration_ms: int = 0,
+    ) -> Dict[str, Any]:
         error_text = str(error)
         error_type = type(error).__name__
         payload = {
@@ -381,6 +746,7 @@ class ManagedBrowserSession(BrowserSession):
             "error_type": error_type,
             "error_code": self._infer_error_code(error_type, error_text),
             "recoverable": error_type in {"NotImplementedError", "ValueError", "TimeoutError"},
+            "duration_ms": int(duration_ms or 0),
             "action_meta": self._action_meta(action_name, used_fallback=used_fallback),
         }
         try:
@@ -391,13 +757,16 @@ class ManagedBrowserSession(BrowserSession):
         self._record_action_trace(action_name, normalized)
         if isinstance(normalized.get("post_action_context"), dict):
             normalized["post_action_context"]["recent_actions"] = self._recent_actions_payload(limit=8)
-            normalized["post_action_context"]["session_health"] = self._build_session_health_snapshot()
+            normalized["post_action_context"]["session_health"] = self._build_session_health_snapshot(
+                page_payload=normalized.get("post_action_context", {}).get("page", {})
+            )
         return normalized
 
-    def _normalize_result(self, action_name: str, result: Any, used_fallback: bool = False) -> Dict[str, Any]:
+    def _normalize_result(self, action_name: str, result: Any, used_fallback: bool = False, duration_ms: int = 0) -> Dict[str, Any]:
         if not isinstance(result, dict):
             result = {"result": result}
         normalized = dict(result)
+        normalized["duration_ms"] = int(duration_ms or 0)
         if normalized.get("ok") is False:
             error_text = str(normalized.get("error", "") or "")
             error_type = str(normalized.get("error_type", "") or "")
@@ -410,7 +779,9 @@ class ManagedBrowserSession(BrowserSession):
         self._record_action_trace(action_name, normalized)
         if isinstance(normalized.get("post_action_context"), dict):
             normalized["post_action_context"]["recent_actions"] = self._recent_actions_payload(limit=8)
-            normalized["post_action_context"]["session_health"] = self._build_session_health_snapshot()
+            normalized["post_action_context"]["session_health"] = self._build_session_health_snapshot(
+                page_payload=normalized.get("post_action_context", {}).get("page", {})
+            )
         return normalized
 
     def _augment_diagnosis_payload(self, action_name: str, payload: Dict[str, Any], *, target: str = "", by: str = "css", text_filter: str = "") -> Dict[str, Any]:
@@ -434,11 +805,24 @@ class ManagedBrowserSession(BrowserSession):
             "runtime_profile": self._capabilities.runtime_profile,
             "recent_action_count": len(self._recent_actions),
             "recent_failure_count": len([item for item in self._recent_actions if not item.get("ok")]),
+            "average_action_duration_ms": self._build_session_health_snapshot(page_payload=payload).get("average_action_duration_ms", 0),
             "target": str(target or ""),
             "by": str(by or "css"),
             "text_filter": str(text_filter or ""),
         }
-        payload["session_health"] = self._build_session_health_snapshot()
+        try:
+            page_text_payload = self._raw.get_page_text(tab_id=str(payload.get("tab_id", "") or ""))
+            page_text = str(page_text_payload.get("text", "") or "")
+        except Exception:
+            page_text = ""
+        snapshot_text = ""
+        snapshot_payload = payload.get("snapshot")
+        if isinstance(snapshot_payload, str):
+            snapshot_text = snapshot_payload
+        elif isinstance(snapshot_payload, dict):
+            snapshot_text = str(snapshot_payload.get("snapshot", "") or "")
+        payload["structured_page"] = self._extract_structured_page_data(page_text, snapshot_text=snapshot_text)
+        payload["session_health"] = self._build_session_health_snapshot(page_payload=payload)
         return payload
 
     def _normalize_html_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -492,6 +876,10 @@ class ManagedBrowserSession(BrowserSession):
             score += 18
         if role in {"menuitem", "option"}:
             score += 24
+        if entry.get("in_overlay"):
+            score += 18
+        if entry.get("in_dialog"):
+            score += 14
         classes = str(entry.get("class", "") or "").lower()
         if any(token in classes for token in ("menu", "dropdown", "popup", "dialog", "sheet", "overlay")):
             score += 10
@@ -506,23 +894,55 @@ class ManagedBrowserSession(BrowserSession):
             return score
         haystacks = {
             "text": str(entry.get("text", "") or "").strip(),
+            "text_preview": str(entry.get("text_preview", "") or "").strip(),
             "aria_label": str(entry.get("aria_label", "") or "").strip(),
+            "accessible_name": str(entry.get("accessible_name", "") or "").strip(),
             "name": str(entry.get("name", "") or "").strip(),
             "id": str(entry.get("id", "") or "").strip(),
             "value": str(entry.get("value", "") or "").strip(),
             "role": role,
             "class": str(entry.get("class", "") or "").strip(),
+            "placeholder": str(entry.get("placeholder", "") or "").strip(),
+            "title_attr": str(entry.get("title_attr", "") or "").strip(),
+            "control_type": str(entry.get("control_type", "") or "").strip(),
+            "ancestry_path": str(entry.get("ancestry_path", "") or "").strip(),
         }
         for key, raw_value in haystacks.items():
             value = raw_value.lower()
             if not value:
                 continue
             if value == filter_text:
-                score += 220 if key in {"text", "aria_label"} else 180
+                score += 220 if key in {"text", "aria_label", "accessible_name"} else 180
             elif value.startswith(filter_text):
-                score += 140 if key in {"text", "aria_label"} else 100
+                score += 140 if key in {"text", "aria_label", "accessible_name"} else 100
             elif filter_text in value:
-                score += 90 if key in {"text", "aria_label"} else 60
+                score += 90 if key in {"text", "aria_label", "accessible_name", "text_preview"} else 60
+        return score
+
+    def _candidate_scope_boost(self, entry: Dict[str, Any], scope: Dict[str, Any]) -> int:
+        if not isinstance(entry, dict) or not isinstance(scope, dict):
+            return 0
+        score = 0
+        role = str(entry.get("role", "") or "").lower()
+        if scope.get("prefer_overlay") and (entry.get("in_overlay") or role in {"menuitem", "option", "listbox"}):
+            score += 120
+        if scope.get("prefer_dialog") and entry.get("in_dialog"):
+            score += 90
+        if scope.get("prefer_expanded") and str(entry.get("aria_expanded", "") or "").lower() == "true":
+            score += 70
+        hints = " ".join(
+            [
+                str(entry.get("text", "") or ""),
+                str(entry.get("aria_label", "") or ""),
+                str(entry.get("accessible_name", "") or ""),
+                str(entry.get("class", "") or ""),
+                str(entry.get("ancestry_path", "") or ""),
+                " ".join(entry.get("custom_element_ancestry", []) if isinstance(entry.get("custom_element_ancestry"), list) else []),
+            ]
+        ).lower()
+        for token in scope.get("recent_target_hints", []):
+            if token and token in hints:
+                score += 18
         return score
 
     def _is_unsupported_result(self, result: Dict[str, Any]) -> bool:
@@ -541,25 +961,33 @@ class ManagedBrowserSession(BrowserSession):
         raw_call: Callable[[], Any],
         fallback: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        started = time.perf_counter()
         try:
             raw_result = raw_call()
             if fallback and self._is_unsupported_result(raw_result):
-                return self._normalize_result(action_name, fallback(), used_fallback=True)
-            return self._normalize_result(action_name, raw_result, used_fallback=False)
+                duration_ms = int(round((time.perf_counter() - started) * 1000))
+                return self._normalize_result(action_name, fallback(), used_fallback=True, duration_ms=duration_ms)
+            duration_ms = int(round((time.perf_counter() - started) * 1000))
+            return self._normalize_result(action_name, raw_result, used_fallback=False, duration_ms=duration_ms)
         except NotImplementedError:
             if fallback:
                 try:
-                    return self._normalize_result(action_name, fallback(), used_fallback=True)
+                    duration_ms = int(round((time.perf_counter() - started) * 1000))
+                    return self._normalize_result(action_name, fallback(), used_fallback=True, duration_ms=duration_ms)
                 except Exception as exc:
-                    return self._normalize_failure(action_name, exc, used_fallback=True)
+                    duration_ms = int(round((time.perf_counter() - started) * 1000))
+                    return self._normalize_failure(action_name, exc, used_fallback=True, duration_ms=duration_ms)
             raise
         except Exception as exc:
             if fallback and self._infer_error_code(type(exc).__name__, str(exc)) == "action_not_supported_by_runtime":
                 try:
-                    return self._normalize_result(action_name, fallback(), used_fallback=True)
+                    duration_ms = int(round((time.perf_counter() - started) * 1000))
+                    return self._normalize_result(action_name, fallback(), used_fallback=True, duration_ms=duration_ms)
                 except Exception as fallback_exc:
-                    return self._normalize_failure(action_name, fallback_exc, used_fallback=True)
-            return self._normalize_failure(action_name, exc, used_fallback=False)
+                    duration_ms = int(round((time.perf_counter() - started) * 1000))
+                    return self._normalize_failure(action_name, fallback_exc, used_fallback=True, duration_ms=duration_ms)
+            duration_ms = int(round((time.perf_counter() - started) * 1000))
+            return self._normalize_failure(action_name, exc, used_fallback=False, duration_ms=duration_ms)
 
     def _run_script_result(self, script: str, tab_id: str = "") -> Any:
         if self._capabilities.engine_name == "playwright_cli" and hasattr(self._raw, "_eval_json"):
@@ -574,10 +1002,70 @@ class ManagedBrowserSession(BrowserSession):
     def _encode_js_string(self, value: str) -> str:
         return json.dumps(str(value or ""))
 
+    def _selector_target_for_cli(self, selector: str, by: str = "css") -> str:
+        normalized_by = str(by or "css").strip().lower()
+        if normalized_by == "css":
+            return str(selector or "")
+        if normalized_by == "xpath":
+            return f"xpath={selector}"
+        if normalized_by == "id":
+            return f"#{selector}"
+        if normalized_by == "name":
+            return f"[name={json.dumps(str(selector or ''))}]"
+        if normalized_by == "tag":
+            return str(selector or "")
+        if normalized_by == "class":
+            return f".{selector}"
+        if normalized_by in {"link_text", "partial_link_text"}:
+            return f"text={selector}"
+        raise ValueError(f"unsupported selector type: {by}")
+
     def _dom_runtime_helpers_js(self) -> str:
         return """
         const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim();
         const pickSingle = value => value ? [value] : [];
+        const overlayPattern = /(menu|dropdown|popup|dialog|sheet|overlay|popover|tooltip|listbox)/i;
+        const customTagPreview = nodes => nodes.map(node => (node.tagName || '').toLowerCase()).filter(tag => tag.includes('-')).slice(0, 8);
+        const elementAncestry = el => {
+          const items = [];
+          let current = el;
+          while (current && current.nodeType === Node.ELEMENT_NODE) {
+            items.push(current);
+            current = current.parentElement || ((current.getRootNode() instanceof ShadowRoot) ? current.getRootNode().host : null);
+          }
+          return items;
+        };
+        const textPreview = value => {
+          const normalized = normalize(value);
+          return normalized.length > 180 ? normalized.slice(0, 177) + '...' : normalized;
+        };
+        const inferAccessibleName = el => {
+          const ariaLabel = normalize(el.getAttribute('aria-label') || '');
+          if (ariaLabel) return ariaLabel;
+          const labelledBy = normalize(el.getAttribute('aria-labelledby') || '');
+          if (labelledBy) {
+            const labelText = labelledBy
+              .split(/\\s+/)
+              .map(id => document.getElementById(id))
+              .filter(Boolean)
+              .map(node => normalize(node.innerText || node.textContent || ''))
+              .filter(Boolean)
+              .join(' ');
+            if (labelText) return labelText;
+          }
+          if (el.labels && el.labels.length) {
+            const labelText = Array.from(el.labels)
+              .map(node => normalize(node.innerText || node.textContent || ''))
+              .filter(Boolean)
+              .join(' ');
+            if (labelText) return labelText;
+          }
+          const placeholder = normalize(el.getAttribute('placeholder') || '');
+          if (placeholder) return placeholder;
+          const titleText = normalize(el.getAttribute('title') || '');
+          if (titleText) return titleText;
+          return textPreview(el.innerText || el.textContent || '');
+        };
         const getSearchRoots = () => {
           const roots = [document];
           const stack = [document.documentElement].filter(Boolean);
@@ -690,9 +1178,28 @@ class ManagedBrowserSession(BrowserSession):
           const rect = el.getBoundingClientRect();
           const style = window.getComputedStyle(el);
           const visible = !!style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+          const ancestry = elementAncestry(el);
+          const dialogAncestors = ancestry.filter(node => normalize(node.getAttribute && node.getAttribute('role')) === 'dialog' || node.tagName === 'DIALOG' || normalize(node.getAttribute && node.getAttribute('aria-modal')) === 'true');
+          const overlayAncestors = ancestry.filter(node => {
+            const role = normalize(node.getAttribute && node.getAttribute('role'));
+            const classes = normalize(node.getAttribute && node.getAttribute('class'));
+            const identifier = normalize(node.getAttribute && node.getAttribute('id'));
+            return overlayPattern.test([role, classes, identifier, node.tagName || ''].join(' '));
+          });
+          const role = normalize(el.getAttribute('role') || '');
+          const inputType = normalize(el.getAttribute('type') || '');
+          const accessibleName = inferAccessibleName(el);
+          const ancestryPath = ancestry.map(node => (node.tagName || '').toLowerCase()).filter(Boolean).slice(0, 10).join(' > ');
+          const controlType = role || inputType || (el.tagName || '').toLowerCase();
+          const scopeTags = [];
+          if (dialogAncestors.length) scopeTags.push('dialog');
+          if (overlayAncestors.length) scopeTags.push('overlay');
+          if (normalize(el.getAttribute('aria-expanded') || '') === 'true') scopeTags.push('expanded');
+          if ((el.tagName || '').includes('-') || customTagPreview(ancestry).length) scopeTags.push('custom-element');
           return {
             tag_name: (el.tagName || '').toLowerCase(),
             text: normalize(el.innerText || el.textContent || ''),
+            text_preview: textPreview(el.innerText || el.textContent || ''),
             value: 'value' in el ? String(el.value || '') : '',
             visible,
             enabled: !el.disabled && el.getAttribute('aria-disabled') !== 'true',
@@ -700,14 +1207,26 @@ class ManagedBrowserSession(BrowserSession):
             id: normalize(el.id || ''),
             name: normalize(el.getAttribute('name') || ''),
             class: normalize(el.getAttribute('class') || ''),
+            placeholder: normalize(el.getAttribute('placeholder') || ''),
+            title_attr: normalize(el.getAttribute('title') || ''),
             aria_label: normalize(el.getAttribute('aria-label') || ''),
             aria_expanded: normalize(el.getAttribute('aria-expanded') || ''),
             aria_haspopup: normalize(el.getAttribute('aria-haspopup') || ''),
-            role: normalize(el.getAttribute('role') || ''),
+            role,
+            input_type: inputType,
+            control_type: controlType,
+            accessible_name: accessibleName,
             href: normalize(el.getAttribute('href') || ''),
             outer_html: el.outerHTML || '',
             selector: buildSelectorWithinRoot(el, el.getRootNode()),
             deep_selector: buildDeepSelector(el),
+            ancestry_path: ancestryPath,
+            custom_element_ancestry: customTagPreview(ancestry),
+            dialog_ancestry: dialogAncestors.map(node => (node.tagName || '').toLowerCase()).slice(0, 6),
+            overlay_ancestry: overlayAncestors.map(node => (node.tagName || '').toLowerCase()).slice(0, 6),
+            scope_tags: scopeTags,
+            in_dialog: dialogAncestors.length > 0,
+            in_overlay: overlayAncestors.length > 0,
             box: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
           };
         };
@@ -920,44 +1439,56 @@ class ManagedBrowserSession(BrowserSession):
                 break
         return candidates
 
-    def _fallback_candidates(self, target: str = "", by: str = "css", text_filter: str = "", limit: int = 25, include_boxes: bool = True, tab_id: str = "") -> Dict[str, Any]:
-        if self._capabilities.engine_name == "playwright_cli" and not str(target or "").strip():
-            try:
-                snapshot_result = self._raw.snapshot(tab_id=tab_id)
-                snapshot_text = str(snapshot_result.get("snapshot", "") or "")
-                snapshot_candidates = self._parse_snapshot_candidates(snapshot_text, limit=max(1, int(limit) * 2))
-                lowered_filter = str(text_filter or "").strip().lower()
-                if lowered_filter:
-                    snapshot_candidates = [
-                        item
-                        for item in snapshot_candidates
-                        if lowered_filter in " ".join(
-                            [str(item.get("text", "") or ""), str(item.get("aria_label", "") or ""), str(item.get("tag_name", "") or "")]
-                        ).lower()
-                    ]
-                current = self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()
-                return {
-                    **current,
-                    "target": "",
-                    "text_filter": str(text_filter or ""),
-                    "count": len(snapshot_candidates[: max(1, int(limit))]),
-                    "candidates": snapshot_candidates[: max(1, int(limit))],
-                }
-            except Exception:
-                pass
-        selector = target or "a,button,input,textarea,select,summary,[role],[aria-label],[title]"
-        mode = "list"
-        raw = self._run_script_result(self._generic_target_script(selector, by if target else "css", mode, limit=max(25, int(limit) * 4)), tab_id=tab_id)
-        entries = raw if isinstance(raw, list) else []
+    def _build_resolution_trace(
+        self,
+        action_name: str,
+        *,
+        source: str,
+        stage: str,
+        target: str,
+        by: str,
+        text_filter: str,
+        candidate_count: int,
+        matched: bool,
+        scope: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "action_name": str(action_name or ""),
+            "source": str(source or ""),
+            "stage": str(stage or ""),
+            "target": str(target or ""),
+            "by": str(by or "css"),
+            "text_filter": str(text_filter or ""),
+            "candidate_count": int(candidate_count or 0),
+            "matched": bool(matched),
+            "scoped": bool(scope.get("prefer_overlay") or scope.get("prefer_dialog") or scope.get("prefer_expanded")),
+            "scope_preferences": {
+                "prefer_overlay": bool(scope.get("prefer_overlay")),
+                "prefer_dialog": bool(scope.get("prefer_dialog")),
+                "prefer_expanded": bool(scope.get("prefer_expanded")),
+                "recent_target_hints": list(scope.get("recent_target_hints", []))[:6],
+            },
+        }
+
+    def _query_candidate_entries(self, selector: str, by: str, limit: int = 25, tab_id: str = "") -> list[Dict[str, Any]]:
+        raw = self._run_script_result(
+            self._generic_target_script(selector, by, "list", limit=max(1, int(limit))),
+            tab_id=tab_id,
+        )
+        return raw if isinstance(raw, list) else []
+
+    def _rank_entries(self, entries: list[Dict[str, Any]], text_filter: str, scope: Dict[str, Any]) -> list[tuple[int, int, Dict[str, Any]]]:
+        ranked_entries: list[tuple[int, int, Dict[str, Any]]] = []
         lowered_filter = str(text_filter or "").strip().lower()
-        ranked_entries = []
         for index, entry in enumerate(entries):
             if not isinstance(entry, dict):
                 continue
             merged = " ".join(
                 [
                     str(entry.get("text", "") or ""),
+                    str(entry.get("text_preview", "") or ""),
                     str(entry.get("aria_label", "") or ""),
+                    str(entry.get("accessible_name", "") or ""),
                     str(entry.get("role", "") or ""),
                     str(entry.get("name", "") or ""),
                     str(entry.get("value", "") or ""),
@@ -965,8 +1496,148 @@ class ManagedBrowserSession(BrowserSession):
             ).strip()
             if lowered_filter and lowered_filter not in merged.lower():
                 continue
-            ranked_entries.append((self._candidate_relevance_score(entry, text_filter=lowered_filter), index, entry))
+            score = self._candidate_relevance_score(entry, text_filter=lowered_filter)
+            score += self._candidate_scope_boost(entry, scope)
+            ranked_entries.append((score, index, entry))
         ranked_entries.sort(key=lambda item: (-item[0], item[1]))
+        return ranked_entries
+
+    def _resolve_target_pipeline(
+        self,
+        action_name: str,
+        *,
+        target: str = "",
+        by: str = "css",
+        text_filter: str = "",
+        limit: int = 25,
+        include_boxes: bool = True,
+        tab_id: str = "",
+    ) -> Dict[str, Any]:
+        normalized_target = str(target or "").strip()
+        normalized_by = str(by or "css")
+        normalized_filter = str(text_filter or "")
+        scope = self._build_resolution_scope(action_name, normalized_target, normalized_by, normalized_filter)
+        if SNAPSHOT_REF_PATTERN.match(normalized_target):
+            resolved = self._resolve_snapshot_ref(normalized_target)
+            trace = self._build_resolution_trace(
+                action_name,
+                source="snapshot_cache",
+                stage="snapshot_ref",
+                target=normalized_target,
+                by=normalized_by,
+                text_filter=normalized_filter,
+                candidate_count=1,
+                matched=True,
+                scope=scope,
+            )
+            return {"entry": None, "trace": trace, "scope": scope, "resolved": resolved, "candidates": []}
+
+        if self._capabilities.engine_name == "playwright_cli" and normalized_target:
+            trace = self._build_resolution_trace(
+                action_name,
+                source="cli_selector",
+                stage="direct_selector",
+                target=normalized_target,
+                by=normalized_by,
+                text_filter=normalized_filter,
+                candidate_count=1,
+                matched=True,
+                scope=scope,
+            )
+            return {
+                "entry": None,
+                "trace": trace,
+                "scope": scope,
+                "resolved": {"selector": normalized_target, "by": normalized_by},
+                "candidates": [],
+            }
+
+        if self._capabilities.engine_name == "playwright_cli" and not normalized_target:
+            snapshot_result = self._raw.snapshot(tab_id=tab_id)
+            snapshot_text = str(snapshot_result.get("snapshot", "") or "")
+            snapshot_candidates = self._parse_snapshot_candidates(snapshot_text, limit=max(1, int(limit) * 2))
+            lowered_filter = normalized_filter.strip().lower()
+            if lowered_filter:
+                snapshot_candidates = [
+                    item
+                    for item in snapshot_candidates
+                    if lowered_filter in " ".join(
+                        [str(item.get("text", "") or ""), str(item.get("aria_label", "") or ""), str(item.get("tag_name", "") or "")]
+                    ).lower()
+                ]
+            trace = self._build_resolution_trace(
+                action_name,
+                source="snapshot_text",
+                stage="snapshot_scan",
+                target=normalized_target,
+                by=normalized_by,
+                text_filter=normalized_filter,
+                candidate_count=len(snapshot_candidates[: max(1, int(limit))]),
+                matched=bool(snapshot_candidates),
+                scope=scope,
+            )
+            return {
+                "entry": dict(snapshot_candidates[0]) if snapshot_candidates else None,
+                "trace": trace,
+                "scope": scope,
+                "resolved": None,
+                "candidates": snapshot_candidates[: max(1, int(limit))],
+            }
+
+        dom_selector = normalized_target or "a,button,input,textarea,select,summary,[role],[aria-label],[title],[placeholder]"
+        dom_by = normalized_by if normalized_target else "css"
+        dom_entries = self._query_candidate_entries(dom_selector, dom_by, limit=max(25, int(limit) * 4), tab_id=tab_id)
+        ranking_filter = normalized_filter or (normalized_target if normalized_by in {"link_text", "partial_link_text"} else "")
+        ranked_entries = self._rank_entries(dom_entries, ranking_filter, scope)
+        if ranked_entries:
+            candidates = []
+            for score, _, entry in ranked_entries[: max(1, int(limit))]:
+                candidate = dict(entry)
+                candidate["match_score"] = score
+                if not include_boxes:
+                    candidate.pop("box", None)
+                candidates.append(candidate)
+            trace = self._build_resolution_trace(
+                action_name,
+                source="dom_fallback",
+                stage="ranked_dom_query",
+                target=normalized_target,
+                by=normalized_by,
+                text_filter=normalized_filter,
+                candidate_count=len(candidates),
+                matched=True,
+                scope=scope,
+            )
+            return {"entry": dict(candidates[0]), "trace": trace, "scope": scope, "resolved": None, "candidates": candidates}
+
+        trace = self._build_resolution_trace(
+            action_name,
+            source="dom_fallback",
+            stage="no_match",
+            target=normalized_target,
+            by=normalized_by,
+            text_filter=normalized_filter,
+            candidate_count=0,
+            matched=False,
+            scope=scope,
+        )
+        return {"entry": None, "trace": trace, "scope": scope, "resolved": None, "candidates": []}
+
+    def _fallback_candidates(self, target: str = "", by: str = "css", text_filter: str = "", limit: int = 25, include_boxes: bool = True, tab_id: str = "") -> Dict[str, Any]:
+        resolution = self._resolve_target_pipeline(
+            "list_candidates",
+            target=target,
+            by=by,
+            text_filter=text_filter,
+            limit=limit,
+            include_boxes=include_boxes,
+            tab_id=tab_id,
+        )
+        ranked_entries = [
+            (int(candidate.get("match_score", 0) or 0), index, candidate)
+            for index, candidate in enumerate(resolution.get("candidates", []))
+            if isinstance(candidate, dict)
+        ]
         candidates = []
         for score, _, entry in ranked_entries:
             ref = f"e{self._next_snapshot_ref}"
@@ -993,29 +1664,48 @@ class ManagedBrowserSession(BrowserSession):
             **current,
             "target": str(target or ""),
             "text_filter": str(text_filter or ""),
+            "resolution_trace": resolution.get("trace", {}),
             "count": len(candidates),
             "candidates": candidates,
         }
 
     def _fallback_describe_target(self, target: str, element: str = "", by: str = "css", include_box: bool = True) -> Dict[str, Any]:
-        resolved_target = self._resolve_snapshot_ref(target) if SNAPSHOT_REF_PATTERN.match(str(target or "").strip()) else {"selector": target, "by": by}
-        if self._capabilities.engine_name == "playwright_cli" and resolved_target.get("by") != "snapshot_ref" and hasattr(self._raw, "_eval_json"):
-            compact_script = " ".join(
-                self._cli_simple_query_script(resolved_target["selector"], resolved_target["by"], include_box=include_box).strip().splitlines()
-            )
-            entry = getattr(
-                self._raw,
-                "_eval_json",
-            )(f"() => {{ {compact_script} }}")
+        resolution = self._resolve_target_pipeline(
+            "describe_target",
+            target=target,
+            by=by,
+            text_filter="",
+            limit=10,
+            include_boxes=include_box,
+        )
+        resolved_target = resolution.get("resolved") if isinstance(resolution.get("resolved"), dict) else None
+        if resolved_target and resolved_target.get("by") == "snapshot_ref":
+            entry = dict(resolution.get("entry") or {})
+        elif resolved_target and self._capabilities.engine_name == "playwright_cli":
+            target_expr = self._selector_target_for_cli(resolved_target["selector"], resolved_target["by"])
+            if hasattr(self._raw, "_describe_target_via_eval"):
+                entry = getattr(self._raw, "_describe_target_via_eval")(target_expr)
+            elif hasattr(self._raw, "_eval_on_target"):
+                entry = getattr(
+                    self._raw,
+                    "_eval_on_target",
+                )(
+                    target_expr,
+                    "(element) => { const rect = element.getBoundingClientRect(); return {tag_name: (element.tagName || '').toLowerCase(), text: String(element.innerText || element.textContent || '').trim(), text_preview: String(element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 180), value: 'value' in element ? String(element.value || '') : '', visible: !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length), enabled: !element.disabled && element.getAttribute('aria-disabled') !== 'true', id: String(element.id || '').trim(), name: String(element.getAttribute('name') || '').trim(), class: String(element.getAttribute('class') || '').trim(), placeholder: String(element.getAttribute('placeholder') || '').trim(), title_attr: String(element.getAttribute('title') || '').trim(), aria_label: String(element.getAttribute('aria-label') || '').trim(), accessible_name: String(element.getAttribute('aria-label') || element.getAttribute('placeholder') || element.getAttribute('title') || element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim(), aria_expanded: String(element.getAttribute('aria-expanded') || '').trim(), aria_haspopup: String(element.getAttribute('aria-haspopup') || '').trim(), role: String(element.getAttribute('role') || '').trim(), input_type: String(element.getAttribute('type') || '').trim(), control_type: String(element.getAttribute('role') || element.getAttribute('type') || element.tagName || '').toLowerCase(), href: String(element.getAttribute('href') || '').trim(), ancestry_path: (function() { const tags = []; let current = element; while (current && current.nodeType === Node.ELEMENT_NODE && tags.length < 10) { tags.push((current.tagName || '').toLowerCase()); current = current.parentElement || ((current.getRootNode() instanceof ShadowRoot) ? current.getRootNode().host : null); } return tags.join(' > '); })(), custom_element_ancestry: (function() { const tags = []; let current = element; while (current && current.nodeType === Node.ELEMENT_NODE && tags.length < 8) { const tag = (current.tagName || '').toLowerCase(); if (tag.includes('-')) tags.push(tag); current = current.parentElement || ((current.getRootNode() instanceof ShadowRoot) ? current.getRootNode().host : null); } return tags; })(), dialog_ancestry: [], overlay_ancestry: [], scope_tags: [], in_dialog: false, in_overlay: false, selector: '', deep_selector: '', box: {x: rect.x, y: rect.y, width: rect.width, height: rect.height} }; }",
+                )
+            else:
+                compact_script = " ".join(
+                    self._cli_simple_query_script(resolved_target["selector"], resolved_target["by"], include_box=include_box).strip().splitlines()
+                )
+                entry = getattr(self._raw, "_eval_json")(f"() => {{ {compact_script} }}")
         else:
-            entry = self._run_script_result(
-                self._generic_target_script(resolved_target["selector"], resolved_target["by"], "describe", limit=1)
-            )
+            entry = resolution.get("entry")
         if not isinstance(entry, dict) or not entry:
             raise ValueError(f"Target not found: {target}")
         result = {
             **self._raw.get_current_url(),
             "target": str(target or "").strip(),
+            "resolution_trace": resolution.get("trace", {}),
             "visible": bool(entry.get("visible")),
             "enabled": bool(entry.get("enabled", True)),
             **entry,
@@ -1025,14 +1715,47 @@ class ManagedBrowserSession(BrowserSession):
         return result
 
     def _fallback_wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict[str, Any]:
-        if self._capabilities.engine_name == "playwright_cli" and hasattr(self._raw, "_eval_json"):
-            script = " ".join(self._cli_wait_query_script(selector, by).strip().splitlines())
+        if self._capabilities.engine_name == "playwright_cli":
             deadline = time.time() + max(1, int(timeout_seconds))
             last_entry: Dict[str, Any] | None = None
+            scope = self._build_resolution_scope("wait_for", selector, by, "")
+            last_trace = self._build_resolution_trace(
+                "wait_for",
+                source="cli_selector",
+                stage="direct_wait",
+                target=selector,
+                by=by,
+                text_filter="",
+                candidate_count=0,
+                matched=False,
+                scope=scope,
+            )
+            target_expr = self._selector_target_for_cli(selector, by)
             while time.time() < deadline:
-                entry = getattr(self._raw, "_eval_json")(f"() => {{ {script} }}")
+                if hasattr(self._raw, "_eval_on_target"):
+                    entry = getattr(
+                        self._raw,
+                        "_eval_on_target",
+                    )(
+                        target_expr,
+                        "(element) => { const rect = element.getBoundingClientRect(); const visible = !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length); return { found: true, tag_name: (element.tagName || '').toLowerCase(), text: String(element.innerText || element.textContent || '').trim(), visible, enabled: !element.disabled && element.getAttribute('aria-disabled') !== 'true', box: {x: rect.x, y: rect.y, width: rect.width, height: rect.height} }; }",
+                    )
+                else:
+                    script = " ".join(self._cli_wait_query_script(selector, by).strip().splitlines())
+                    entry = getattr(self._raw, "_eval_json")(f"() => {{ {script} }}")
                 if isinstance(entry, dict) and entry.get("found"):
                     last_entry = entry
+                    last_trace = self._build_resolution_trace(
+                        "wait_for",
+                        source="cli_selector",
+                        stage="direct_wait",
+                        target=selector,
+                        by=by,
+                        text_filter="",
+                        candidate_count=1,
+                        matched=True,
+                        scope=scope,
+                    )
                     if condition == "present":
                         break
                     if condition == "visible" and entry.get("visible"):
@@ -1048,11 +1771,22 @@ class ManagedBrowserSession(BrowserSession):
                 "tag_name": str(last_entry.get("tag_name", "") or ""),
                 "text": str(last_entry.get("text", "") or ""),
                 "condition": str(condition or "visible"),
+                "resolution_trace": last_trace,
             }
         deadline = time.time() + max(1, int(timeout_seconds))
         last_entry: Dict[str, Any] | None = None
+        last_trace: Dict[str, Any] = {}
         while time.time() < deadline:
-            entry = self._run_script_result(self._generic_target_script(selector, by, "describe", limit=1))
+            resolution = self._resolve_target_pipeline(
+                "wait_for",
+                target=selector,
+                by=by,
+                text_filter="",
+                limit=5,
+                include_boxes=False,
+            )
+            entry = resolution.get("entry")
+            last_trace = resolution.get("trace", {}) if isinstance(resolution.get("trace"), dict) else {}
             if isinstance(entry, dict) and entry:
                 last_entry = entry
                 if condition == "present":
@@ -1070,6 +1804,7 @@ class ManagedBrowserSession(BrowserSession):
             "tag_name": str(last_entry.get("tag_name", "") or ""),
             "text": str(last_entry.get("text", "") or ""),
             "condition": str(condition or "visible"),
+            "resolution_trace": last_trace,
         }
 
     def _fallback_snapshot(self, target: str = "", by: str = "css", depth: int | None = None, boxes: bool = False, filename: str = "", tab_id: str = "") -> Dict[str, Any]:
@@ -1172,12 +1907,21 @@ class ManagedBrowserSession(BrowserSession):
 
     def _fallback_diagnose_target(self, target: str, element: str = "", by: str = "css", text_filter: str = "", limit: int = 10) -> Dict[str, Any]:
         del element
+        resolution = self._resolve_target_pipeline(
+            "diagnose_target",
+            target=target,
+            by=by,
+            text_filter=text_filter,
+            limit=limit,
+            include_boxes=True,
+        )
         diagnosis = {
             **self._raw.get_current_url(),
             "target": str(target or "").strip(),
             "by": str(by or "css"),
             "text_filter": str(text_filter or ""),
             "is_snapshot_ref": bool(SNAPSHOT_REF_PATTERN.match(str(target or "").strip())),
+            "resolution_trace": resolution.get("trace", {}),
         }
         try:
             diagnosis["status"] = "resolved"
@@ -1276,7 +2020,7 @@ class ManagedBrowserSession(BrowserSession):
         )
         if self._capabilities.engine_name == "playwright_cli":
             snapshot_text = str(result.get("snapshot", "") or "")
-            refs = [item.get("ref", "") for item in self._parse_snapshot_candidates(snapshot_text, limit=200)]
+            refs = [item.get("ref", "") for item in self._parse_snapshot_candidates(snapshot_text, limit=SNAPSHOT_REF_CACHE_LIMIT)]
             result["ref_count"] = len(refs)
             result["refs"] = refs
         return result
@@ -1394,7 +2138,13 @@ class ManagedBrowserSession(BrowserSession):
         return self._dispatch("clear_debug_buffers", lambda: self._raw.clear_debug_buffers(tab_id=tab_id))
 
     def diagnose_page(self, tab_id: str = "") -> Dict:
-        result = self._dispatch("diagnose_page", lambda: self._raw.diagnose_page(tab_id=tab_id))
+        if self._capabilities.engine_name == "playwright_cli":
+            result = self._dispatch(
+                "diagnose_page",
+                lambda: self._fallback_diagnose_page(tab_id=tab_id),
+            )
+        else:
+            result = self._dispatch("diagnose_page", lambda: self._raw.diagnose_page(tab_id=tab_id))
         return self._augment_diagnosis_payload("diagnose_page", result)
 
     def verify_text(self, text: str) -> Dict:
