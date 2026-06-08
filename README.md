@@ -12,15 +12,17 @@ From a first-contact perspective, there are six key ideas:
 
 1. It solves the "real login state" problem.
    The project lets GUI-managed Chromium profiles be exposed to MCP clients so automation can reuse cookies, local storage, extensions, bookmarks, and site permissions.
-2. It is organized into three layers.
-   The GUI manages configuration and profiles, the daemon provides a stable MCP endpoint, and the worker starts on demand to control a real browser session.
+2. It is organized into layered runtime control.
+   The GUI manages configuration and profiles, the daemon provides a stable MCP endpoint, the worker starts on demand, and a managed browser session kernel normalizes runtime behavior before MCP tools use it.
 3. It supports multiple browser execution engines.
-   Shared profile and session ownership stay the same, while the execution backend can use either Selenium plus `undetected_chromedriver` or Patchright.
-4. It is designed around safe profile ownership.
+   Shared profile and session ownership stay the same, while the execution backend can use Selenium plus `undetected_chromedriver`, Patchright, or `playwright_cli`.
+4. It exposes a more stable runtime contract than the raw engines alone.
+   The managed session kernel adds structured capability metadata, normalized action errors, and generic DOM-script fallbacks so callers are less exposed to engine-specific gaps.
+5. It is designed around safe profile ownership.
    Session checks prevent multiple tasks, threads, or keepalive jobs from silently fighting over the same logged-in browser identity.
-5. It attaches automation to real Chromium profiles.
+6. It attaches automation to real Chromium profiles.
    The browser is launched with the actual `user-data-dir` and `profile-directory`, then the selected execution engine connects to that persistent profile.
-6. It includes keepalive workflows in addition to MCP control.
+7. It includes keepalive workflows in addition to MCP control.
    The GUI can run scheduled or manual keepalive tasks against real logged-in profiles for sites such as ChatGPT, Gmail, and Google.
 
 The public user entry point is:
@@ -40,6 +42,7 @@ The browser automation layer supports:
 - Selenium: [https://www.selenium.dev/](https://www.selenium.dev/)
 - undetected-chromedriver: [https://github.com/ultrafunkamsterdam/undetected-chromedriver](https://github.com/ultrafunkamsterdam/undetected-chromedriver)
 - Patchright: [https://github.com/Kaliiiiiiiiii-Vinyzu/patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
+- Playwright CLI: [https://github.com/microsoft/playwright-cli](https://github.com/microsoft/playwright-cli)
 
 The project starts Chromium with a real `user-data-dir` and `profile-directory`, then attaches the selected browser engine to that profile. This allows the worker to reuse real cookies, sessions, local storage, extensions, and other persistent browser state.
 
@@ -60,11 +63,14 @@ On top of that browser layer, the MCP service adds:
 - Expose real browser identities to MCP clients
 - Prevent conflicting sessions across threads or tasks
 - Switch the default browser engine in the GUI configuration
+- Expose structured runtime capabilities instead of only raw engine names
+- Normalize action failures into stable error codes for callers
 - Start the browser worker only when needed
 - Release resources automatically after idle timeout
 - Run keepalive jobs against real logged-in profiles
 - Coordinate multi-tab browser work with explicit tab listing, opening, activation, and closing tools
 - Collect structured console, page error, and network diagnostics instead of relying on screenshots alone
+- Fall back to generic DOM-based snapshot, candidate enumeration, wait, and target diagnostics when a runtime lacks native support
 
 ## Requirements
 
@@ -144,7 +150,7 @@ Important fields:
 - `app.language`
   UI language code such as `en`, `ja`, or `zh`
 - `app.browser_engine`
-  Default browser execution backend, currently `selenium_uc` or `patchright`
+  Default browser execution backend, currently `selenium_uc`, `patchright`, or `playwright_cli`
 - `launch.*`
   Browser launch defaults used by the built-in Python launcher, such as `new_window`, `start_maximized`, `load_fingerprint_extension`, `check_url`, and `extra_args`
 - `mcp.host`, `mcp.port`, `mcp.worker_port`, `mcp.path`
@@ -159,6 +165,13 @@ http://127.0.0.1:28888/mcp
 ```
 
 The daemon stays available between tasks. The browser worker is started only when a request needs it, and it is reclaimed after the configured idle timeout.
+
+Operational notes:
+
+- The daemon is intended to stay stable while the worker is short-lived and lazily started.
+- A worker reclaimed because of `idle_timeout` is a normal managed lifecycle event, not a crash.
+- If the configured Chromium binary root already has live browser processes, session startup is intentionally blocked with states such as `external_chromium_running`.
+- That busy-state rule applies before engine startup, including `playwright_cli`.
 
 Typical MCP flow:
 
@@ -224,6 +237,17 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Provides the strongest tab model and the richest structured debug telemetry in the current project
 - Collects DevTools-style diagnostics through per-tab CDP sessions, so agents can read console output, uncaught exceptions, and network failures without opening browser DevTools manually
 - Keepalive is not routed through Patchright yet in this stage
+
+### Playwright CLI
+
+- Added as a third parallel engine under the same `SessionManager -> BrowserEngine factory` path
+- Uses `playwright-cli open --persistent` only for startup, then reuses the named session for later commands
+- Reuses the real `user-data-dir` together with Chromium `--profile-directory=Profile N`, so logged-in state can be preserved
+- Supports the validated first-stage surface: session start, navigation, multi-tab basics, script execution, type/click/key actions, screenshot, console, requests, and coarse page diagnostics
+- Managed runtime fallbacks lift the raw CLI session with generic `snapshot`, candidate enumeration, waiting, target verification, and snapshot-ref style targeting where possible
+- Shared-root concurrency still does not work: one real `user_data_root` can only back one live browser session at a time, so the existing busy-state governance remains mandatory
+- Keepalive is not routed through `playwright_cli` in this stage
+- Windows packaged GUI, daemon, and worker executables have been validated against the managed runtime path
 
 ### Selenium plus undetected-chromedriver debug notes
 

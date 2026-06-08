@@ -16,6 +16,8 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 from selenium.webdriver import ActionChains
+from selenium.webdriver.common.actions.action_builder import ActionBuilder
+from selenium.webdriver.common.actions.pointer_input import PointerInput
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -138,12 +140,19 @@ def set_element_value_js(driver, element, text: str) -> None:
         """
         const el = arguments[0];
         const value = arguments[1];
+        const normalize = input => String(input ?? '');
+        const previousValue = 'value' in el ? normalize(el.value) : normalize(el.textContent);
         if (el.isContentEditable) {
             el.focus();
             el.innerHTML = '';
             el.textContent = value;
         } else if ('value' in el) {
-            const proto = Object.getPrototypeOf(el);
+            const proto =
+                el.tagName === 'TEXTAREA'
+                    ? HTMLTextAreaElement.prototype
+                    : el.tagName === 'INPUT'
+                      ? HTMLInputElement.prototype
+                      : Object.getPrototypeOf(el);
             const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
             if (descriptor && descriptor.set) {
                 descriptor.set.call(el, value);
@@ -152,12 +161,57 @@ def set_element_value_js(driver, element, text: str) -> None:
             }
             el.focus();
         }
+        const tracker = el._valueTracker;
+        if (tracker && tracker.setValue) {
+            tracker.setValue(previousValue);
+        }
+        try {
+            el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: value, inputType: 'insertText' }));
+        } catch (error) {
+            // Older Chromium builds may not expose InputEvent as a constructor.
+        }
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         """,
         element,
         text,
     )
+
+
+def read_element_input_value(driver, element) -> str:
+    try:
+        value = driver.execute_script(
+            """
+            const el = arguments[0];
+            if (!el) return '';
+            if (el.isContentEditable) {
+                return String(el.innerText || el.textContent || '');
+            }
+            if ('value' in el) {
+                return String(el.value || '');
+            }
+            return String(el.textContent || '');
+            """,
+            element,
+        )
+        return str(value or "")
+    except JavascriptException:
+        try:
+            return str(element.get_attribute("value") or "")
+        except WebDriverException:
+            return ""
+
+
+def normalize_input_value_for_compare(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def input_value_matches_expected(actual_value: str, expected_text: str) -> bool:
+    actual_text = str(actual_value or "")
+    expected = str(expected_text or "")
+    if actual_text == expected:
+        return True
+    return normalize_input_value_for_compare(actual_text) == normalize_input_value_for_compare(expected)
 
 
 def robust_type_text(driver, locator, text: str, clear_first: bool, submit: bool, timeout_seconds: int) -> None:
@@ -180,6 +234,11 @@ def robust_type_text(driver, locator, text: str, clear_first: bool, submit: bool
                 element.send_keys(text)
             else:
                 set_element_value_js(driver, element, text)
+            current_value = read_element_input_value(driver, element)
+            if not input_value_matches_expected(current_value, text):
+                raise ValueError(
+                    f'Input value did not settle after {input_mode}: expected "{text}", got "{current_value}"'
+                )
             if submit:
                 try:
                     element.submit()
@@ -225,6 +284,42 @@ def element_box(driver, element) -> dict:
         return rect or {}
     except WebDriverException:
         return {}
+
+
+def get_viewport_metrics(driver) -> dict:
+    metrics = driver.execute_script(
+        """
+        return {
+          width: Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0),
+          height: Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0),
+          device_pixel_ratio: window.devicePixelRatio || 1
+        };
+        """
+    )
+    return metrics or {"width": 0, "height": 0, "device_pixel_ratio": 1}
+
+
+def ensure_viewport_point(metrics: dict, x: float, y: float) -> None:
+    width = float(metrics.get("width", 0) or 0)
+    height = float(metrics.get("height", 0) or 0)
+    if x < 0 or y < 0 or x > width or y > height:
+        raise MoveTargetOutOfBoundsException(
+            f"Viewport point is out of bounds: ({x}, {y}) not within 0..{width}, 0..{height}"
+        )
+
+
+def dispatch_cdp_mouse(driver, event_type: str, x: float, y: float, *, button: str = "left", click_count: int = 1) -> None:
+    driver.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {
+            "type": str(event_type),
+            "x": float(x),
+            "y": float(y),
+            "button": str(button),
+            "buttons": 1 if str(button) == "left" else 2 if str(button) == "right" else 4,
+            "clickCount": max(1, int(click_count)),
+        },
+    )
 
 
 class SeleniumBrowserSession(BrowserSession):
@@ -609,8 +704,36 @@ class SeleniumBrowserSession(BrowserSession):
         depth: int | None = None,
         boxes: bool = False,
         filename: str = "",
+        tab_id: str = "",
     ) -> Dict:
-        raise NotImplementedError("Structured browser_snapshot is currently supported only by the patchright engine.")
+        handle = self._resolve_handle(tab_id=tab_id)
+        self._activate_handle(handle)
+        target_text = str(target or "").strip()
+        response = {
+            **self.get_current_url(tab_id=handle),
+            "target": target_text,
+            "by": str(by or "css"),
+            "depth": int(depth) if depth is not None else None,
+            "boxes": bool(boxes),
+            "filename": str(filename or "").strip(),
+            "snapshot": {
+                "unsupported": True,
+                "engine_name": "selenium_uc",
+                "message": "Structured browser_snapshot and snapshot refs are currently supported only by the patchright engine.",
+                "recommended_tools": [
+                    "inspect_elements",
+                    "browser_list_candidates",
+                    "browser_describe_target",
+                    "screenshot",
+                ],
+            },
+        }
+        if target_text and not SNAPSHOT_REF_PATTERN.match(target_text):
+            try:
+                response["target_details"] = self.describe_target(target_text, by=by, include_box=bool(boxes))
+            except Exception as exc:
+                response["target_details_error"] = str(exc)
+        return response
 
     def list_candidates(
         self,
@@ -720,7 +843,15 @@ class SeleniumBrowserSession(BrowserSession):
         try:
             locator = (selector_kind_to_by(by), selector)
             robust_type_text(self.driver, locator, text, bool(clear_first), bool(submit), int(timeout_seconds))
-            return {**self.get_current_url(), "typed": True, "submitted": bool(submit)}
+            element = wait_for_element(self.driver, locator, int(timeout_seconds), "present")
+            actual_value = read_element_input_value(self.driver, element)
+            return {
+                **self.get_current_url(),
+                "typed": True,
+                "submitted": bool(submit),
+                "actual_value": actual_value,
+                "value_matches": input_value_matches_expected(actual_value, text),
+            }
         except Exception as exc:
             return self._error_payload("type_text", exc, selector=selector, by=by, text_filter=selector)
 
@@ -743,18 +874,15 @@ class SeleniumBrowserSession(BrowserSession):
                 text_filter=target,
             )
         try:
-            return {
-                **self.get_current_url(),
-                **self.type_text(
-                    target,
-                    text,
-                    by=by,
-                    clear_first=clear_first,
-                    submit=submit,
-                    timeout_seconds=timeout_seconds,
-                ),
-                "target": str(target or "").strip(),
-            }
+            result = self.type_text(
+                target,
+                text,
+                by=by,
+                clear_first=clear_first,
+                submit=submit,
+                timeout_seconds=timeout_seconds,
+            )
+            return {**self.get_current_url(), **result, "target": str(target or "").strip()}
         except Exception as exc:
             return self._error_payload("type_target", exc, target=target, by=by, text_filter=target)
 
@@ -1120,8 +1248,16 @@ class SeleniumBrowserSession(BrowserSession):
         raise NotImplementedError("Persistent highlight is currently supported only by the patchright engine.")
 
     def mouse_move_xy(self, x: float, y: float) -> Dict:
-        ActionChains(self.driver).move_by_offset(float(x), float(y)).perform()
-        return {**self.get_current_url(), "moved": True, "x": float(x), "y": float(y)}
+        viewport = get_viewport_metrics(self.driver)
+        ensure_viewport_point(viewport, float(x), float(y))
+        try:
+            dispatch_cdp_mouse(self.driver, "mouseMoved", float(x), float(y))
+        except Exception:
+            mouse = PointerInput("mouse", "default")
+            actions = ActionBuilder(self.driver, mouse=mouse)
+            actions.pointer_action.move_to_location(int(float(x)), int(float(y)))
+            actions.perform()
+        return {**self.get_current_url(), "moved": True, "x": float(x), "y": float(y), "viewport": viewport}
 
     def mouse_click_xy(
         self,
@@ -1131,15 +1267,27 @@ class SeleniumBrowserSession(BrowserSession):
         click_count: int = 1,
         delay_ms: int = 0,
     ) -> Dict:
-        actions = ActionChains(self.driver).move_by_offset(float(x), float(y))
         clicks = max(1, int(click_count))
         button_name = str(button or "left").strip().lower()
-        for _ in range(clicks):
+        viewport = get_viewport_metrics(self.driver)
+        ensure_viewport_point(viewport, float(x), float(y))
+        try:
+            dispatch_cdp_mouse(self.driver, "mouseMoved", float(x), float(y), button=button_name, click_count=clicks)
+            for _ in range(clicks):
+                dispatch_cdp_mouse(self.driver, "mousePressed", float(x), float(y), button=button_name, click_count=clicks)
+                if int(delay_ms) > 0:
+                    time.sleep(max(0, int(delay_ms)) / 1000.0)
+                dispatch_cdp_mouse(self.driver, "mouseReleased", float(x), float(y), button=button_name, click_count=clicks)
+        except Exception:
+            mouse = PointerInput("mouse", "default")
+            actions = ActionBuilder(self.driver, mouse=mouse)
+            actions.pointer_action.move_to_location(int(float(x)), int(float(y)))
             if button_name == "right":
-                actions.context_click()
+                actions.pointer_action.context_click()
             else:
-                actions.click()
-        actions.perform()
+                for _ in range(clicks):
+                    actions.pointer_action.click()
+            actions.perform()
         return {
             **self.get_current_url(),
             "clicked": True,
@@ -1147,13 +1295,26 @@ class SeleniumBrowserSession(BrowserSession):
             "y": float(y),
             "button": button_name,
             "click_count": clicks,
+            "viewport": viewport,
         }
 
     def mouse_drag_xy(self, start_x: float, start_y: float, end_x: float, end_y: float) -> Dict:
-        ActionChains(self.driver).move_by_offset(float(start_x), float(start_y)).click_and_hold().move_by_offset(
-            float(end_x) - float(start_x),
-            float(end_y) - float(start_y),
-        ).release().perform()
+        viewport = get_viewport_metrics(self.driver)
+        ensure_viewport_point(viewport, float(start_x), float(start_y))
+        ensure_viewport_point(viewport, float(end_x), float(end_y))
+        try:
+            dispatch_cdp_mouse(self.driver, "mouseMoved", float(start_x), float(start_y))
+            dispatch_cdp_mouse(self.driver, "mousePressed", float(start_x), float(start_y))
+            dispatch_cdp_mouse(self.driver, "mouseMoved", float(end_x), float(end_y))
+            dispatch_cdp_mouse(self.driver, "mouseReleased", float(end_x), float(end_y))
+        except Exception:
+            mouse = PointerInput("mouse", "default")
+            actions = ActionBuilder(self.driver, mouse=mouse)
+            actions.pointer_action.move_to_location(int(float(start_x)), int(float(start_y)))
+            actions.pointer_action.pointer_down()
+            actions.pointer_action.move_to_location(int(float(end_x)), int(float(end_y)))
+            actions.pointer_action.release()
+            actions.perform()
         return {
             **self.get_current_url(),
             "dragged": True,
@@ -1161,6 +1322,7 @@ class SeleniumBrowserSession(BrowserSession):
             "start_y": float(start_y),
             "end_x": float(end_x),
             "end_y": float(end_y),
+            "viewport": viewport,
         }
 
     def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:

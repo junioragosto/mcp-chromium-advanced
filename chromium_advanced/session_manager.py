@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from chromium_advanced.browser_session_kernel import ManagedBrowserSession
 from chromium_advanced.browser_engines.factory import create_browser_engine, resolve_browser_engine_name
 from chromium_advanced.chromium_profile_lib import (
     ensure_profile_bookmarks_initialized,
@@ -300,7 +301,7 @@ class SessionManager:
                 f"[{now_text()}] [SESSION] engine created: profile={profile_name} engine={resolved_engine_name}",
                 flush=True,
             )
-            browser_session = engine.create_session(config, profile_name)
+            browser_session = ManagedBrowserSession(engine.create_session(config, profile_name))
             print(
                 f"[{now_text()}] [SESSION] browser session created: profile={profile_name} engine={resolved_engine_name}",
                 flush=True,

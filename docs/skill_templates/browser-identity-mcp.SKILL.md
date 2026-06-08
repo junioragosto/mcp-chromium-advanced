@@ -96,6 +96,12 @@ If `can_start_profile_session(profile_name)` reports `allowed=false` but also re
 
 If the project needs a specific browser backend, pass the optional `engine` parameter explicitly when checking or starting a session, for example `engine="selenium_uc"` or `engine="patchright"`. If omitted, the GUI-configured default engine will be used.
 
+For the Chromium Profile Manager service on this machine, the supported engine values are:
+
+- `selenium_uc`
+- `patchright`
+- `playwright_cli`
+
 ## Chromium-Specific Notes
 
 - `browser-identity-mcp` is the skill name, not the MCP server id.
@@ -104,11 +110,13 @@ If the project needs a specific browser backend, pass the optional `engine` para
 - The daemon endpoint on `28888` is expected to stay stable across tasks.
 - A first request to `/mcp` may lazily start the worker; this is normal.
 - If `get_server_status` reports `occupied`, `starting`, `keepalive_running`, or `external_chromium_running`, do not force a new browser session.
+- If `external_chromium_running` is reported, the practical meaning is usually that the configured Chromium binary root is already open outside MCP, so governance is blocking startup before the engine is even created.
 - If the same profile is already occupied, prefer surfacing that state first. Reuse should be explicit, not implicit.
 - For multi-tab tasks, do not assume a newly opened tab became the effective action target unless you explicitly activated it or the tool says it was activated.
 - When diagnosing broken pages, prefer the MCP debug tools over manual screenshots of DevTools whenever possible.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.
+- `playwright_cli` is a supported parallel engine, but it still obeys the same profile governance and busy-state rules as the other runtimes.
 
 ## Example User Wording
 
