@@ -146,6 +146,14 @@ Status: verified by unit test and local runtime integration test
 
 Status: verified by unit test and local runtime integration test
 
+### Managed diagnostics and action trace
+
+- managed runtime now records a bounded recent-action trace with timestamps, target hints, fallback usage, and normalized failure codes
+- `diagnose_page` and `diagnose_target` now include managed diagnostic metadata plus recent action history instead of relying only on raw engine-specific payloads
+- diagnostic payloads exclude the current diagnose call from the history view so the returned trace stays focused on the causal user/runtime actions
+
+Status: verified by unit test and local runtime integration test
+
 ### Built runtime path
 
 - packaged daemon and worker can lazy-start, create a managed browser session, run browser actions, and reclaim the worker after idle timeout

@@ -237,7 +237,7 @@ class FakeRawSession:
         return {"cleared": True}
 
     def diagnose_page(self, tab_id=""):
-        return {"diagnosis": {}}
+        return {"diagnosis": {}, "interaction_context": self.get_interaction_context(tab_id=tab_id).get("interaction_context", {})}
 
     def verify_text(self, text):
         return {"verified": True, "text": text}
@@ -359,6 +359,7 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertEqual(result["post_action_context"]["action_name"], "click")
         self.assertEqual(result["post_action_context"]["active_tab_id"], "tab-001")
         self.assertEqual(result["post_action_context"]["active_element"]["id"], "name")
+        self.assertGreaterEqual(len(result["post_action_context"]["recent_actions"]), 1)
 
     def test_get_page_html_is_truncated_and_summarized_for_large_pages(self):
         raw = FakeRawSession(engine_name="playwright_cli")
@@ -410,6 +411,25 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         result = session.list_candidates(text_filter="newest", limit=5)
         self.assertEqual(result["candidates"][0]["text"], "Newest")
         self.assertGreater(result["candidates"][0]["match_score"], 0)
+
+    def test_diagnose_page_includes_recent_actions(self):
+        session = ManagedBrowserSession(FakeRawSession(engine_name="playwright_cli"))
+        session.click("#save")
+        session.type_text("#name", "Alice", by="css")
+        result = session.diagnose_page()
+        self.assertIn("recent_actions", result)
+        self.assertGreaterEqual(len(result["recent_actions"]), 2)
+        self.assertEqual(result["recent_actions"][-1]["action_name"], "type_text")
+        self.assertIn("managed_diagnostics", result)
+
+    def test_diagnose_target_includes_managed_metadata(self):
+        session = ManagedBrowserSession(FakeRawSession(engine_name="selenium_uc"))
+        session.click("#save")
+        result = session.diagnose_target("#save", by="css", text_filter="save", limit=5)
+        self.assertIn("managed_diagnostics", result)
+        self.assertEqual(result["managed_diagnostics"]["target"], "#save")
+        self.assertEqual(result["managed_diagnostics"]["by"], "css")
+        self.assertIn("recent_actions", result)
 
 
 if __name__ == "__main__":

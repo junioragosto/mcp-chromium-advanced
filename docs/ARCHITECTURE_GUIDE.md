@@ -117,6 +117,8 @@ Responsibilities:
 - synthesize normalized `post_action_context` for non-diagnostic runtimes so common action results remain structurally consistent across engines
 - rank fallback candidates by relevance instead of scan order so complex-page target selection is less dependent on exploratory retries
 - compress oversized HTML reads into managed previews plus summaries so high-noise pages do not flood downstream tool context
+- maintain a managed recent-action trace so page and target diagnostics can include the causal steps that led to the current state
+- enrich `diagnose_page` and `diagnose_target` with engine-agnostic managed metadata instead of only forwarding raw backend payloads
 
 ### Packaging Layer
 

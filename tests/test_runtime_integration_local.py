@@ -134,6 +134,10 @@ class RuntimeIntegrationTests(unittest.TestCase):
             page_html = session.get_page_html()
             self.assertIn("html_summary", page_html)
             self.assertFalse(page_html.get("html_truncated"))
+
+            diagnosis = session.diagnose_page()
+            self.assertIn("recent_actions", diagnosis)
+            self.assertGreaterEqual(len(diagnosis.get("recent_actions", [])), 3)
         finally:
             if session is not None:
                 with contextlib.suppress(Exception):
