@@ -261,6 +261,7 @@ def build_default_config() -> Dict:
             "path": "/mcp",
             "log_level": "info",
             "idle_timeout_seconds": 60,
+            "headless": False,
         },
         "launch": {
             "new_window": True,
@@ -312,6 +313,14 @@ def build_default_config() -> Dict:
 
 def now_text() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def resolve_mcp_headless(config: Dict) -> bool:
+    mcp = config.get("mcp", {}) if isinstance(config, dict) else {}
+    if isinstance(mcp, dict) and "headless" in mcp:
+        return bool(mcp.get("headless"))
+    env_value = str(os.environ.get("CHROMIUM_ADVANCED_MCP_HEADLESS", "") or "").strip().lower()
+    return env_value in {"1", "true", "yes", "on"}
 
 
 def unique_paths(paths: Sequence[str]) -> List[str]:
@@ -490,6 +499,8 @@ def normalize_config(config: Optional[Dict]) -> Dict:
                 normalized["mcp"][key] = str(loaded_mcp.get(key)).strip()
         if "enabled" in loaded_mcp:
             normalized["mcp"]["enabled"] = bool(loaded_mcp.get("enabled"))
+        if "headless" in loaded_mcp:
+            normalized["mcp"]["headless"] = bool(loaded_mcp.get("headless"))
         if "port" in loaded_mcp:
             normalized["mcp"]["port"] = loaded_mcp.get("port")
         if "worker_port" in loaded_mcp:
@@ -1852,7 +1863,6 @@ def keepalive_github(
 
 def create_driver_for_profile(config: Dict, profile_name: str):
     paths = config["paths"]
-    keepalive = config["keepalive"]
     chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
     chromedriver_binary = resolve_chromedriver_path(paths.get("chromedriver_path", ""))
     user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
@@ -1879,7 +1889,7 @@ def create_driver_for_profile(config: Dict, profile_name: str):
     options.add_argument("--disable-popup-blocking")
     options.set_capability("goog:loggingPrefs", {"browser": "ALL", "performance": "ALL"})
 
-    if keepalive.get("headless"):
+    if resolve_mcp_headless(config):
         options.add_argument("--headless=new")
 
     extension_dir = detect_fingerprint_extension_dir(paths.get("fingerprint_zip_path", ""))

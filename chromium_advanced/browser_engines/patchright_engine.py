@@ -8,7 +8,7 @@ import time
 from typing import Any, Dict
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
-from chromium_advanced.chromium_profile_lib import now_text
+from chromium_advanced.chromium_profile_lib import now_text, resolve_mcp_headless
 
 
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
@@ -1657,6 +1657,7 @@ class PatchrightEngine(BrowserEngine):
         sync_playwright = _load_patchright()
         paths = config.get("paths", {})
         launch_settings = config.get("launch", {})
+        headless = resolve_mcp_headless(config)
         chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
         user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
         if not chromium_binary or not os.path.exists(chromium_binary):
@@ -1701,7 +1702,7 @@ class PatchrightEngine(BrowserEngine):
                 browser_context = playwright_ctx.chromium.launch_persistent_context(
                     user_data_dir=user_data_root,
                     executable_path=chromium_binary,
-                    headless=False,
+                    headless=bool(headless),
                     args=args,
                     no_viewport=True,
                 )

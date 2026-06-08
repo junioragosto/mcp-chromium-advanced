@@ -15,6 +15,7 @@ from chromium_advanced.chromium_profile_lib import (
     detect_fingerprint_extension_dir,
     get_hidden_subprocess_kwargs,
     now_text,
+    resolve_mcp_headless,
     resolve_chromium_binary,
 )
 
@@ -1051,6 +1052,7 @@ class PlaywrightCliEngine(BrowserEngine):
 
         paths = config.get("paths", {})
         launch_settings = config.get("launch", {})
+        headless = resolve_mcp_headless(config)
         chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
         user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
         if not chromium_binary or not os.path.exists(chromium_binary):
@@ -1087,7 +1089,7 @@ class PlaywrightCliEngine(BrowserEngine):
                 "userDataDir": user_data_root,
                 "launchOptions": {
                     "executablePath": chromium_binary,
-                    "headless": False,
+                    "headless": bool(headless),
                     "args": launch_args,
                 },
             }

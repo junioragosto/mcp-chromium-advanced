@@ -97,6 +97,7 @@ Responsibilities:
 - wrap raw runtime sessions through a managed session kernel before exposing them to MCP tools
 - keep busy-state governance ahead of engine startup so externally running Chromium processes cannot be bypassed by switching runtimes
 - distinguish managed worker reclaim from unexpected worker exit in daemon status reporting
+- allow MCP-owned runtime sessions to run headless when `mcp.headless=true`, so automated validation can avoid stealing focus from desktop use
 
 ## Managed Action Kernel
 
@@ -114,6 +115,8 @@ Responsibilities:
 - cache fallback candidates as executable handles, not only plain CSS selectors, so later target actions can still resolve on complex pages
 - use deep selector replay for open shadow-root targets when plain CSS cannot safely cross runtime boundaries
 - synthesize normalized `post_action_context` for non-diagnostic runtimes so common action results remain structurally consistent across engines
+- rank fallback candidates by relevance instead of scan order so complex-page target selection is less dependent on exploratory retries
+- compress oversized HTML reads into managed previews plus summaries so high-noise pages do not flood downstream tool context
 
 ### Packaging Layer
 
