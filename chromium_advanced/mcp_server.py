@@ -22,6 +22,8 @@ MCP_INSTRUCTIONS = (
 DEFAULT_TIMEOUT_SECONDS = 20
 ERROR_ALREADY_EXISTS = 183
 MCP_TRACE_LIMIT = 500
+MCP_TRACE_FILE_MAX_BYTES = 5 * 1024 * 1024
+MCP_TRACE_FILE_ROTATIONS = 3
 
 
 _mcp_tool_traces: list[dict[str, Any]] = []
@@ -44,8 +46,26 @@ def _append_mcp_trace(trace: dict[str, Any]) -> None:
         trace_path = str(Path(os.environ.get("TEMP") or tempfile.gettempdir()) / "chromium-advanced-mcp-trace.jsonl")
     try:
         Path(trace_path).parent.mkdir(parents=True, exist_ok=True)
+        _rotate_trace_file(Path(trace_path))
         with open(trace_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(trace, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def _rotate_trace_file(trace_path: Path) -> None:
+    try:
+        if not trace_path.exists() or trace_path.stat().st_size < MCP_TRACE_FILE_MAX_BYTES:
+            return
+        for index in range(MCP_TRACE_FILE_ROTATIONS - 1, 0, -1):
+            source = trace_path.with_name(f"{trace_path.name}.{index}")
+            target = trace_path.with_name(f"{trace_path.name}.{index + 1}")
+            if source.exists():
+                if index + 1 > MCP_TRACE_FILE_ROTATIONS:
+                    source.unlink(missing_ok=True)
+                else:
+                    source.replace(target)
+        trace_path.replace(trace_path.with_name(f"{trace_path.name}.1"))
     except Exception:
         pass
 

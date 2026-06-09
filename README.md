@@ -274,7 +274,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 
 `browser_diagnose_page` is the highest-signal first stop when an agent gets blocked. It bundles the current interaction context together with recent console errors, page exceptions, failed requests, and recent bad HTTP responses. Heavy `playwright_cli` diagnostics are bounded by short CLI timeouts and truncated raw output so a noisy site should return a partial diagnosis instead of blocking the MCP worker for minutes.
 
-`browser_get_action_trace` reports recent managed browser actions for one session, including slow actions, failures, fallback usage, and average duration. `get_mcp_tool_trace` reports MCP worker-level tool timings so real production calls can be inspected without digging through Codex internal logs.
+`browser_get_action_trace` reports recent managed browser actions for one session, including slow actions, failures, fallback usage, and average duration. `get_mcp_tool_trace` reports MCP worker-level tool timings so real production calls can be inspected without digging through Codex internal logs. The MCP trace is also written to a JSONL file shown in the GUI MCP status panel and is rotated automatically to avoid unbounded log growth.
 
 ## Engine Notes
 
@@ -312,10 +312,12 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Reuses the real `user-data-dir` together with Chromium `--profile-directory=Profile N`, so logged-in state can be preserved
 - Supports the validated first-stage surface: session start, navigation, multi-tab basics, script execution, type/click/key actions, screenshot, console, requests, and coarse page diagnostics
 - Managed runtime fallbacks lift the raw CLI session with generic `snapshot`, candidate enumeration, waiting, target verification, and snapshot-ref style targeting where possible
+- Uses a fast DOM eval path for simple selector `click` and `fill` operations, then falls back to native `playwright-cli` commands if the DOM path is not safe or fails
+- Classifies console and network noise into categories such as third-party, asset, media, security policy, CORS, and auth, so diagnostics can separate useful signal from common site noise
 - Sanitizes the upstream `playwright-cli` Chromium launch args so `AutomationControlled` is not injected through `--disable-blink-features`
 - Honors `mcp.start_minimized=true` by default, so visible MCP browser sessions start minimized in the taskbar instead of stealing desktop focus while still allowing the user to click in and take over when needed
 - Keeps `mcp.headless=false` by default; headless mode is only for explicit user-requested regression or background validation, not the normal MCP browsing path
-- On session close, the runtime attempts to terminate owned `playwright-cli` daemon and Chromium processes and then cleans isolated runtime directories
+- On session close, the runtime attempts to terminate owned `playwright-cli` daemon and Chromium processes and then cleans isolated runtime directories; startup also prunes stale empty or old `chromium-advanced-playwright-cli-*` temp directories that are not referenced by live processes
 - Shared-root concurrency still does not work: one real `user_data_root` can only back one live browser session at a time, so the existing busy-state governance remains mandatory
 - Keepalive is not routed through `playwright_cli` in this stage
 - Windows packaged GUI, daemon, and worker executables have been validated against the managed runtime path

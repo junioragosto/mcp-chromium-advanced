@@ -8,7 +8,9 @@ import subprocess
 import tempfile
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import psutil
 
@@ -34,6 +36,9 @@ PLAYWRIGHT_CLI_BLINK_SENTINEL_ARG = "--no-first-run=--disable-blink-features-sen
 PLAYWRIGHT_CLI_DEFAULT_TIMEOUT_SECONDS = 20
 PLAYWRIGHT_CLI_DIAGNOSTIC_TIMEOUT_SECONDS = 8
 PLAYWRIGHT_CLI_RAW_RESULT_LIMIT = 20000
+PLAYWRIGHT_CLI_TEMP_PREFIX = "chromium-advanced-playwright-cli-"
+PLAYWRIGHT_CLI_TEMP_RETENTION = 8
+PLAYWRIGHT_CLI_TEMP_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def _slugify(value: str) -> str:
@@ -125,6 +130,100 @@ def _command_line_text(proc: psutil.Process) -> str:
     if isinstance(cmdline, list):
         return " ".join(str(item) for item in cmdline)
     return str(cmdline or "")
+
+
+def _hostname(value: str) -> str:
+    try:
+        return str(urlparse(str(value or "")).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _classify_console_message(level: str, text: str, url: str = "") -> Dict[str, str]:
+    lowered = f"{level} {text} {url}".lower()
+    category = "runtime"
+    severity = "info"
+    if str(level or "").lower() == "error":
+        severity = "error"
+    elif str(level or "").lower() in {"warning", "warn"}:
+        severity = "warning"
+    if any(token in lowered for token in ("font", "woff", "stylesheet")):
+        category = "asset"
+    elif any(token in lowered for token in ("csp", "content security policy")):
+        category = "security_policy"
+    elif any(token in lowered for token in ("cors", "cross-origin")):
+        category = "cross_origin"
+    elif any(token in lowered for token in ("intercom", "hubspot", "analytics", "gtag", "doubleclick", "ads")):
+        category = "third_party"
+    elif any(token in lowered for token in ("401", "403", "unauthorized", "forbidden", "signin", "login")):
+        category = "auth"
+    return {"category": category, "severity": severity}
+
+
+def _classify_network_request(url: str, status: Optional[int], page_url: str = "") -> Dict[str, str]:
+    host = _hostname(url)
+    page_host = _hostname(page_url)
+    path = str(urlparse(str(url or "")).path or "").lower()
+    category = "network"
+    severity = "info"
+    if page_host and host and host != page_host and not host.endswith(f".{page_host}"):
+        category = "third_party"
+    if any(path.endswith(ext) for ext in (".woff", ".woff2", ".ttf", ".otf", ".css", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
+        category = "asset"
+    if any(token in path for token in (".m3u8", ".m4s", ".ts", "/videoplayback")):
+        category = "media"
+    if isinstance(status, int):
+        if status in {401, 403}:
+            category = "auth"
+            severity = "error"
+        elif status >= 500:
+            severity = "error"
+        elif status >= 400:
+            severity = "warning"
+    return {"category": category, "severity": severity}
+
+
+def _is_process_using_path(path: str) -> bool:
+    if not path:
+        return False
+    needle = os.path.normcase(os.path.abspath(path))
+    for proc in psutil.process_iter(["pid", "name"]):
+        command_line = _command_line_text(proc)
+        if command_line and needle in os.path.normcase(command_line):
+            return True
+    return False
+
+
+def cleanup_stale_playwright_cli_temp_dirs(
+    *,
+    temp_root: str = "",
+    retention: int = PLAYWRIGHT_CLI_TEMP_RETENTION,
+    max_age_seconds: int = PLAYWRIGHT_CLI_TEMP_MAX_AGE_SECONDS,
+) -> List[str]:
+    root = Path(temp_root or tempfile.gettempdir())
+    if not root.exists():
+        return []
+    candidates = [item for item in root.iterdir() if item.is_dir() and item.name.startswith(PLAYWRIGHT_CLI_TEMP_PREFIX)]
+    candidates.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
+    now_ts = time.time()
+    removed: List[str] = []
+    for index, directory in enumerate(candidates):
+        try:
+            stat = directory.stat()
+        except OSError:
+            continue
+        too_old = (now_ts - stat.st_mtime) > max(60, int(max_age_seconds))
+        beyond_retention = index >= max(0, int(retention))
+        empty = not any(directory.iterdir())
+        if not (empty or too_old or beyond_retention):
+            continue
+        full_path = str(directory)
+        if _is_process_using_path(full_path):
+            continue
+        shutil.rmtree(full_path, ignore_errors=True)
+        if not directory.exists():
+            removed.append(full_path)
+    return removed
 
 
 class PlaywrightCliBrowserSession(BrowserSession):
@@ -460,6 +559,71 @@ class PlaywrightCliBrowserSession(BrowserSession):
         payload = self._run_cli(["eval", func_text, target, "--json"])
         return self._extract_result(payload)
 
+    def _can_use_fast_dom_path(self, target: str, by: str = "css") -> bool:
+        normalized_by = str(by or "css").strip().lower()
+        if normalized_by not in {"css", "id", "name", "tag", "class"}:
+            return False
+        normalized_target = str(target or "").strip()
+        return bool(normalized_target) and not SNAPSHOT_REF_PATTERN.match(normalized_target)
+
+    def _fast_dom_click(self, target: str, *, double_click: bool = False) -> Dict[str, Any]:
+        result = self._eval_on_target(
+            target,
+            """
+(element) => {
+  const visible = !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+  const disabled = !!element.disabled || element.getAttribute('aria-disabled') === 'true';
+  if (!visible) return {ok: false, reason: 'target_not_visible'};
+  if (disabled) return {ok: false, reason: 'target_disabled'};
+  element.scrollIntoView({block: 'center', inline: 'center'});
+  if (typeof element.click === 'function' && !%DOUBLE_CLICK%) {
+    element.click();
+  } else {
+    const eventName = %DOUBLE_CLICK% ? 'dblclick' : 'click';
+    element.dispatchEvent(new MouseEvent(eventName, {bubbles: true, cancelable: true, view: window}));
+  }
+  return {ok: true, tag_name: (element.tagName || '').toLowerCase(), id: element.id || '', text: (element.innerText || element.textContent || '').trim().slice(0, 200)};
+}
+""".replace("%DOUBLE_CLICK%", "true" if double_click else "false"),
+        )
+        if not isinstance(result, dict) or not result.get("ok"):
+            reason = result.get("reason") if isinstance(result, dict) else "fast_dom_click_failed"
+            raise RuntimeError(str(reason or "fast_dom_click_failed"))
+        return result
+
+    def _fast_dom_fill(self, target: str, text: str, *, submit: bool = False) -> Dict[str, Any]:
+        result = self._eval_on_target(
+            target,
+            """
+(element) => {
+  const value = %TEXT%;
+  const visible = !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+  const disabled = !!element.disabled || element.getAttribute('aria-disabled') === 'true';
+  if (!visible) return {ok: false, reason: 'target_not_visible'};
+  if (disabled || element.readOnly) return {ok: false, reason: 'target_disabled'};
+  element.scrollIntoView({block: 'center', inline: 'center'});
+  element.focus();
+  if ('value' in element) {
+    element.value = value;
+  } else {
+    element.textContent = value;
+  }
+  element.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: value}));
+  element.dispatchEvent(new Event('change', {bubbles: true}));
+  if (%SUBMIT%) {
+    const form = element.form || element.closest('form');
+    if (form && typeof form.requestSubmit === 'function') form.requestSubmit();
+    else element.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+  }
+  return {ok: true, value: 'value' in element ? String(element.value || '') : String(element.textContent || '')};
+}
+""".replace("%TEXT%", json.dumps(str(text))).replace("%SUBMIT%", "true" if submit else "false"),
+        )
+        if not isinstance(result, dict) or not result.get("ok"):
+            reason = result.get("reason") if isinstance(result, dict) else "fast_dom_fill_failed"
+            raise RuntimeError(str(reason or "fast_dom_fill_failed"))
+        return result
+
     def _global_console_offset(self, tab_id: str = "") -> int:
         return int(self._console_offsets.get(str(tab_id or "").strip(), 0))
 
@@ -670,12 +834,25 @@ class PlaywrightCliBrowserSession(BrowserSession):
         try:
             if effective_tab_id:
                 self._ensure_tab_selected(tab_id=effective_tab_id)
-            payload = self._run_cli(["click", target, "--json"])
-            result = payload.get("parsed", {})
+            result: Dict[str, Any]
+            action_path = "cli"
+            if self._can_use_fast_dom_path(target, by=by):
+                try:
+                    result = {"ok": True, "fast_dom": self._fast_dom_click(target), "action_path": "fast_dom"}
+                    action_path = "fast_dom"
+                except Exception:
+                    payload = self._run_cli(["click", target, "--json"])
+                    parsed = payload.get("parsed", {})
+                    result = parsed if isinstance(parsed, dict) else {"result": parsed}
+            else:
+                payload = self._run_cli(["click", target, "--json"])
+                parsed = payload.get("parsed", {})
+                result = parsed if isinstance(parsed, dict) else {"result": parsed}
             return {
                 **self._current_page_payload(tab_id=effective_tab_id, action_name="click"),
-                **(result if isinstance(result, dict) else {"result": result}),
+                **result,
                 "clicked": True,
+                "action_path": action_path,
             }
         except Exception as exc:
             return self._action_error_payload("click", exc, selector=selector, by=by, text_filter=selector)
@@ -697,12 +874,24 @@ class PlaywrightCliBrowserSession(BrowserSession):
         try:
             if effective_tab_id:
                 self._ensure_tab_selected(tab_id=effective_tab_id)
-            payload = self._run_cli([command_name, resolved_target, "--json"])
-            result = payload.get("parsed", {})
+            action_path = "cli"
+            if self._can_use_fast_dom_path(resolved_target, by=by):
+                try:
+                    result = {"ok": True, "fast_dom": self._fast_dom_click(resolved_target, double_click=double_click), "action_path": "fast_dom"}
+                    action_path = "fast_dom"
+                except Exception:
+                    payload = self._run_cli([command_name, resolved_target, "--json"])
+                    parsed = payload.get("parsed", {})
+                    result = parsed if isinstance(parsed, dict) else {"result": parsed}
+            else:
+                payload = self._run_cli([command_name, resolved_target, "--json"])
+                parsed = payload.get("parsed", {})
+                result = parsed if isinstance(parsed, dict) else {"result": parsed}
             return {
                 **self._current_page_payload(tab_id=effective_tab_id, action_name="click_target"),
-                **(result if isinstance(result, dict) else {"result": result}),
+                **result,
                 "clicked": True,
+                "action_path": action_path,
             }
         except Exception as exc:
             return self._action_error_payload("click_target", exc, target=target, by=by, text_filter=target)
@@ -725,16 +914,31 @@ class PlaywrightCliBrowserSession(BrowserSession):
         try:
             if effective_tab_id:
                 self._ensure_tab_selected(tab_id=effective_tab_id)
-            payload = self._run_cli(args)
-            result = payload.get("parsed", {})
-            actual_value = self._read_target_value(target)
+            action_path = "cli"
+            if self._can_use_fast_dom_path(target, by=by):
+                try:
+                    fast_result = self._fast_dom_fill(target, str(text), submit=submit)
+                    result = {"ok": True, "fast_dom": fast_result, "action_path": "fast_dom"}
+                    actual_value = str(fast_result.get("value", "") or "")
+                    action_path = "fast_dom"
+                except Exception:
+                    payload = self._run_cli(args)
+                    parsed = payload.get("parsed", {})
+                    result = parsed if isinstance(parsed, dict) else {"result": parsed}
+                    actual_value = self._read_target_value(target)
+            else:
+                payload = self._run_cli(args)
+                parsed = payload.get("parsed", {})
+                result = parsed if isinstance(parsed, dict) else {"result": parsed}
+                actual_value = self._read_target_value(target)
             return {
                 **self._current_page_payload(tab_id=effective_tab_id, action_name="type_text"),
-                **(result if isinstance(result, dict) else {"result": result}),
+                **result,
                 "typed": True,
                 "submitted": bool(submit),
                 "actual_value": actual_value,
                 "value_matches": actual_value == str(text),
+                "action_path": action_path,
             }
         except Exception as exc:
             return self._action_error_payload("type_text", exc, selector=selector, by=by, text_filter=text)
@@ -760,16 +964,31 @@ class PlaywrightCliBrowserSession(BrowserSession):
         try:
             if effective_tab_id:
                 self._ensure_tab_selected(tab_id=effective_tab_id)
-            payload = self._run_cli(args)
-            result = payload.get("parsed", {})
-            actual_value = self._read_target_value(resolved_target)
+            action_path = "cli"
+            if self._can_use_fast_dom_path(resolved_target, by=by):
+                try:
+                    fast_result = self._fast_dom_fill(resolved_target, str(text), submit=submit)
+                    result = {"ok": True, "fast_dom": fast_result, "action_path": "fast_dom"}
+                    actual_value = str(fast_result.get("value", "") or "")
+                    action_path = "fast_dom"
+                except Exception:
+                    payload = self._run_cli(args)
+                    parsed = payload.get("parsed", {})
+                    result = parsed if isinstance(parsed, dict) else {"result": parsed}
+                    actual_value = self._read_target_value(resolved_target)
+            else:
+                payload = self._run_cli(args)
+                parsed = payload.get("parsed", {})
+                result = parsed if isinstance(parsed, dict) else {"result": parsed}
+                actual_value = self._read_target_value(resolved_target)
             return {
                 **self._current_page_payload(tab_id=effective_tab_id, action_name="type_target"),
-                **(result if isinstance(result, dict) else {"result": result}),
+                **result,
                 "typed": True,
                 "submitted": bool(submit),
                 "actual_value": actual_value,
                 "value_matches": actual_value == str(text),
+                "action_path": action_path,
             }
         except Exception as exc:
             return self._action_error_payload("type_target", exc, target=target, by=by, text_filter=text)
@@ -866,6 +1085,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
                         "column_number": None,
                     },
                 }
+                message.update(_classify_console_message(message_level, message["text"], str(match.group("url") or "")))
                 messages.append(message)
         offset = self._global_console_offset(tab_id=effective_tab_id)
         messages = messages[offset:]
@@ -873,11 +1093,18 @@ class PlaywrightCliBrowserSession(BrowserSession):
         if normalized_level:
             messages = [item for item in messages if item.get("type") == normalized_level]
         messages = messages[-max(1, int(limit)) :]
+        noise_count = len([item for item in messages if item.get("category") in {"asset", "third_party", "security_policy", "cross_origin"}])
+        error_count = len([item for item in messages if item.get("severity") == "error"])
         return {
             **page,
             "tab_id": resolved_tab_id,
             "level": normalized_level,
             "count": len(messages),
+            "summary": {
+                "error_count": error_count,
+                "noise_count": noise_count,
+                "signal_count": max(0, len(messages) - noise_count),
+            },
             "messages": messages,
             "raw_result": _truncate_debug_text(raw_result) if isinstance(raw_result, str) else "",
         }
@@ -937,17 +1164,27 @@ class PlaywrightCliBrowserSession(BrowserSession):
                     "ok": status_value is None or status_value < 400,
                     "failure": "",
                 }
+                request_item.update(_classify_network_request(request_item["url"], status_value, str(page.get("url", "") or "")))
                 requests.append(request_item)
         offset = self._global_request_offset(tab_id=effective_tab_id)
         requests = requests[offset:]
         if bool(failed_only):
             requests = [item for item in requests if item.get("ok") is False]
         requests = requests[-max(1, int(limit)) :]
+        noise_count = len([item for item in requests if item.get("category") in {"asset", "third_party", "media"}])
+        error_count = len([item for item in requests if item.get("severity") == "error"])
+        warning_count = len([item for item in requests if item.get("severity") == "warning"])
         return {
             **page,
             "tab_id": resolved_tab_id,
             "failed_only": bool(failed_only),
             "count": len(requests),
+            "summary": {
+                "error_count": error_count,
+                "warning_count": warning_count,
+                "noise_count": noise_count,
+                "signal_count": max(0, len(requests) - noise_count),
+            },
             "requests": requests,
             "raw_result": _truncate_debug_text(raw_result) if isinstance(raw_result, str) else "",
         }
@@ -1030,6 +1267,11 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 "failed_requests": failed_requests,
                 "bad_responses": bad_responses[-20:],
                 "diagnostic_errors": diagnostic_errors,
+                "noise_summary": {
+                    "console_noise_count": len([item for item in console_messages if item.get("category") in {"asset", "third_party", "security_policy", "cross_origin"}]),
+                    "network_noise_count": len([item for item in all_requests if item.get("category") in {"asset", "third_party", "media"}]),
+                    "auth_issue_count": len([item for item in all_requests if item.get("category") == "auth"]),
+                },
             },
         }
 
@@ -1337,6 +1579,7 @@ class PlaywrightCliEngine(BrowserEngine):
         cli_path = shutil.which("playwright-cli") or shutil.which("playwright-cli.CMD")
         if not cli_path:
             raise RuntimeError("playwright-cli was not found on PATH. Install it with: npm install -g @playwright/cli")
+        cleanup_stale_playwright_cli_temp_dirs()
 
         paths = config.get("paths", {})
         launch_settings = config.get("launch", {})

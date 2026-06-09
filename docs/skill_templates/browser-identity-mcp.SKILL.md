@@ -165,13 +165,14 @@ Important engine-switching boundary:
 - When diagnosing broken pages, prefer the MCP debug tools over manual screenshots of DevTools whenever possible.
 - The managed runtime now exposes `session_health.recovery_actions` and `resolution_trace`; use them to decide whether to retry directly, refresh candidate search, or recreate the session.
 - The managed runtime exposes `browser_get_action_trace` for per-session action timing and `get_mcp_tool_trace` for MCP worker timing. Use these before guessing why an interaction is slow.
+- MCP tool traces are persisted as rotated JSONL; the GUI MCP status panel shows the active trace file path.
 - `session_health.page_drift` is a first-class signal. When it reports `drifted=true`, prefer `reactivate_expected_tab`, `reopen_expected_url`, or `retry_on_sticky_tab` before assuming the selector itself is bad.
-- `playwright_cli` console/network diagnostics are intentionally bounded. A partial diagnosis with `diagnostic_errors` is better than blocking the worker on a noisy site.
-- For `playwright_cli`, untargeted candidate discovery is intentionally snapshot-backed while explicit selector reads use shorter target-scoped evals. Treat that split as the expected fast path, not as degraded behavior.
+- `playwright_cli` console/network diagnostics are intentionally bounded and include noise categories. A partial diagnosis with `diagnostic_errors` is better than blocking the worker on a noisy site.
+- For `playwright_cli`, simple selector click/fill actions prefer a fast DOM eval path and fall back to native CLI commands when needed. Untargeted candidate discovery is intentionally snapshot-backed while explicit selector reads use shorter target-scoped evals. Treat that split as the expected fast path, not as degraded behavior.
 - For `playwright_cli`, the runtime sanitizes upstream Chromium launch args so `AutomationControlled` is not injected through a real `--disable-blink-features` switch.
 - Visible MCP browser sessions normally honor `mcp.start_minimized=true`, which should leave the browser in the taskbar instead of stealing foreground focus; users can click it open when they want to watch or take over.
 - Do not enable `mcp.headless=true` just to reduce desktop interference. Headless mode should only be used when the user explicitly asks for headless/regression/background validation.
-- When a `playwright_cli` session closes, the manager should release the named session and clean owned daemon/browser processes; if a browser window remains, treat it as an orphan-process bug and inspect the runtime root/session name.
+- When a `playwright_cli` session closes, the manager should release the named session and clean owned daemon/browser processes; startup also prunes stale temp dirs that are not referenced by live processes. If a browser window remains, treat it as an orphan-process bug and inspect the runtime root/session name.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.
 - `playwright_cli` is a supported parallel engine. In `mirror_isolated` mode it still obeys the same governance rules, but its runtime may be launched from an extracted snapshot clone instead of the live profile root.

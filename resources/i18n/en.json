@@ -58,6 +58,7 @@
   "mcp_endpoint": "Endpoint",
   "mcp_worker": "Worker",
   "mcp_default_engine": "Default Engine",
+  "mcp_trace_path": "Trace File",
   "mcp_detail": "Detail",
   "mcp_detail_idle": "Enable the checkbox above to start the daemon.",
   "clear_mcp_logs": "Clear MCP Logs",
