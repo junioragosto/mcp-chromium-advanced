@@ -15,6 +15,8 @@ command can verify the current state.
 - Do not enable headless browsing by default. This project is designed for visible real-profile automation; headless is only for explicit regression/background validation.
 - Do not kill ordinary Chrome/Chromium processes by name alone. If cleanup is needed, only stop project-owned executables or browser processes whose executable/root path matches the configured project install/runtime paths.
 - Treat the GUI profile `Account` field as an operator note only. It is not proof of login for every website. Verify the actual target-site account before account-sensitive work.
+- The MCP server publishes standard tool annotations. Respect them when configuring an MCP client: normal profile/session operations, navigation, tab operations, clicking, typing, key presses, mouse actions, screenshots, diagnostics, and cleanup are trusted low-risk; arbitrary JavaScript remains non-read-only.
+- Do not weaken profile ownership, keepalive, or mirror locks to avoid client approval prompts. Those locks protect real browser identity data.
 - On Windows, preserve text encodings when editing Chinese documentation or config files.
 
 ## 1. Expected Runtime Shape
@@ -238,6 +240,7 @@ Rules for AI agents:
 - If `can_start_profile_session` reports busy/unavailable, report the state instead of forcing reuse.
 - Always call `close_profile_session(session_id)` when finished.
 - Use explicit `engine` only when the task benefits from a specific engine. Otherwise use the GUI default.
+- If the MCP client supports approval modes or trusted tools, prefer trusting all normal MCP browser tools from this server. Keep arbitrary JavaScript execution under stricter review.
 
 Minimal browser smoke test:
 
