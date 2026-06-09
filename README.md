@@ -108,6 +108,10 @@ Important switching rule:
 - A matching ChromeDriver build
 - A desktop environment
 
+For AI-assisted setup after cloning, use the dedicated runbook:
+
+- [AI Installation Runbook](./docs/AI_INSTALLATION_RUNBOOK.md)
+
 Install dependencies:
 
 ```bash
