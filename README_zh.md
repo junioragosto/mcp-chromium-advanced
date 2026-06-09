@@ -278,6 +278,8 @@ MCP 侧现在同时提供两层轻量追踪：
 
 `browser_diagnose_page` 仍然是页面卡住时的首选诊断工具，但 `playwright_cli` 路径下的 console/network/raw 诊断已经做了短超时、单次 network 拉取和原始输出截断。复杂站点即使日志很吵，也应尽量返回部分诊断结果，而不是把 MCP worker 卡到分钟级。
 
+MCP 工具级 trace 会写入 JSONL 文件，并自动按大小轮转，避免长期运行无限增长。GUI 的 MCP 状态面板会显示当前 trace 文件路径，便于现场排查。
+
 ## 当前已知边界
 
 - keepalive 目前仍未切到 `playwright_cli`
@@ -305,10 +307,12 @@ MCP 侧现在同时提供两层轻量追踪：
 - 在 `mirror_isolated` 模式下更适合并发任务
 - stealth 不如 `selenium_uc`
 - 原生观测能力不如 `patchright`，但受管运行时已经补了不少统一 fallback
+- 简单 selector 的 `click` / `fill` 会优先走 fast DOM eval path，失败后再回退 `playwright-cli` 原生命令，以降低高频动作延迟
+- console/network 诊断会标注第三方、静态资源、媒体片段、CSP/CORS、auth 等噪声分类，便于区分真正问题和常见站点噪声
 - 已对 upstream `playwright-cli` 的 Chromium 启动参数做清洗，避免通过 `--disable-blink-features` 注入 `AutomationControlled`
 - 默认遵守 `mcp.start_minimized=true`，可见 MCP 浏览器会先最小化到任务栏，避免抢占桌面焦点，同时用户需要时仍可点开窗口接管或观察
 - 默认保持 `mcp.headless=false`；headless 只用于用户明确要求的回归测试或后台验证，不作为普通 MCP 浏览任务的默认方案
-- session 关闭时会尝试清理归属的 `playwright-cli` daemon、Chromium 子进程和隔离 runtime 目录，降低残留窗口风险
+- session 关闭时会尝试清理归属的 `playwright-cli` daemon、Chromium 子进程和隔离 runtime 目录；启动时也会清理未被进程占用的空目录、过期目录和超出保留数量的 `chromium-advanced-playwright-cli-*` 临时目录，降低残留窗口与残留目录风险
 
 ## 开发说明
 

@@ -1,6 +1,7 @@
 import unittest
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -8,8 +9,10 @@ from unittest import mock
 
 from chromium_advanced.browser_engines.playwright_cli_engine import (
     PLAYWRIGHT_CLI_BLINK_SENTINEL_ARG,
+    PLAYWRIGHT_CLI_TEMP_PREFIX,
     PlaywrightCliEngine,
     PlaywrightCliBrowserSession,
+    cleanup_stale_playwright_cli_temp_dirs,
     _normalize_playwright_cli_launch_args,
 )
 
@@ -80,6 +83,22 @@ class FakePlaywrightCliSession(PlaywrightCliBrowserSession):
                 return {"parsed": {"result": page["html"]}, "stdout": "", "stderr": "", "returncode": 0}
             if "document.activeElement" in func_text:
                 return {"parsed": {"result": {"tag_name": "body", "text": page["text"], "id": "html-body", "class": "", "value": ""}}, "stdout": "", "stderr": "", "returncode": 0}
+            if "element.scrollIntoView" in func_text and "MouseEvent" in func_text:
+                target = command[2] if len(command) > 2 else ""
+                self.clicked_targets.append(target)
+                replacement = self.next_click_page_by_tab.pop(active["tab_id"], None)
+                if isinstance(replacement, dict):
+                    self.page_by_tab[active["tab_id"]].update(replacement)
+                return {"parsed": {"result": {"ok": True, "tag_name": "button", "id": target.strip("#"), "text": "clicked"}}}
+            if "element.scrollIntoView" in func_text and "InputEvent" in func_text:
+                match = re.search(r"const value = (.*?);", func_text)
+                value = ""
+                if match:
+                    try:
+                        value = json.loads(match.group(1))
+                    except Exception:
+                        value = ""
+                return {"parsed": {"result": {"ok": True, "value": value}}, "stdout": "", "stderr": "", "returncode": 0}
             return {"parsed": {"result": None}, "stdout": "", "stderr": "", "returncode": 0}
         if command[:2] == ["console", "--json"]:
             return {"parsed": {"result": "[INFO] ok @ https://example.com:1"}, "stdout": "", "stderr": "", "returncode": 0}
@@ -182,6 +201,8 @@ class PlaywrightCliEngineTests(unittest.TestCase):
         self.assertTrue(result["clicked"])
         self.assertEqual(result["tab_id"], "tab-000")
         self.assertEqual(session.clicked_targets[-1], "ytcp-chip#chip-1")
+        self.assertEqual(result["action_path"], "fast_dom")
+        self.assertFalse(any(command[:1] == ["click"] for command in session.commands))
 
     def test_page_drift_is_reported_when_same_tab_navigated_elsewhere(self):
         session = FakePlaywrightCliSession()
@@ -249,6 +270,37 @@ class PlaywrightCliEngineTests(unittest.TestCase):
             if command[:1] == ["eval"] and "location.href" in str(command[1])
         ]
         self.assertLessEqual(len(eval_page_calls), 4)
+
+    def test_type_text_uses_fast_dom_path(self):
+        session = FakePlaywrightCliSession()
+        result = session.type_text("#name", "Alice")
+        self.assertTrue(result["typed"])
+        self.assertEqual(result["action_path"], "fast_dom")
+        self.assertEqual(result["actual_value"], "Alice")
+        self.assertFalse(any(command[:1] == ["fill"] for command in session.commands))
+
+    def test_network_and_console_are_classified(self):
+        session = FakePlaywrightCliSession()
+        console = session.get_console_messages()
+        network = session.get_network_requests()
+        self.assertEqual(console["messages"][0]["category"], "runtime")
+        self.assertIn("summary", console)
+        self.assertEqual(network["requests"][0]["category"], "third_party")
+        self.assertIn("summary", network)
+
+    def test_cleanup_stale_playwright_cli_temp_dirs_removes_empty_dirs(self):
+        temp_root = tempfile.mkdtemp()
+        try:
+            stale_dir = os.path.join(temp_root, PLAYWRIGHT_CLI_TEMP_PREFIX + "profile-1-old")
+            keep_dir = os.path.join(temp_root, "other-dir")
+            os.makedirs(stale_dir, exist_ok=True)
+            os.makedirs(keep_dir, exist_ok=True)
+            removed = cleanup_stale_playwright_cli_temp_dirs(temp_root=temp_root, retention=0, max_age_seconds=60)
+            self.assertIn(stale_dir, removed)
+            self.assertFalse(os.path.exists(stale_dir))
+            self.assertTrue(os.path.exists(keep_dir))
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
 
 
 if __name__ == "__main__":

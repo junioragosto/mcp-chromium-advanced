@@ -58,6 +58,7 @@
   "mcp_endpoint": "接続先",
   "mcp_worker": "Worker",
   "mcp_default_engine": "既定エンジン",
+  "mcp_trace_path": "Trace ファイル",
   "mcp_detail": "詳細",
   "mcp_detail_idle": "上のチェックボックスを有効にすると daemon が起動します。",
   "clear_mcp_logs": "MCPログを消去",

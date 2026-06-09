@@ -58,6 +58,7 @@
   "mcp_endpoint": "接入地址",
   "mcp_worker": "Worker",
   "mcp_default_engine": "默认引擎",
+  "mcp_trace_path": "Trace 文件",
   "mcp_detail": "说明",
   "mcp_detail_idle": "勾选顶部复选框后启动。",
   "clear_mcp_logs": "清空 MCP 日志",

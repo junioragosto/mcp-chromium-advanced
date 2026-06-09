@@ -826,12 +826,15 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_worker_endpoint_label = QLabel("-")
         self.mcp_worker_endpoint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.mcp_default_engine_label = QLabel("-")
+        self.mcp_trace_path_label = QLabel("-")
+        self.mcp_trace_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.mcp_status_detail_label = QLabel()
         self.mcp_status_detail_label.setWordWrap(True)
         self.mcp_status_layout.addRow(self.tr("mcp_state"), self.mcp_status_label)
         self.mcp_status_layout.addRow(self.tr("mcp_endpoint"), self.mcp_endpoint_label)
         self.mcp_status_layout.addRow(self.tr("mcp_worker"), self.mcp_worker_endpoint_label)
         self.mcp_status_layout.addRow(self.tr("mcp_default_engine"), self.mcp_default_engine_label)
+        self.mcp_status_layout.addRow(self.tr("mcp_trace_path"), self.mcp_trace_path_label)
         self.mcp_status_layout.addRow(self.tr("mcp_detail"), self.mcp_status_detail_label)
         self.mcp_log_layout.addWidget(self.mcp_status_group)
 
@@ -1753,6 +1756,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_layout.labelForField(self.mcp_endpoint_label).setText(self.tr("mcp_endpoint"))
         self.mcp_status_layout.labelForField(self.mcp_worker_endpoint_label).setText(self.tr("mcp_worker"))
         self.mcp_status_layout.labelForField(self.mcp_default_engine_label).setText(self.tr("mcp_default_engine"))
+        self.mcp_status_layout.labelForField(self.mcp_trace_path_label).setText(self.tr("mcp_trace_path"))
         self.mcp_status_layout.labelForField(self.mcp_status_detail_label).setText(self.tr("mcp_detail"))
 
         self.mcp_start_minimized_checkbox.setText(self.tr("mcp_start_minimized_hint"))
@@ -1859,6 +1863,12 @@ class ChromiumManagerWindow(QMainWindow):
         worker_port = int(settings.get("worker_port", 28889))
         return f"http://127.0.0.1:{worker_port}{path}"
 
+    def get_mcp_trace_path(self) -> str:
+        return os.environ.get("CHROMIUM_ADVANCED_MCP_TRACE_PATH") or os.path.join(
+            tempfile.gettempdir(),
+            "chromium-advanced-mcp-trace.jsonl",
+        )
+
     def get_mcp_status_url(self) -> str:
         settings = self.config.get("mcp", {})
         host = str(settings.get("host", "127.0.0.1")).strip() or "127.0.0.1"
@@ -1907,6 +1917,7 @@ class ChromiumManagerWindow(QMainWindow):
     def refresh_mcp_status_ui(self):
         self.mcp_endpoint_label.setText(self.get_mcp_endpoint())
         self.mcp_worker_endpoint_label.setText(self.get_mcp_worker_endpoint())
+        self.mcp_trace_path_label.setText(self.get_mcp_trace_path())
         self.mcp_default_engine_label.setText(
             f"{normalize_browser_engine_name(self.config.get('app', {}).get('browser_engine', DEFAULT_BROWSER_ENGINE))}"
             f" / {str(self.config.get('app', {}).get('concurrency_mode', 'block') or 'block')}"
