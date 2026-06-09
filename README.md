@@ -269,8 +269,12 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - `browser_get_network_requests`
 - `browser_clear_debug_buffers`
 - `browser_diagnose_page`
+- `browser_get_action_trace`
+- `get_mcp_tool_trace`
 
-`browser_diagnose_page` is the highest-signal first stop when an agent gets blocked. It bundles the current interaction context together with recent console errors, page exceptions, failed requests, and recent bad HTTP responses.
+`browser_diagnose_page` is the highest-signal first stop when an agent gets blocked. It bundles the current interaction context together with recent console errors, page exceptions, failed requests, and recent bad HTTP responses. Heavy `playwright_cli` diagnostics are bounded by short CLI timeouts and truncated raw output so a noisy site should return a partial diagnosis instead of blocking the MCP worker for minutes.
+
+`browser_get_action_trace` reports recent managed browser actions for one session, including slow actions, failures, fallback usage, and average duration. `get_mcp_tool_trace` reports MCP worker-level tool timings so real production calls can be inspected without digging through Codex internal logs.
 
 ## Engine Notes
 

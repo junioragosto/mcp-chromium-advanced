@@ -1,8 +1,12 @@
 import argparse
 import ctypes
+import json
 import os
+import tempfile
 import traceback
-from typing import Literal, Optional
+import time
+from pathlib import Path
+from typing import Any, Callable, Literal, Optional
 
 from fastmcp import FastMCP
 
@@ -17,6 +21,68 @@ MCP_INSTRUCTIONS = (
 
 DEFAULT_TIMEOUT_SECONDS = 20
 ERROR_ALREADY_EXISTS = 183
+MCP_TRACE_LIMIT = 500
+
+
+_mcp_tool_traces: list[dict[str, Any]] = []
+
+
+def _safe_len(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:
+        return 0
+
+
+def _append_mcp_trace(trace: dict[str, Any]) -> None:
+    _mcp_tool_traces.append(trace)
+    overflow = len(_mcp_tool_traces) - MCP_TRACE_LIMIT
+    if overflow > 0:
+        del _mcp_tool_traces[:overflow]
+    trace_path = os.environ.get("CHROMIUM_ADVANCED_MCP_TRACE_PATH")
+    if not trace_path:
+        trace_path = str(Path(os.environ.get("TEMP") or tempfile.gettempdir()) / "chromium-advanced-mcp-trace.jsonl")
+    try:
+        Path(trace_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(trace_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(trace, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def _trace_mcp_tool(tool_name: str, func: Callable[[], dict], *, session_id: str = "") -> dict:
+    started = time.perf_counter()
+    trace: dict[str, Any] = {
+        "timestamp": round(time.time(), 3),
+        "tool_name": str(tool_name or ""),
+        "session_id": str(session_id or ""),
+        "ok": True,
+        "duration_ms": 0,
+        "result_size": 0,
+        "error_type": "",
+        "error": "",
+    }
+    try:
+        result = func()
+        trace["result_size"] = _safe_len(result)
+        return result
+    except Exception as exc:
+        trace["ok"] = False
+        trace["error_type"] = type(exc).__name__
+        trace["error"] = str(exc)[:1000]
+        raise
+    finally:
+        trace["duration_ms"] = round((time.perf_counter() - started) * 1000)
+        _append_mcp_trace(trace)
+        print(
+            (
+                f"[{now_text()}] [MCP-TRACE] tool={trace['tool_name']} "
+                f"session={trace['session_id'] or '-'} ok={trace['ok']} "
+                f"duration_ms={trace['duration_ms']} result_size={trace['result_size']} "
+                f"error={trace['error_type'] or '-'}"
+            ),
+            flush=True,
+        )
 
 
 def acquire_single_instance_guard(name: str):
@@ -73,57 +139,63 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
     @server.tool
     def start_profile_session(profile_name: str, reuse_existing: bool = False, engine: str = "") -> dict:
         """Start or reuse a real logged-in browser session for the specified profile."""
-        print(
-            (
-                f"[{now_text()}] [MCP-WORKER] start session request: "
-                f"profile={profile_name} reuse_existing={reuse_existing} engine={engine or '-'}"
-            ),
-            flush=True,
-        )
-        try:
-            result = session_manager.start_session(
-                profile_name=profile_name,
-                reuse_existing=reuse_existing,
-                engine_name=engine,
-            )
-        except Exception as exc:
+        def _call() -> dict:
             print(
                 (
-                    f"[{now_text()}] [MCP-WORKER] start session failed: "
-                    f"profile={profile_name} engine={engine or '-'} error={exc}"
+                    f"[{now_text()}] [MCP-WORKER] start session request: "
+                    f"profile={profile_name} reuse_existing={reuse_existing} engine={engine or '-'}"
                 ),
                 flush=True,
             )
-            print(traceback.format_exc(), flush=True)
-            raise
-        print(
-            (
-                f"[{now_text()}] [MCP-WORKER] session "
-                f"{'reused' if result.get('reused') else 'started'}: "
-                f"profile={result.get('profile_name', '')} "
-                f"engine={result.get('engine_name', '')} "
-                f"mode={result.get('runtime_mode', '') or '-'} "
-                f"session_id={result.get('session_id', '')}"
-            ),
-            flush=True,
-        )
-        return result
+            try:
+                result = session_manager.start_session(
+                    profile_name=profile_name,
+                    reuse_existing=reuse_existing,
+                    engine_name=engine,
+                )
+            except Exception as exc:
+                print(
+                    (
+                        f"[{now_text()}] [MCP-WORKER] start session failed: "
+                        f"profile={profile_name} engine={engine or '-'} error={exc}"
+                    ),
+                    flush=True,
+                )
+                print(traceback.format_exc(), flush=True)
+                raise
+            print(
+                (
+                    f"[{now_text()}] [MCP-WORKER] session "
+                    f"{'reused' if result.get('reused') else 'started'}: "
+                    f"profile={result.get('profile_name', '')} "
+                    f"engine={result.get('engine_name', '')} "
+                    f"mode={result.get('runtime_mode', '') or '-'} "
+                    f"session_id={result.get('session_id', '')}"
+                ),
+                flush=True,
+            )
+            return result
+
+        return _trace_mcp_tool("start_profile_session", _call)
 
     @server.tool
     def close_profile_session(session_id: str) -> dict:
         """Close an active browser session."""
-        result = session_manager.close_session(session_id)
-        print(
-            (
-                f"[{now_text()}] [MCP-WORKER] session "
-                f"{'closed' if result.get('closed') else 'close-missed'}: "
-                f"profile={result.get('profile_name', '')} "
-                f"engine={result.get('engine_name', '')} "
-                f"session_id={result.get('session_id', session_id)}"
-            ),
-            flush=True,
-        )
-        return result
+        def _call() -> dict:
+            result = session_manager.close_session(session_id)
+            print(
+                (
+                    f"[{now_text()}] [MCP-WORKER] session "
+                    f"{'closed' if result.get('closed') else 'close-missed'}: "
+                    f"profile={result.get('profile_name', '')} "
+                    f"engine={result.get('engine_name', '')} "
+                    f"session_id={result.get('session_id', session_id)}"
+                ),
+                flush=True,
+            )
+            return result
+
+        return _trace_mcp_tool("close_profile_session", _call, session_id=session_id)
 
     @server.tool
     def navigate(
@@ -134,11 +206,14 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         tab_id: str = "",
     ) -> dict:
         """Navigate the session to a URL."""
-        browser_session = session_manager.resolve_session(session_id)
-        return {
-            "session_id": session_id,
-            **browser_session.navigate(url, wait_for_ready, int(timeout_seconds), tab_id=tab_id),
-        }
+        return _trace_mcp_tool(
+            "navigate",
+            lambda: {
+                "session_id": session_id,
+                **session_manager.resolve_session(session_id).navigate(url, wait_for_ready, int(timeout_seconds), tab_id=tab_id),
+            },
+            session_id=session_id,
+        )
 
     @server.tool
     def get_current_url(session_id: str, tab_id: str = "") -> dict:
@@ -309,8 +384,14 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> dict:
         """Wait for and click an element."""
-        browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.click(selector, by, int(timeout_seconds))}
+        return _trace_mcp_tool(
+            "click",
+            lambda: {
+                "session_id": session_id,
+                **session_manager.resolve_session(session_id).click(selector, by, int(timeout_seconds)),
+            },
+            session_id=session_id,
+        )
 
     @server.tool
     def click_target(
@@ -322,17 +403,20 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         double_click: bool = False,
     ) -> dict:
         """Click a snapshot ref target, or fall back to a direct selector target when needed."""
-        browser_session = session_manager.resolve_session(session_id)
-        return {
-            "session_id": session_id,
-            **browser_session.click_target(
-                target=target,
-                element=element,
-                by=by,
-                timeout_seconds=int(timeout_seconds),
-                double_click=bool(double_click),
-            ),
-        }
+        return _trace_mcp_tool(
+            "click_target",
+            lambda: {
+                "session_id": session_id,
+                **session_manager.resolve_session(session_id).click_target(
+                    target=target,
+                    element=element,
+                    by=by,
+                    timeout_seconds=int(timeout_seconds),
+                    double_click=bool(double_click),
+                ),
+            },
+            session_id=session_id,
+        )
 
     @server.tool
     def type_text(
@@ -345,11 +429,21 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> dict:
         """Type into an input, textarea, or editable field."""
-        browser_session = session_manager.resolve_session(session_id)
-        return {
-            "session_id": session_id,
-            **browser_session.type_text(selector, text, by, bool(clear_first), bool(submit), int(timeout_seconds)),
-        }
+        return _trace_mcp_tool(
+            "type_text",
+            lambda: {
+                "session_id": session_id,
+                **session_manager.resolve_session(session_id).type_text(
+                    selector,
+                    text,
+                    by,
+                    bool(clear_first),
+                    bool(submit),
+                    int(timeout_seconds),
+                ),
+            },
+            session_id=session_id,
+        )
 
     @server.tool
     def type_target(
@@ -413,17 +507,23 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> dict:
         """Press a key on the active element or an optional target element."""
-        browser_session = session_manager.resolve_session(session_id)
-        return {
-            "session_id": session_id,
-            **browser_session.press_key(key, int(count), selector, by, int(timeout_seconds)),
-        }
+        return _trace_mcp_tool(
+            "press_key",
+            lambda: {
+                "session_id": session_id,
+                **session_manager.resolve_session(session_id).press_key(key, int(count), selector, by, int(timeout_seconds)),
+            },
+            session_id=session_id,
+        )
 
     @server.tool
     def run_script(session_id: str, script: str, tab_id: str = "") -> dict:
         """Run JavaScript in the current page and return a JSON-serializable result when possible."""
-        browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.run_script(script, tab_id=tab_id)}
+        return _trace_mcp_tool(
+            "run_script",
+            lambda: {"session_id": session_id, **session_manager.resolve_session(session_id).run_script(script, tab_id=tab_id)},
+            session_id=session_id,
+        )
 
     @server.tool
     def browser_get_console_messages(
@@ -433,11 +533,14 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         level: str = "",
     ) -> dict:
         """Return recent console messages, optionally filtered by tab and message level."""
-        browser_session = session_manager.resolve_session(session_id)
-        return {
-            "session_id": session_id,
-            **browser_session.get_console_messages(tab_id=tab_id, limit=int(limit), level=level),
-        }
+        return _trace_mcp_tool(
+            "browser_get_console_messages",
+            lambda: {
+                "session_id": session_id,
+                **session_manager.resolve_session(session_id).get_console_messages(tab_id=tab_id, limit=int(limit), level=level),
+            },
+            session_id=session_id,
+        )
 
     @server.tool
     def browser_get_page_errors(session_id: str, tab_id: str = "", limit: int = 100) -> dict:
@@ -453,11 +556,14 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         failed_only: bool = False,
     ) -> dict:
         """Return recent observed network requests and responses, optionally filtering to failures."""
-        browser_session = session_manager.resolve_session(session_id)
-        return {
-            "session_id": session_id,
-            **browser_session.get_network_requests(tab_id=tab_id, limit=int(limit), failed_only=bool(failed_only)),
-        }
+        return _trace_mcp_tool(
+            "browser_get_network_requests",
+            lambda: {
+                "session_id": session_id,
+                **session_manager.resolve_session(session_id).get_network_requests(tab_id=tab_id, limit=int(limit), failed_only=bool(failed_only)),
+            },
+            session_id=session_id,
+        )
 
     @server.tool
     def browser_clear_debug_buffers(session_id: str, tab_id: str = "") -> dict:
@@ -468,8 +574,35 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
     @server.tool
     def browser_diagnose_page(session_id: str, tab_id: str = "") -> dict:
         """Return a high-signal diagnostic bundle for a page, including recent console, error, and network failures."""
-        browser_session = session_manager.resolve_session(session_id)
-        return {"session_id": session_id, **browser_session.diagnose_page(tab_id=tab_id)}
+        return _trace_mcp_tool(
+            "browser_diagnose_page",
+            lambda: {"session_id": session_id, **session_manager.resolve_session(session_id).diagnose_page(tab_id=tab_id)},
+            session_id=session_id,
+        )
+
+    @server.tool
+    def browser_get_action_trace(session_id: str, limit: int = 20) -> dict:
+        """Return recent managed browser action traces and slow/failure summaries for this session."""
+        return _trace_mcp_tool(
+            "browser_get_action_trace",
+            lambda: {"session_id": session_id, **session_manager.resolve_session(session_id).get_action_trace(limit=int(limit))},
+            session_id=session_id,
+        )
+
+    @server.tool
+    def get_mcp_tool_trace(limit: int = 50) -> dict:
+        """Return recent MCP tool-level timing traces recorded by this worker process."""
+        bounded = max(1, min(200, int(limit)))
+        items = [dict(item) for item in _mcp_tool_traces[-bounded:]]
+        slow = sorted(items, key=lambda item: int(item.get("duration_ms", 0) or 0), reverse=True)[:10]
+        failures = [item for item in items if not item.get("ok")]
+        return {
+            "count": len(items),
+            "trace_limit": MCP_TRACE_LIMIT,
+            "slowest": slow,
+            "failures": failures[-20:],
+            "traces": items,
+        }
 
     @server.tool
     def browser_verify_text(session_id: str, text: str) -> dict:

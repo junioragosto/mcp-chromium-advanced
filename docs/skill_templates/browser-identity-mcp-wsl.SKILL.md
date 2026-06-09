@@ -74,6 +74,7 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - If WSL cannot reach the service, check Windows firewall rules and listening host configuration before debugging MCP semantics.
 - After connectivity is confirmed, follow the same identity confirmation and occupancy rules as the normal browser identity MCP workflow.
 - After connectivity is confirmed, do not infer a target website account from the GUI profile account label; verify the actual site login inside the target website when account correctness matters.
-- After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, and `browser_diagnose_page` over screenshot-only diagnosis.
+- After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, `browser_diagnose_page`, `browser_get_action_trace`, and `get_mcp_tool_trace` over screenshot-only diagnosis.
 - After connectivity is confirmed, prefer `session_health.recovery_actions`, `session_health.page_drift`, and `resolution_trace` over ad-hoc retries when a dynamic page fails under WSL.
+- Treat partial `playwright_cli` diagnostics with `diagnostic_errors` as useful signal. The runtime intentionally bounds heavy console/network calls to avoid long MCP worker stalls.
 - If the Windows side reports `external_chromium_running`, do not assume it is always a hard block. In `mirror_isolated` mode, first inspect whether `accepting_new_sessions=true` and whether the preflight allows a snapshot-backed start.
