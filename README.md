@@ -226,6 +226,9 @@ Operational notes:
 - If the configured Chromium binary root already has live browser processes, session startup is intentionally blocked with states such as `external_chromium_running`.
 - That busy-state rule applies before engine startup when the session would touch the live root, including `playwright_cli`.
 - In `mirror_isolated` mode, `external_chromium_running` no longer blocks snapshot-backed starts if a valid mirror is available.
+- MCP tools publish standard tool annotations so clients can distinguish trusted local/browser operations from arbitrary script execution.
+- These annotations reduce unnecessary approval prompts in clients that honor MCP hints, but they do not bypass the client approval policy or this project's profile/busy-state governance.
+- Normal profile/session operations, navigation, tab operations, clicking, typing, key presses, mouse actions, screenshots, diagnostics, and cleanup are treated as trusted low-risk MCP operations for local real-profile workflows. `run_script` remains non-read-only because arbitrary JavaScript is the highest-risk browser action.
 
 Typical MCP flow:
 

@@ -131,32 +131,75 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
     session_manager = SessionManager(config_path=config_path)
     server = FastMCP(name="chromium-advanced", instructions=MCP_INSTRUCTIONS)
 
-    @server.tool
+    local_read_annotations = {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+    browser_read_annotations = {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+    session_start_annotations = {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+    local_lifecycle_annotations = {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+    trusted_browser_action_annotations = {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+    browser_script_annotations = {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+    browser_overlay_annotations = {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+
+    @server.tool(annotations=local_read_annotations)
     def list_profiles() -> dict:
         """List configured Chromium profiles and whether each currently has an active MCP session."""
         return {"profiles": session_manager.list_profiles()}
 
-    @server.tool
+    @server.tool(annotations=local_read_annotations)
     def get_server_status() -> dict:
         """Return whether the browser service is idle, starting, or occupied."""
         return session_manager.get_server_status()
 
-    @server.tool
+    @server.tool(annotations=local_read_annotations)
     def get_profile_status(profile_name: str) -> dict:
         """Get one profile's current session occupancy and metadata."""
         return session_manager.get_profile_status(profile_name)
 
-    @server.tool
+    @server.tool(annotations=local_read_annotations)
     def can_start_profile_session(profile_name: str, engine: str = "") -> dict:
         """Check whether a new session is allowed right now for this profile."""
         return session_manager.can_start_session(profile_name, engine_name=engine)
 
-    @server.tool
+    @server.tool(annotations=local_read_annotations)
     def list_sessions() -> dict:
         """List active profile-backed browser sessions."""
         return {"sessions": session_manager.list_sessions()}
 
-    @server.tool
+    @server.tool(annotations=session_start_annotations)
     def start_profile_session(profile_name: str, reuse_existing: bool = False, engine: str = "") -> dict:
         """Start or reuse a real logged-in browser session for the specified profile."""
         def _call() -> dict:
@@ -198,7 +241,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
 
         return _trace_mcp_tool("start_profile_session", _call)
 
-    @server.tool
+    @server.tool(annotations=local_lifecycle_annotations)
     def close_profile_session(session_id: str) -> dict:
         """Close an active browser session."""
         def _call() -> dict:
@@ -217,7 +260,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
 
         return _trace_mcp_tool("close_profile_session", _call, session_id=session_id)
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def navigate(
         session_id: str,
         url: str,
@@ -235,19 +278,19 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def get_current_url(session_id: str, tab_id: str = "") -> dict:
         """Get the session's current URL and title."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.get_current_url(tab_id=tab_id)}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_list_tabs(session_id: str) -> dict:
         """List known tabs for the current browser session and indicate which tab is active."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.list_tabs()}
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def browser_open_tab(
         session_id: str,
         url: str = "",
@@ -267,7 +310,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def browser_activate_tab(
         session_id: str,
         tab_id: str = "",
@@ -287,31 +330,31 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
-    @server.tool
+    @server.tool(annotations=local_lifecycle_annotations)
     def browser_close_tab(session_id: str, tab_id: str = "", index: int = -1) -> dict:
         """Close a tab by explicit tab_id or index and keep the session alive on a remaining tab."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.close_tab(tab_id=tab_id, index=int(index))}
 
-    @server.tool
+    @server.tool(annotations=local_read_annotations)
     def get_session_capabilities(session_id: str) -> dict:
         """Return the feature capabilities exposed by the current browser session."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.get_capabilities()}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def get_page_text(session_id: str, tab_id: str = "") -> dict:
         """Extract visible page text from the current document body."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.get_page_text(tab_id=tab_id)}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def get_page_html(session_id: str, tab_id: str = "") -> dict:
         """Return the current page HTML source."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.get_page_html(tab_id=tab_id)}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_snapshot(
         session_id: str,
         target: str = "",
@@ -336,7 +379,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_list_candidates(
         session_id: str,
         target: str = "",
@@ -360,7 +403,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def inspect_elements(
         session_id: str,
         selector: str,
@@ -372,19 +415,19 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.inspect_elements(selector, by, int(limit), tab_id)}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def get_active_element(session_id: str, tab_id: str = "") -> dict:
         """Describe the currently focused element."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.get_active_element(tab_id=tab_id)}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_get_interaction_context(session_id: str, tab_id: str = "") -> dict:
         """Return the current page, focus, modal, tab, and snapshot context for agent reasoning."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.get_interaction_context(tab_id=tab_id)}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def wait_for(
         session_id: str,
         selector: str,
@@ -396,7 +439,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.wait_for(selector, by, int(timeout_seconds), condition)}
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def click(
         session_id: str,
         selector: str,
@@ -413,7 +456,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def click_target(
         session_id: str,
         target: str,
@@ -438,7 +481,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def type_text(
         session_id: str,
         selector: str,
@@ -465,7 +508,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def type_target(
         session_id: str,
         target: str,
@@ -491,7 +534,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def type_target_and_verify(
         session_id: str,
         target: str,
@@ -517,7 +560,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def press_key(
         session_id: str,
         key: str,
@@ -536,7 +579,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=browser_script_annotations)
     def run_script(session_id: str, script: str, tab_id: str = "") -> dict:
         """Run JavaScript in the current page and return a JSON-serializable result when possible."""
         return _trace_mcp_tool(
@@ -545,7 +588,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_get_console_messages(
         session_id: str,
         tab_id: str = "",
@@ -562,13 +605,13 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_get_page_errors(session_id: str, tab_id: str = "", limit: int = 100) -> dict:
         """Return recent uncaught page errors and severe browser log entries."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.get_page_errors(tab_id=tab_id, limit=int(limit))}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_get_network_requests(
         session_id: str,
         tab_id: str = "",
@@ -585,13 +628,13 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=browser_overlay_annotations)
     def browser_clear_debug_buffers(session_id: str, tab_id: str = "") -> dict:
         """Clear cached console, page error, and network request buffers for the session or one tab."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.clear_debug_buffers(tab_id=tab_id)}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_diagnose_page(session_id: str, tab_id: str = "") -> dict:
         """Return a high-signal diagnostic bundle for a page, including recent console, error, and network failures."""
         return _trace_mcp_tool(
@@ -600,7 +643,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=local_read_annotations)
     def browser_get_action_trace(session_id: str, limit: int = 20) -> dict:
         """Return recent managed browser action traces and slow/failure summaries for this session."""
         return _trace_mcp_tool(
@@ -609,7 +652,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             session_id=session_id,
         )
 
-    @server.tool
+    @server.tool(annotations=local_read_annotations)
     def get_mcp_tool_trace(limit: int = 50) -> dict:
         """Return recent MCP tool-level timing traces recorded by this worker process."""
         bounded = max(1, min(200, int(limit)))
@@ -624,19 +667,19 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             "traces": items,
         }
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_verify_text(session_id: str, text: str) -> dict:
         """Verify that text is visible on the current page."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.verify_text(text)}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_verify_dialog(session_id: str, accessible_name: str = "", text: str = "") -> dict:
         """Verify that a visible dialog/modal is open, optionally matching accessible name or text."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.verify_dialog(accessible_name=accessible_name, text=text)}
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_verify_active_element(
         session_id: str,
         target: str = "",
@@ -650,7 +693,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             **browser_session.verify_active_element(target=target, by=by, element=element),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_verify_target_value(
         session_id: str,
         target: str,
@@ -670,7 +713,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_describe_target(
         session_id: str,
         target: str,
@@ -685,7 +728,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             **browser_session.describe_target(target=target, element=element, by=by, include_box=bool(include_box)),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_diagnose_target(
         session_id: str,
         target: str,
@@ -707,7 +750,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_verify_element(
         session_id: str,
         role: str,
@@ -720,7 +763,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             **browser_session.verify_element(role=role, accessible_name=accessible_name),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def browser_verify_target_visible(
         session_id: str,
         target: str,
@@ -734,7 +777,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             **browser_session.verify_target_visible(target=target, element=element, by=by),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_overlay_annotations)
     def browser_highlight_target(
         session_id: str,
         target: str,
@@ -749,19 +792,19 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             **browser_session.highlight_target(target=target, element=element, by=by, style=style),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_overlay_annotations)
     def browser_clear_highlights(session_id: str) -> dict:
         """Clear highlight overlays created earlier in the session."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.clear_highlights()}
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def browser_mouse_move_xy(session_id: str, x: float, y: float) -> dict:
         """Move the mouse to viewport coordinates."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.mouse_move_xy(float(x), float(y))}
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def browser_mouse_click_xy(
         session_id: str,
         x: float,
@@ -783,7 +826,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
-    @server.tool
+    @server.tool(annotations=trusted_browser_action_annotations)
     def browser_mouse_drag_xy(
         session_id: str,
         start_x: float,
@@ -798,13 +841,13 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             **browser_session.mouse_drag_xy(float(start_x), float(start_y), float(end_x), float(end_y)),
         }
 
-    @server.tool
+    @server.tool(annotations=browser_read_annotations)
     def screenshot(session_id: str, filename: str = "", tab_id: str = "") -> dict:
         """Save a screenshot to disk and return the file path."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.screenshot(filename, tab_id=tab_id)}
 
-    @server.tool
+    @server.tool(annotations=local_lifecycle_annotations)
     def close_all_sessions() -> dict:
         """Close all active sessions created by this MCP server process."""
         return session_manager.close_all()
