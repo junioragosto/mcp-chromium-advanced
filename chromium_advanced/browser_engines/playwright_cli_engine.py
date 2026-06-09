@@ -31,6 +31,9 @@ REQUEST_LINE_PATTERN = re.compile(
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
 PLAYWRIGHT_CLI_AUTOMATION_BLINK_FEATURE = "AutomationControlled"
 PLAYWRIGHT_CLI_BLINK_SENTINEL_ARG = "--no-first-run=--disable-blink-features-sentinel"
+PLAYWRIGHT_CLI_DEFAULT_TIMEOUT_SECONDS = 20
+PLAYWRIGHT_CLI_DIAGNOSTIC_TIMEOUT_SECONDS = 8
+PLAYWRIGHT_CLI_RAW_RESULT_LIMIT = 20000
 
 
 def _slugify(value: str) -> str:
@@ -60,6 +63,14 @@ def _parse_nested_result(value: Any) -> Any:
         except Exception:
             return value
     return value
+
+
+def _truncate_debug_text(value: Any, limit: int = PLAYWRIGHT_CLI_RAW_RESULT_LIMIT) -> str:
+    text = str(value or "")
+    bounded = max(1000, int(limit))
+    if len(text) <= bounded:
+        return text
+    return text[:bounded] + f"\n...[truncated {len(text) - bounded} chars]"
 
 
 def _selector_to_target(selector: str, by: str = "css") -> str:
@@ -257,18 +268,23 @@ class PlaywrightCliBrowserSession(BrowserSession):
         *,
         expect_process_success: bool = True,
         expect_action_success: bool = True,
+        timeout_seconds: int = PLAYWRIGHT_CLI_DEFAULT_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
         command = [self.cli_path, f"-s={self.session_name}", *args]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            cwd=self.output_root,
-            **get_hidden_subprocess_kwargs(),
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                cwd=self.output_root,
+                timeout=max(1, int(timeout_seconds)),
+                **get_hidden_subprocess_kwargs(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"playwright-cli command timed out after {max(1, int(timeout_seconds))}s: {' '.join(command)}") from exc
         result = {
             "command": command,
             "returncode": completed.returncode,
@@ -825,7 +841,9 @@ class PlaywrightCliBrowserSession(BrowserSession):
         effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
         if effective_tab_id:
             self._ensure_tab_selected(tab_id=effective_tab_id)
-        payload = self._run_cli(["console", "--json"])
+        page = self.get_current_url(tab_id=effective_tab_id)
+        resolved_tab_id = str(page.get("tab_id", "") or effective_tab_id)
+        payload = self._run_cli(["console", "--json"], timeout_seconds=PLAYWRIGHT_CLI_DIAGNOSTIC_TIMEOUT_SECONDS)
         raw_result = self._extract_result(payload)
         messages: List[Dict[str, Any]] = []
         if isinstance(raw_result, str):
@@ -839,7 +857,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 message_level = str(match.group("level") or "").lower()
                 message = {
                     "timestamp": 0,
-                    "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
+                    "tab_id": resolved_tab_id,
                     "type": message_level,
                     "text": str(match.group("text") or "").strip(),
                     "location": {
@@ -856,12 +874,12 @@ class PlaywrightCliBrowserSession(BrowserSession):
             messages = [item for item in messages if item.get("type") == normalized_level]
         messages = messages[-max(1, int(limit)) :]
         return {
-            **self.get_current_url(tab_id=effective_tab_id),
-            "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
+            **page,
+            "tab_id": resolved_tab_id,
             "level": normalized_level,
             "count": len(messages),
             "messages": messages,
-            "raw_result": raw_result if isinstance(raw_result, str) else "",
+            "raw_result": _truncate_debug_text(raw_result) if isinstance(raw_result, str) else "",
         }
 
     def get_page_errors(self, tab_id: str = "", limit: int = 100) -> Dict:
@@ -883,9 +901,10 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 }
             )
         errors = errors[-max(1, int(limit)) :]
+        page = self.get_current_url(tab_id=effective_tab_id)
         return {
-            **self.get_current_url(tab_id=effective_tab_id),
-            "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
+            **page,
+            "tab_id": str(page.get("tab_id", "") or effective_tab_id),
             "count": len(errors),
             "errors": errors,
         }
@@ -894,7 +913,9 @@ class PlaywrightCliBrowserSession(BrowserSession):
         effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
         if effective_tab_id:
             self._ensure_tab_selected(tab_id=effective_tab_id)
-        payload = self._run_cli(["requests", "--json"])
+        page = self.get_current_url(tab_id=effective_tab_id)
+        resolved_tab_id = str(page.get("tab_id", "") or effective_tab_id)
+        payload = self._run_cli(["requests", "--json"], timeout_seconds=PLAYWRIGHT_CLI_DIAGNOSTIC_TIMEOUT_SECONDS)
         raw_result = self._extract_result(payload)
         requests: List[Dict[str, Any]] = []
         if isinstance(raw_result, str):
@@ -908,7 +929,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 status_value = int(match.group("status")) if match.group("status") else None
                 request_item = {
                     "index": int(match.group("index")),
-                    "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
+                    "tab_id": resolved_tab_id,
                     "event": "response" if status_value is not None else "request",
                     "method": str(match.group("method") or ""),
                     "url": str(match.group("url") or ""),
@@ -923,12 +944,12 @@ class PlaywrightCliBrowserSession(BrowserSession):
             requests = [item for item in requests if item.get("ok") is False]
         requests = requests[-max(1, int(limit)) :]
         return {
-            **self.get_current_url(tab_id=effective_tab_id),
-            "tab_id": self.get_current_url(tab_id=effective_tab_id).get("tab_id", ""),
+            **page,
+            "tab_id": resolved_tab_id,
             "failed_only": bool(failed_only),
             "count": len(requests),
             "requests": requests,
-            "raw_result": raw_result if isinstance(raw_result, str) else "",
+            "raw_result": _truncate_debug_text(raw_result) if isinstance(raw_result, str) else "",
         }
 
     def clear_debug_buffers(self, tab_id: str = "") -> Dict:
@@ -961,10 +982,33 @@ class PlaywrightCliBrowserSession(BrowserSession):
     def diagnose_page(self, tab_id: str = "") -> Dict:
         effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
         resolved = self.get_current_url(tab_id=effective_tab_id)
-        console_messages = self.get_console_messages(tab_id=effective_tab_id, limit=20).get("messages", [])
-        page_errors = self.get_page_errors(tab_id=effective_tab_id, limit=20).get("errors", [])
-        failed_requests = self.get_network_requests(tab_id=effective_tab_id, limit=30, failed_only=True).get("requests", [])
-        all_requests = self.get_network_requests(tab_id=effective_tab_id, limit=30, failed_only=False).get("requests", [])
+        diagnostic_errors: List[Dict[str, str]] = []
+        console_messages: List[Dict[str, Any]] = []
+        all_requests: List[Dict[str, Any]] = []
+        try:
+            console_messages = self.get_console_messages(tab_id=effective_tab_id, limit=20).get("messages", [])
+        except Exception as exc:
+            diagnostic_errors.append({"source": "console", "error_type": type(exc).__name__, "error": str(exc)})
+        page_errors = []
+        for item in console_messages:
+            if str(item.get("type", "") or "").lower() != "error":
+                continue
+            location = item.get("location", {}) if isinstance(item.get("location"), dict) else {}
+            page_errors.append(
+                {
+                    "timestamp": item.get("timestamp", 0),
+                    "tab_id": item.get("tab_id", ""),
+                    "message": str(item.get("text", "") or ""),
+                    "url": str(location.get("url", "") or ""),
+                    "line_number": location.get("line_number"),
+                    "column_number": location.get("column_number"),
+                }
+            )
+        try:
+            all_requests = self.get_network_requests(tab_id=effective_tab_id, limit=60, failed_only=False).get("requests", [])
+        except Exception as exc:
+            diagnostic_errors.append({"source": "network", "error_type": type(exc).__name__, "error": str(exc)})
+        failed_requests = [item for item in all_requests if item.get("ok") is False]
         final_page = self.get_current_url(tab_id=effective_tab_id)
         bad_responses = [
             item
@@ -985,6 +1029,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 "page_errors": page_errors,
                 "failed_requests": failed_requests,
                 "bad_responses": bad_responses[-20:],
+                "diagnostic_errors": diagnostic_errors,
             },
         }
 

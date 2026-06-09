@@ -269,6 +269,15 @@ Windows 下可使用：
 - `ChromiumMcpDaemon`
 - `ChromiumMcpWorker`
 
+## 诊断与可观测性
+
+MCP 侧现在同时提供两层轻量追踪：
+
+- `browser_get_action_trace(session_id)`：查看单个浏览器会话最近的受管动作、慢动作、失败、fallback 次数和平均耗时
+- `get_mcp_tool_trace()`：查看当前 MCP worker 进程内最近工具调用的耗时、结果大小和错误摘要
+
+`browser_diagnose_page` 仍然是页面卡住时的首选诊断工具，但 `playwright_cli` 路径下的 console/network/raw 诊断已经做了短超时、单次 network 拉取和原始输出截断。复杂站点即使日志很吵，也应尽量返回部分诊断结果，而不是把 MCP worker 卡到分钟级。
+
 ## 当前已知边界
 
 - keepalive 目前仍未切到 `playwright_cli`

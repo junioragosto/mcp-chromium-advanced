@@ -535,6 +535,20 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertIn("session_health", result["interaction_context"])
         self.assertEqual(result["diagnosis"]["mode"], "managed_fast_path")
 
+    def test_action_trace_summary_exposes_slow_and_failure_counts(self):
+        raw = FakeRawSession(engine_name="playwright_cli")
+        session = ManagedBrowserSession(raw)
+        session.click("#save")
+        raw.raise_click = RuntimeError("missing target")
+        session.click("#missing")
+        result = session.get_action_trace(limit=10)
+        self.assertEqual(result["engine_name"], "playwright_cli")
+        self.assertEqual(result["recent_action_count"], 2)
+        self.assertEqual(result["recent_failure_count"], 1)
+        self.assertEqual(result["recent_failures"][-1]["action_name"], "click")
+        self.assertIn("slowest_actions", result)
+        self.assertEqual(result["recent_actions"][-1]["ok"], False)
+
     def test_playwright_cli_diagnose_page_uses_fast_managed_path(self):
         raw = FakeRawSession(engine_name="playwright_cli")
         session = ManagedBrowserSession(raw)

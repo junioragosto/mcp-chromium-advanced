@@ -190,6 +190,31 @@ class ManagedBrowserSession(BrowserSession):
         bounded = max(1, int(limit))
         return [dict(item) for item in self._recent_actions[-bounded:]]
 
+    def get_action_trace(self, limit: int = 20) -> Dict[str, Any]:
+        bounded = max(1, min(RECENT_ACTION_LIMIT, int(limit)))
+        recent = self._recent_actions_payload(limit=bounded)
+        durations = [self._safe_int(item.get("duration_ms", 0), 0) for item in self._recent_actions]
+        failures = [dict(item) for item in self._recent_actions if not item.get("ok")]
+        slowest = sorted(
+            (dict(item) for item in self._recent_actions),
+            key=lambda item: self._safe_int(item.get("duration_ms", 0), 0),
+            reverse=True,
+        )[: min(10, bounded)]
+        fallback_count = len([item for item in self._recent_actions if item.get("used_fallback")])
+        return {
+            "engine_name": self._capabilities.engine_name,
+            "runtime_profile": self._capabilities.runtime_profile,
+            "trace_limit": RECENT_ACTION_LIMIT,
+            "recent_action_count": len(self._recent_actions),
+            "recent_failure_count": len(failures),
+            "fallback_action_count": fallback_count,
+            "average_action_duration_ms": round(sum(durations) / max(1, len(durations))) if durations else 0,
+            "max_action_duration_ms": max(durations) if durations else 0,
+            "slowest_actions": slowest,
+            "recent_failures": failures[-bounded:],
+            "recent_actions": recent,
+        }
+
     def _recent_actions_excluding_current(self, action_name: str, limit: int = 10) -> list[Dict[str, Any]]:
         items = [dict(item) for item in self._recent_actions]
         if items and str(items[-1].get("action_name", "") or "") == str(action_name or ""):

@@ -44,10 +44,12 @@ class FakePlaywrightCliSession(PlaywrightCliBrowserSession):
         }
         self.clicked_targets = []
         self.next_click_page_by_tab = {}
+        self.commands = []
 
-    def _run_cli(self, args, expect_process_success=True, expect_action_success=True):
+    def _run_cli(self, args, expect_process_success=True, expect_action_success=True, **kwargs):
         del expect_process_success, expect_action_success
         command = list(args)
+        self.commands.append(command)
         if command[:2] == ["tab-list", "--json"]:
             lines = []
             for tab in self.tabs:
@@ -228,6 +230,25 @@ class PlaywrightCliEngineTests(unittest.TestCase):
         self.assertEqual(result["tab"]["index"], 0)
         self.assertEqual(result["tab_id"], "tab-000")
         self.assertEqual(session._sticky_tab_id, "tab-000")
+
+    def test_diagnose_page_fetches_network_once(self):
+        session = FakePlaywrightCliSession()
+        result = session.diagnose_page()
+        request_calls = [command for command in session.commands if command[:2] == ["requests", "--json"]]
+        self.assertEqual(len(request_calls), 1)
+        self.assertEqual(result["diagnosis"]["failed_requests"], [])
+        self.assertEqual(result["diagnosis"]["diagnostic_errors"], [])
+
+    def test_console_and_network_reuse_single_page_payload(self):
+        session = FakePlaywrightCliSession()
+        session.get_console_messages(limit=10)
+        session.get_network_requests(limit=10)
+        eval_page_calls = [
+            command
+            for command in session.commands
+            if command[:1] == ["eval"] and "location.href" in str(command[1])
+        ]
+        self.assertLessEqual(len(eval_page_calls), 4)
 
 
 if __name__ == "__main__":

@@ -119,9 +119,11 @@ If an action fails and the page looks dynamic or broken, prefer structured diagn
 3. `browser_get_page_errors`
 4. `browser_get_network_requests`
 5. `browser_diagnose_page`
-6. inspect `session_health.recovery_hint`, `session_health.recovery_actions`, and `failure_classification`
-7. when a target-oriented read fails or looks ambiguous, inspect `resolution_trace` before retrying with different selectors
-8. if `failure_classification == "page_drift"`, recover the expected tab/page first instead of immediately changing selectors or recreating the session
+6. `browser_get_action_trace` when repeated actions feel slow or flaky
+7. `get_mcp_tool_trace` when the worker itself appears slow
+8. inspect `session_health.recovery_hint`, `session_health.recovery_actions`, and `failure_classification`
+9. when a target-oriented read fails or looks ambiguous, inspect `resolution_trace` before retrying with different selectors
+10. if `failure_classification == "page_drift"`, recover the expected tab/page first instead of immediately changing selectors or recreating the session
 
 If `can_start_profile_session(profile_name)` reports `allowed=false` but also reports the same identity as reusable, treat that as "do not start a second session automatically." Only use `reuse_existing=true` when the current project explicitly supports it and the user intends that reuse.
 
@@ -162,7 +164,9 @@ Important engine-switching boundary:
 - For multi-tab tasks, do not assume a newly opened tab became the effective action target unless you explicitly activated it or the tool says it was activated.
 - When diagnosing broken pages, prefer the MCP debug tools over manual screenshots of DevTools whenever possible.
 - The managed runtime now exposes `session_health.recovery_actions` and `resolution_trace`; use them to decide whether to retry directly, refresh candidate search, or recreate the session.
+- The managed runtime exposes `browser_get_action_trace` for per-session action timing and `get_mcp_tool_trace` for MCP worker timing. Use these before guessing why an interaction is slow.
 - `session_health.page_drift` is a first-class signal. When it reports `drifted=true`, prefer `reactivate_expected_tab`, `reopen_expected_url`, or `retry_on_sticky_tab` before assuming the selector itself is bad.
+- `playwright_cli` console/network diagnostics are intentionally bounded. A partial diagnosis with `diagnostic_errors` is better than blocking the worker on a noisy site.
 - For `playwright_cli`, untargeted candidate discovery is intentionally snapshot-backed while explicit selector reads use shorter target-scoped evals. Treat that split as the expected fast path, not as degraded behavior.
 - For `playwright_cli`, the runtime sanitizes upstream Chromium launch args so `AutomationControlled` is not injected through a real `--disable-blink-features` switch.
 - Visible MCP browser sessions normally honor `mcp.start_minimized=true`, which should leave the browser in the taskbar instead of stealing foreground focus; users can click it open when they want to watch or take over.
