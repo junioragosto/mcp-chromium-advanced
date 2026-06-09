@@ -4,7 +4,7 @@ from unittest import mock
 
 from PyQt5.QtWidgets import QApplication, QSpinBox, QTimeEdit
 
-from chromium_advanced.chromium_manage_gui import FocusWheelSpinBox, FocusWheelTimeEdit
+from chromium_advanced.chromium_manage_gui import ChromiumManagerWindow, FocusWheelSpinBox, FocusWheelTimeEdit
 from chromium_advanced.chromium_profile_lib import (
     _google_results_ready,
     format_keepalive_site_status,
@@ -44,6 +44,16 @@ class ConfigPathMigrationTests(unittest.TestCase):
             normalized["paths"]["mirror_user_data_root"],
             r"D:\softs\chromium\UserData\temp_user_data",
         )
+
+    def test_gui_mcp_trace_path_default_does_not_crash(self):
+        window = ChromiumManagerWindow.__new__(ChromiumManagerWindow)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(window.get_mcp_trace_path().endswith("chromium-advanced-mcp-trace.jsonl"))
+
+    def test_gui_mcp_trace_path_honors_environment_override(self):
+        window = ChromiumManagerWindow.__new__(ChromiumManagerWindow)
+        with mock.patch.dict(os.environ, {"CHROMIUM_ADVANCED_MCP_TRACE_PATH": r"D:\trace\mcp.jsonl"}):
+            self.assertEqual(window.get_mcp_trace_path(), r"D:\trace\mcp.jsonl")
 
 
 class FocusWheelInputTests(unittest.TestCase):
