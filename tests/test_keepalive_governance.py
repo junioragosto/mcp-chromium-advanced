@@ -25,9 +25,9 @@ class KeepaliveGovernanceTests(unittest.TestCase):
         return lib.normalize_config(
             {
                 "paths": {
-                    "chromium_dir": r"D:\softs\chromium\134.0.6998.177\ungoogled-chromium_134.0.6998.177-1.1\chrome.exe",
+                    "chromium_dir": r"C:\Chromium\chrome.exe",
                     "chromedriver_path": r"D:\drivers\chromedriver.exe",
-                    "user_data_root": r"D:\softs\chromium\UserData\134.0.6998.177",
+                    "user_data_root": r"C:\Chromium\UserData",
                 },
                 "profiles": [
                     {
@@ -43,8 +43,8 @@ class KeepaliveGovernanceTests(unittest.TestCase):
         config = self.make_config()
         chrome = config["paths"]["chromium_dir"]
         procs = [
-            FakeProc(10, chrome, [chrome, r"--user-data-dir=D:\softs\chromium\UserData\134.0.6998.177", "--profile-directory=Profile 4"]),
-            FakeProc(11, chrome, [chrome, r"--user-data-dir=D:\softs\chromium\UserData\134.0.6998.177", "--profile-directory=Profile 2"]),
+            FakeProc(10, chrome, [chrome, r"--user-data-dir=C:\Chromium\UserData", "--profile-directory=Profile 4"]),
+            FakeProc(11, chrome, [chrome, r"--user-data-dir=C:\Chromium\UserData", "--profile-directory=Profile 2"]),
             FakeProc(12, r"C:\Program Files\Google\Chrome\Application\chrome.exe", ["chrome.exe"]),
         ]
 
@@ -56,8 +56,8 @@ class KeepaliveGovernanceTests(unittest.TestCase):
     def test_cleanup_only_terminates_new_profile_processes(self):
         config = self.make_config()
         chrome = config["paths"]["chromium_dir"]
-        old_proc = FakeProc(10, chrome, [chrome, r"--user-data-dir=D:\softs\chromium\UserData\134.0.6998.177", "--profile-directory=Profile 4"])
-        new_proc = FakeProc(20, chrome, [chrome, r"--user-data-dir=D:\softs\chromium\UserData\134.0.6998.177", "--profile-directory=Profile 4"])
+        old_proc = FakeProc(10, chrome, [chrome, r"--user-data-dir=C:\Chromium\UserData", "--profile-directory=Profile 4"])
+        new_proc = FakeProc(20, chrome, [chrome, r"--user-data-dir=C:\Chromium\UserData", "--profile-directory=Profile 4"])
 
         with mock.patch.object(lib.psutil, "process_iter", return_value=[old_proc, new_proc]):
             with mock.patch.object(lib.psutil, "Process", side_effect=lambda pid: {10: old_proc, 20: new_proc}[pid]):

@@ -25,24 +25,28 @@ class ConfigPathMigrationTests(unittest.TestCase):
         self.assertFalse(resolve_mcp_start_minimized(normalized))
 
     def test_legacy_default_mirror_root_migrates_next_to_user_data_root(self):
-        legacy_workspace_root = r"C:\Users\Administrator\.chromium-profile-manager"
-        user_data_root = r"D:\softs\chromium\UserData\134.0.6998.177"
+        legacy_workspace_root = r"C:\Users\Example\.chromium-profile-manager"
+        user_data_root = r"C:\Chromium\UserData\134.0.6998.177"
         with mock.patch(
             "chromium_advanced.chromium_profile_lib.get_default_workspace_root",
             return_value=legacy_workspace_root,
         ):
-            normalized = normalize_config(
-                {
-                    "paths": {
-                        "user_data_root": user_data_root,
-                        "mirror_user_data_root": os.path.join(legacy_workspace_root, "temp_user_data"),
+            with mock.patch(
+                "chromium_advanced.chromium_profile_lib.ensure_default_bookmarks_template",
+                return_value=r"C:\Users\Example\.chromium-profile-manager\bookmarks_template.html",
+            ):
+                normalized = normalize_config(
+                    {
+                        "paths": {
+                            "user_data_root": user_data_root,
+                            "mirror_user_data_root": os.path.join(legacy_workspace_root, "temp_user_data"),
+                        }
                     }
-                }
-            )
+                )
 
         self.assertEqual(
             normalized["paths"]["mirror_user_data_root"],
-            r"D:\softs\chromium\UserData\temp_user_data",
+            r"C:\Chromium\UserData\temp_user_data",
         )
 
     def test_gui_mcp_trace_path_default_does_not_crash(self):
@@ -52,8 +56,8 @@ class ConfigPathMigrationTests(unittest.TestCase):
 
     def test_gui_mcp_trace_path_honors_environment_override(self):
         window = ChromiumManagerWindow.__new__(ChromiumManagerWindow)
-        with mock.patch.dict(os.environ, {"CHROMIUM_ADVANCED_MCP_TRACE_PATH": r"D:\trace\mcp.jsonl"}):
-            self.assertEqual(window.get_mcp_trace_path(), r"D:\trace\mcp.jsonl")
+        with mock.patch.dict(os.environ, {"CHROMIUM_ADVANCED_MCP_TRACE_PATH": r"C:\Trace\mcp.jsonl"}):
+            self.assertEqual(window.get_mcp_trace_path(), r"C:\Trace\mcp.jsonl")
 
 
 class FocusWheelInputTests(unittest.TestCase):
