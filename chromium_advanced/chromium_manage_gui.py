@@ -498,7 +498,6 @@ class ChromiumManagerWindow(QMainWindow):
         self.scheduler_timer = QTimer(self)
         self.scheduler_timer.timeout.connect(self.on_scheduler_timer)
         self.scheduler_timer.start(SCHEDULER_POLL_MS)
-        QTimer.singleShot(0, self.on_scheduler_timer)
 
         self.log_flush_timer = QTimer(self)
         self.log_flush_timer.timeout.connect(self.flush_log_buffer)
