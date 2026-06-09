@@ -102,6 +102,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
                 f"{'reused' if result.get('reused') else 'started'}: "
                 f"profile={result.get('profile_name', '')} "
                 f"engine={result.get('engine_name', '')} "
+                f"mode={result.get('runtime_mode', '') or '-'} "
                 f"session_id={result.get('session_id', '')}"
             ),
             flush=True,

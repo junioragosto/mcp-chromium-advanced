@@ -9,7 +9,7 @@ description: Use when a task needs to access a Windows-hosted browser MCP servic
 
 When a browser MCP service runs on Windows and the caller runs inside WSL, do not assume `127.0.0.1` works. WSL often needs the Windows host IP instead.
 
-Use this skill only for the WSL-to-Windows access layer. The normal identity and occupancy rules from the main browser identity MCP workflow still apply.
+Use this skill only for the WSL-to-Windows access layer. The normal identity, occupancy, and target-site account verification rules from the main browser identity MCP workflow still apply.
 
 For the Chromium Profile Manager service on this machine:
 
@@ -24,7 +24,7 @@ For the Chromium Profile Manager service on this machine:
 2. Determine the Windows-side host IP visible from WSL.
 3. Test connectivity from WSL to the Windows MCP endpoint.
 4. Use the reachable WSL-side URL for MCP calls.
-5. Before starting a browser session, still check occupancy and confirm the identity parameter with the user if it is not specified.
+5. Before starting a browser session, still check occupancy and confirm the browser profile identity parameter with the user if it is not specified.
 6. For multi-tab or debug-heavy tasks, use the same explicit tab activation and structured debug tools as the normal browser identity MCP workflow.
 
 For the Chromium Profile Manager service on this machine, the supported engine values remain:
@@ -32,6 +32,16 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 - `selenium_uc`
 - `patchright`
 - `playwright_cli`
+
+Recommended engine-selection policy remains the same from WSL:
+
+- default to `playwright_cli` for ordinary MCP task execution
+- use `selenium_uc` for stealth-sensitive or higher anti-detection workflows
+- use `patchright` for richer structured diagnostics and complex frontend inspection
+
+Changing the GUI default engine still affects only future sessions. Existing sessions keep their original engine, and same-profile multi-engine starts in `mirror_isolated` mode create separate isolated runtimes rather than mutating a live session in place.
+
+For `playwright_cli`, the Windows runtime sanitizes upstream Chromium launch args so `AutomationControlled` is not injected through a real `--disable-blink-features` switch. Visible MCP sessions normally honor `mcp.start_minimized=true` so they stay in the taskbar instead of stealing focus while still allowing the user to click in and take over. Do not enable `mcp.headless=true` just to reduce desktop interference; use headless only when the user explicitly asks for headless/regression/background validation.
 
 ## Typical Host Discovery
 
@@ -63,6 +73,7 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - Verify that the Windows service is listening on a WSL-reachable host such as `0.0.0.0` or a specific LAN address.
 - If WSL cannot reach the service, check Windows firewall rules and listening host configuration before debugging MCP semantics.
 - After connectivity is confirmed, follow the same identity confirmation and occupancy rules as the normal browser identity MCP workflow.
+- After connectivity is confirmed, do not infer a target website account from the GUI profile account label; verify the actual site login inside the target website when account correctness matters.
 - After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, and `browser_diagnose_page` over screenshot-only diagnosis.
 - After connectivity is confirmed, prefer `session_health.recovery_actions`, `session_health.page_drift`, and `resolution_trace` over ad-hoc retries when a dynamic page fails under WSL.
-- If the Windows side reports `external_chromium_running`, treat it as a real governance block, not a WSL networking issue.
+- If the Windows side reports `external_chromium_running`, do not assume it is always a hard block. In `mirror_isolated` mode, first inspect whether `accepting_new_sessions=true` and whether the preflight allows a snapshot-backed start.

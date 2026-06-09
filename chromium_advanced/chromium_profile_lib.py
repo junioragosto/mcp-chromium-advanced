@@ -16,6 +16,7 @@ import traceback
 import uuid
 from html.parser import HTMLParser
 from typing import Callable, Dict, List, Optional, Sequence
+from urllib.parse import quote_plus
 
 import psutil
 import undetected_chromedriver as uc
@@ -33,6 +34,7 @@ from chromium_advanced.browser_engines.factory import normalize_browser_engine_n
 APP_NAME = "ChromiumProfileManager"
 CONFIG_FILENAME = "chromium_profiles.json"
 LOCK_FILENAME = "chromium_keepalive.lock"
+MIRROR_LOCK_FILENAME = "chromium_mirroring.lock"
 WINDOWS_TEXT_ENCODING = locale.getpreferredencoding(False) or "utf-8"
 BOOKMARK_BAR_FOLDER_NAMES = {"书签栏", "Bookmarks Bar", "Bookmarks bar", "Bookmarks Toolbar"}
 PROFILE_MARKER_URL = "https://www.google.com/generate_204"
@@ -191,6 +193,23 @@ def ensure_default_bookmarks_template(workspace_root: str) -> str:
     return target_path
 
 
+def get_default_mirror_user_data_root(user_data_root: str = "") -> str:
+    user_data_root_text = str(user_data_root or "").strip()
+    if user_data_root_text:
+        expanded_user_data_root = os.path.abspath(os.path.expanduser(user_data_root_text))
+        return os.path.join(os.path.dirname(expanded_user_data_root), "temp_user_data")
+    return os.path.join(get_default_workspace_root(), "temp_user_data")
+
+
+def is_legacy_default_mirror_root(mirror_user_data_root: str) -> bool:
+    mirror_root_text = str(mirror_user_data_root or "").strip()
+    if not mirror_root_text:
+        return False
+    legacy_default = os.path.abspath(os.path.expanduser(os.path.join(get_default_workspace_root(), "temp_user_data")))
+    candidate = os.path.abspath(os.path.expanduser(mirror_root_text))
+    return candidate == legacy_default
+
+
 def get_default_path_config() -> Dict[str, str]:
     workspace_root = get_default_workspace_root()
     driver_name = "chromedriver.exe" if SYSTEM_NAME == "Windows" else "chromedriver"
@@ -208,6 +227,7 @@ def get_default_path_config() -> Dict[str, str]:
         "chromium_dir": chromium_hint,
         "chromedriver_path": os.path.join(workspace_root, "drivers", driver_name),
         "user_data_root": os.path.join(workspace_root, "user-data"),
+        "mirror_user_data_root": get_default_mirror_user_data_root(os.path.join(workspace_root, "user-data")),
         "bookmarks_template_path": bookmarks_template_path,
         "fingerprint_zip_path": os.path.join(workspace_root, "extensions", "fingerprint-extension.zip"),
     }
@@ -245,6 +265,7 @@ def build_default_config() -> Dict:
             "minimize_to_tray_on_close": True,
             "language": detect_default_language(),
             "browser_engine": DEFAULT_BROWSER_ENGINE,
+            "concurrency_mode": "block",
             "window_bounds": {
                 "x": -1,
                 "y": -1,
@@ -262,6 +283,7 @@ def build_default_config() -> Dict:
             "log_level": "info",
             "idle_timeout_seconds": 60,
             "headless": False,
+            "start_minimized": True,
         },
         "launch": {
             "new_window": True,
@@ -290,7 +312,7 @@ def build_default_config() -> Dict:
                 "google": True,
                 "github": False,
             },
-            "schedule_time": "09:00",
+            "schedule_time": "06:00",
             "headless": False,
             "page_timeout_seconds": 45,
             "between_profiles_seconds": 5,
@@ -308,6 +330,18 @@ def build_default_config() -> Dict:
             "last_run_details": [],
             "last_scheduled_run_date": "",
         },
+        "mirror": {
+            "enabled": True,
+            "disk_dir_name": "mirror_disk",
+            "runtime_dir_name": "runtime",
+            "cleanup_on_session_close": True,
+            "max_runtime_age_hours": 24,
+            "last_run_at": "",
+            "last_run_finished_at": "",
+            "last_run_status": "never",
+            "last_run_message": "",
+            "last_run_profile_count": 0,
+        },
     }
 
 
@@ -321,6 +355,18 @@ def resolve_mcp_headless(config: Dict) -> bool:
         return bool(mcp.get("headless"))
     env_value = str(os.environ.get("CHROMIUM_ADVANCED_MCP_HEADLESS", "") or "").strip().lower()
     return env_value in {"1", "true", "yes", "on"}
+
+
+def resolve_mcp_start_minimized(config: Dict) -> bool:
+    if resolve_mcp_headless(config):
+        return False
+    mcp = config.get("mcp", {}) if isinstance(config, dict) else {}
+    if isinstance(mcp, dict) and "start_minimized" in mcp:
+        return bool(mcp.get("start_minimized"))
+    env_value = str(os.environ.get("CHROMIUM_ADVANCED_MCP_START_MINIMIZED", "") or "").strip().lower()
+    if env_value:
+        return env_value in {"1", "true", "yes", "on"}
+    return True
 
 
 def unique_paths(paths: Sequence[str]) -> List[str]:
@@ -373,6 +419,10 @@ def get_lock_path() -> str:
     return os.path.join(get_state_storage_dir(), LOCK_FILENAME)
 
 
+def get_mirror_lock_path() -> str:
+    return os.path.join(get_state_storage_dir(), MIRROR_LOCK_FILENAME)
+
+
 def safe_copy(value):
     return copy.deepcopy(value)
 
@@ -396,6 +446,27 @@ def format_keepalive_sites_text(site_flags: Dict, translate: Optional[Callable[[
     return ", ".join(labels) if labels else "-"
 
 
+def format_keepalive_site_status(
+    site_name: str,
+    info: Dict,
+    translate: Optional[Callable[[str, str], str]] = None,
+) -> str:
+    tr = translate or (lambda key, fallback="": fallback or key)
+    payload = info if isinstance(info, dict) else {}
+    status = str(payload.get("status", "unknown") or "unknown").strip().lower()
+    message = str(payload.get("message", "") or "").strip()
+    site_label = tr(f"site_name_{site_name}", site_name.title())
+    status_label = {
+        "success": tr("keepalive_site_status_success", "ok"),
+        "signed_out": tr("keepalive_site_status_signed_out", "signed out"),
+        "attention": tr("keepalive_site_status_attention", "attention"),
+        "failed": tr("keepalive_site_status_failed", "failed"),
+        "unknown": tr("keepalive_site_status_unknown", "unknown"),
+    }.get(status, status)
+    base = f"{site_label}: {status_label}"
+    return f"{base} - {message}" if message else base
+
+
 def normalize_profile_entry(entry: Dict, legacy_keepalive_sites: Optional[Dict] = None) -> Dict:
     normalized = dict(entry) if isinstance(entry, dict) else {}
     normalized["profile_name"] = str(normalized.get("profile_name", "")).strip()
@@ -410,6 +481,9 @@ def normalize_profile_entry(entry: Dict, legacy_keepalive_sites: Optional[Dict] 
     normalized["last_keepalive_at"] = str(normalized.get("last_keepalive_at", "")).strip()
     normalized["last_keepalive_status"] = str(normalized.get("last_keepalive_status", "never")).strip() or "never"
     normalized["last_keepalive_message"] = str(normalized.get("last_keepalive_message", "")).strip()
+    normalized["last_mirror_at"] = str(normalized.get("last_mirror_at", "")).strip()
+    normalized["last_mirror_status"] = str(normalized.get("last_mirror_status", "never")).strip() or "never"
+    normalized["last_mirror_message"] = str(normalized.get("last_mirror_message", "")).strip()
     details = normalized.get("last_keepalive_details", {})
     normalized["last_keepalive_details"] = details if isinstance(details, dict) else {}
     return normalized
@@ -425,6 +499,8 @@ def merge_profile_entries(existing: Dict, incoming: Dict) -> Dict:
         "last_launch_at",
         "last_keepalive_at",
         "last_keepalive_message",
+        "last_mirror_at",
+        "last_mirror_message",
     ):
         if candidate.get(key):
             merged[key] = candidate[key]
@@ -444,6 +520,9 @@ def merge_profile_entries(existing: Dict, incoming: Dict) -> Dict:
 
     if candidate.get("last_keepalive_details"):
         merged["last_keepalive_details"] = candidate["last_keepalive_details"]
+
+    if candidate.get("last_mirror_status") and candidate.get("last_mirror_status") != "never":
+        merged["last_mirror_status"] = candidate["last_mirror_status"]
 
     return merged
 
@@ -496,6 +575,8 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["app"]["language"] = str(loaded_app.get("language")).strip()
         if "browser_engine" in loaded_app and loaded_app.get("browser_engine") is not None:
             normalized["app"]["browser_engine"] = normalize_browser_engine_name(str(loaded_app.get("browser_engine")).strip())
+        if "concurrency_mode" in loaded_app and loaded_app.get("concurrency_mode") is not None:
+            normalized["app"]["concurrency_mode"] = str(loaded_app.get("concurrency_mode")).strip()
         window_bounds = loaded_app.get("window_bounds", {})
         if isinstance(window_bounds, dict):
             for key in ("x", "y", "width", "height"):
@@ -514,6 +595,8 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["mcp"]["enabled"] = bool(loaded_mcp.get("enabled"))
         if "headless" in loaded_mcp:
             normalized["mcp"]["headless"] = bool(loaded_mcp.get("headless"))
+        if "start_minimized" in loaded_mcp:
+            normalized["mcp"]["start_minimized"] = bool(loaded_mcp.get("start_minimized"))
         if "port" in loaded_mcp:
             normalized["mcp"]["port"] = loaded_mcp.get("port")
         if "worker_port" in loaded_mcp:
@@ -588,6 +671,23 @@ def normalize_config(config: Optional[Dict]) -> Dict:
         details = loaded_keepalive.get("last_run_details", [])
         normalized["keepalive"]["last_run_details"] = details if isinstance(details, list) else []
 
+    loaded_mirror = loaded.get("mirror", {})
+    if isinstance(loaded_mirror, dict):
+        for key in (
+            "enabled",
+            "cleanup_on_session_close",
+            "max_runtime_age_hours",
+            "last_run_at",
+            "last_run_finished_at",
+            "last_run_status",
+            "last_run_message",
+            "last_run_profile_count",
+            "disk_dir_name",
+            "runtime_dir_name",
+        ):
+            if key in loaded_mirror:
+                normalized["mirror"][key] = loaded_mirror[key]
+
     profiles = loaded.get("profiles", [])
     if isinstance(profiles, list):
         normalized["profiles"] = dedupe_profile_entries([
@@ -601,7 +701,13 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     normalized["app"]["browser_engine"] = normalize_browser_engine_name(
         normalized["app"].get("browser_engine", DEFAULT_BROWSER_ENGINE)
     )
+    concurrency_mode = str(normalized["app"].get("concurrency_mode", "block")).strip().lower()
+    if concurrency_mode not in {"block", "mirror_isolated"}:
+        concurrency_mode = "block"
+    normalized["app"]["concurrency_mode"] = concurrency_mode
     normalized["mcp"]["enabled"] = bool(normalized["mcp"].get("enabled", False))
+    normalized["mcp"]["headless"] = bool(normalized["mcp"].get("headless", False))
+    normalized["mcp"]["start_minimized"] = bool(normalized["mcp"].get("start_minimized", True))
     normalized["mcp"]["transport"] = str(normalized["mcp"].get("transport", "streamable-http")).strip() or "streamable-http"
     normalized["mcp"]["host"] = str(normalized["mcp"].get("host", "127.0.0.1")).strip() or "127.0.0.1"
     normalized["mcp"]["path"] = str(normalized["mcp"].get("path", "/mcp")).strip() or "/mcp"
@@ -625,6 +731,21 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     normalized["keepalive"]["last_scheduled_run_date"] = str(
         normalized["keepalive"].get("last_scheduled_run_date", "")
     ).strip()
+    normalized["mirror"]["enabled"] = bool(normalized["mirror"].get("enabled", True))
+    normalized["mirror"]["cleanup_on_session_close"] = bool(normalized["mirror"].get("cleanup_on_session_close", True))
+    normalized["mirror"]["max_runtime_age_hours"] = max(1, int(normalized["mirror"].get("max_runtime_age_hours", 24)))
+    normalized["mirror"]["disk_dir_name"] = str(normalized["mirror"].get("disk_dir_name", "mirror_disk")).strip() or "mirror_disk"
+    normalized["mirror"]["runtime_dir_name"] = str(normalized["mirror"].get("runtime_dir_name", "runtime")).strip() or "runtime"
+    normalized["mirror"]["last_run_at"] = str(normalized["mirror"].get("last_run_at", "")).strip()
+    normalized["mirror"]["last_run_finished_at"] = str(normalized["mirror"].get("last_run_finished_at", "")).strip()
+    normalized["mirror"]["last_run_status"] = str(normalized["mirror"].get("last_run_status", "never")).strip() or "never"
+    normalized["mirror"]["last_run_message"] = str(normalized["mirror"].get("last_run_message", "")).strip()
+    normalized["mirror"]["last_run_profile_count"] = max(0, int(normalized["mirror"].get("last_run_profile_count", 0)))
+    user_data_root = str(normalized["paths"].get("user_data_root", "")).strip()
+    mirror_user_data_root = str(normalized["paths"].get("mirror_user_data_root", "")).strip()
+    expected_mirror_root = get_default_mirror_user_data_root(user_data_root)
+    if not mirror_user_data_root or is_legacy_default_mirror_root(mirror_user_data_root):
+        normalized["paths"]["mirror_user_data_root"] = expected_mirror_root
     return normalized
 
 
@@ -641,7 +762,7 @@ def load_app_config(config_path: Optional[str] = None) -> Dict:
     path = config_path or get_default_config_path()
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as handle:
+            with open(path, "r", encoding="utf-8-sig") as handle:
                 loaded = json.load(handle)
         except Exception:
             loaded = {}
@@ -1101,10 +1222,7 @@ def build_profile_detail_text(profile: Dict, translate: Optional[Callable[[str, 
         info = details.get(site_name, {})
         if not info:
             continue
-        status = info.get("status", "unknown")
-        message = info.get("message", "")
-        site_label = tr(f"site_name_{site_name}", site_name.title())
-        site_parts.append(f"{site_label}: {status} {message}".strip())
+        site_parts.append(format_keepalive_site_status(site_name, info, tr))
 
     return "\n".join(
         [
@@ -1116,6 +1234,9 @@ def build_profile_detail_text(profile: Dict, translate: Optional[Callable[[str, 
             f"{tr('detail_last_keepalive', 'Last Keepalive')}: {profile.get('last_keepalive_at', '') or '-'}",
             f"{tr('detail_last_status', 'Last Status')}: {profile.get('last_keepalive_status', '') or '-'}",
             f"{tr('detail_last_message', 'Last Message')}: {profile.get('last_keepalive_message', '') or '-'}",
+            f"{tr('detail_last_mirror', 'Last Mirror')}: {profile.get('last_mirror_at', '') or '-'}",
+            f"{tr('detail_last_mirror_status', 'Mirror Status')}: {profile.get('last_mirror_status', '') or '-'}",
+            f"{tr('detail_last_mirror_message', 'Mirror Message')}: {profile.get('last_mirror_message', '') or '-'}",
             f"{tr('detail_site_detail', 'Site Detail')}: {' | '.join(site_parts) if site_parts else '-'}",
             f"{tr('detail_notes', 'Notes')}: {profile.get('notes', '') or '-'}",
         ]
@@ -1123,6 +1244,12 @@ def build_profile_detail_text(profile: Dict, translate: Optional[Callable[[str, 
 
 
 class KeepAliveLoginRequiredError(RuntimeError):
+    def __init__(self, site_name: str, message: str):
+        super().__init__(message)
+        self.site_name = site_name
+
+
+class KeepAliveSoftFailureError(RuntimeError):
     def __init__(self, site_name: str, message: str):
         super().__init__(message)
         self.site_name = site_name
@@ -1651,6 +1778,165 @@ def dismiss_google_consent_if_needed(driver) -> None:
                 continue
 
 
+def build_page_debug_hint(driver, limit: int = 180) -> str:
+    try:
+        url = str(driver.current_url or "").strip()
+    except Exception:
+        url = ""
+    try:
+        title = str(driver.title or "").strip()
+    except Exception:
+        title = ""
+    try:
+        body_text = str(
+            driver.execute_script(
+                "return document.body ? (document.body.innerText || document.body.textContent || '') : '';"
+            )
+            or ""
+        ).strip()
+    except Exception:
+        body_text = ""
+    snippet = re.sub(r"\s+", " ", body_text)
+    if len(snippet) > limit:
+        snippet = snippet[:limit] + "..."
+    parts = []
+    if title:
+        parts.append(f"title={title}")
+    if url:
+        parts.append(f"url={url}")
+    if snippet:
+        parts.append(f"body={snippet}")
+    return "; ".join(parts) if parts else "no page context"
+
+
+def _google_results_ready(driver, query: str) -> bool:
+    query_text = str(query or "").strip().lower()
+    try:
+        current_url = str(driver.current_url or "").lower()
+    except Exception:
+        current_url = ""
+    try:
+        title = str(driver.title or "").lower()
+    except Exception:
+        title = ""
+
+    if "/search?" in current_url and "q=" in current_url:
+        return True
+    if query_text and query_text in title and "google" not in title:
+        return True
+
+    selectors = [
+        (By.ID, "search"),
+        (By.CSS_SELECTOR, "a h3"),
+        (By.CSS_SELECTOR, "div[data-snc]"),
+        (By.CSS_SELECTOR, "div.g"),
+        (By.CSS_SELECTOR, "div#rso"),
+        (By.CSS_SELECTOR, "[role='main'] a h3"),
+    ]
+    for by, selector in selectors:
+        try:
+            if driver.find_elements(by, selector):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _open_google_search_results(driver, query: str, timeout: int) -> None:
+    query = str(query or "").strip()
+    attempts = []
+    try:
+        search_box = wait_for_any(
+            driver,
+            [
+                (By.CSS_SELECTOR, "textarea[name='q']"),
+                (By.CSS_SELECTOR, "input[name='q']"),
+            ],
+            timeout,
+        )
+        attempts.append("search-box")
+    except TimeoutException as exc:
+        raise RuntimeError(f"Google search box did not appear. {build_page_debug_hint(driver)}") from exc
+
+    try:
+        search_box.clear()
+    except Exception:
+        pass
+    try:
+        search_box.click()
+    except Exception:
+        pass
+
+    last_exc = None
+    action_attempts = [
+        ("enter", lambda: (search_box.send_keys(query), search_box.send_keys(Keys.ENTER))),
+        (
+            "button-click",
+            lambda: wait_for_any(
+                driver,
+                [
+                    (By.CSS_SELECTOR, "button[aria-label='Google Search']"),
+                    (By.CSS_SELECTOR, "input[name='btnK']"),
+                ],
+                max(3, min(timeout, 6)),
+            ).click(),
+        ),
+        (
+            "form-submit",
+            lambda: driver.execute_script(
+                """
+                const q = arguments[0];
+                const box = document.querySelector("textarea[name='q'], input[name='q']");
+                if (!box) return false;
+                box.focus();
+                box.value = q;
+                box.dispatchEvent(new Event('input', { bubbles: true }));
+                box.dispatchEvent(new Event('change', { bubbles: true }));
+                const form = box.form || box.closest('form');
+                if (form && typeof form.submit === 'function') {
+                    form.submit();
+                    return true;
+                }
+                return false;
+                """,
+                query,
+            ),
+        ),
+        (
+            "direct-search-url",
+            lambda: driver.get(f"https://www.google.com/search?q={quote_plus(query)}&hl=en"),
+        ),
+    ]
+
+    for attempt_name, action in action_attempts:
+        try:
+            attempts.append(attempt_name)
+            action()
+            WebDriverWait(driver, timeout).until(lambda current: _google_results_ready(current, query))
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt_name != "direct-search-url":
+                try:
+                    driver.get("https://www.google.com/ncr")
+                    dismiss_google_consent_if_needed(driver)
+                    search_box = wait_for_any(
+                        driver,
+                        [
+                            (By.CSS_SELECTOR, "textarea[name='q']"),
+                            (By.CSS_SELECTOR, "input[name='q']"),
+                        ],
+                        max(3, min(timeout, 6)),
+                    )
+                except Exception:
+                    pass
+            continue
+
+    raise RuntimeError(
+        f"Google results did not load for query '{query}'. attempts={','.join(attempts)}. {build_page_debug_hint(driver)}"
+    ) from last_exc
+
+
 def keepalive_google(
     driver,
     settings: Dict,
@@ -1668,25 +1954,8 @@ def keepalive_google(
     driver.get("https://www.google.com/ncr")
     dismiss_google_consent_if_needed(driver)
 
-    search_box = wait_for_any(
-        driver,
-        [
-            (By.CSS_SELECTOR, "textarea[name='q']"),
-            (By.CSS_SELECTOR, "input[name='q']"),
-        ],
-        timeout,
-    )
     query = str(settings.get("google_query", "")).strip() or "profile keepalive"
-    try:
-        search_box.clear()
-    except Exception:
-        pass
-    search_box.send_keys(query)
-    search_box.send_keys(Keys.ENTER)
-
-    WebDriverWait(driver, int(settings["page_timeout_seconds"])).until(
-        lambda current: current.find_elements(By.ID, "search") or query.lower() in current.title.lower()
-    )
+    _open_google_search_results(driver, query, timeout)
     dwell_seconds = int(settings.get("site_dwell_seconds", 6))
     if dwell_seconds > 0:
         log_message(logger, f"Google results ready; staying {dwell_seconds}s")
@@ -1768,16 +2037,6 @@ def keepalive_chatgpt(
     if "auth" in current_url or "login" in current_url:
         raise KeepAliveLoginRequiredError("chatgpt", "ChatGPT is not signed in for this profile.")
 
-    conversation_title = open_chatgpt_existing_conversation(
-        driver,
-        timeout,
-        settings,
-        logger=logger,
-        stop_controller=stop_controller,
-    )
-    if stop_controller:
-        stop_controller.check_or_raise()
-
     composer = find_first_interactable(
         driver,
         [
@@ -1791,6 +2050,27 @@ def keepalive_chatgpt(
         ],
         timeout,
     )
+    try:
+        conversation_title = open_chatgpt_existing_conversation(
+            driver,
+            timeout,
+            settings,
+            logger=logger,
+            stop_controller=stop_controller,
+        )
+    except RuntimeError as exc:
+        if "no existing conversation found in sidebar" not in str(exc):
+            raise
+        if dwell_seconds > 0:
+            log_message(logger, f"ChatGPT signed in but no reusable conversation found; staying {dwell_seconds}s")
+            interruptible_sleep(dwell_seconds, stop_controller)
+        log_message(logger, "ChatGPT composer is available without reusable sidebar conversation.")
+        return {
+            "status": "success",
+            "message": "signed in; no reusable conversation found, composer remained available",
+        }
+    if stop_controller:
+        stop_controller.check_or_raise()
 
     before_count = len(driver.find_elements(By.CSS_SELECTOR, "[data-message-author-role='assistant']"))
     prompt = choose_chatgpt_prompt(settings)
@@ -1892,7 +2172,10 @@ def create_driver_for_profile(config: Dict, profile_name: str):
     options.add_argument(f"--user-data-dir={user_data_root}")
     options.add_argument(f"--profile-directory={profile_name}")
     options.add_argument("--disable-notifications")
-    options.add_argument("--start-maximized")
+    if resolve_mcp_start_minimized(config):
+        options.add_argument("--start-minimized")
+    else:
+        options.add_argument("--start-maximized")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-background-networking")
@@ -1920,9 +2203,12 @@ def create_driver_for_profile(config: Dict, profile_name: str):
 
     driver = uc.Chrome(**kwargs)
     try:
-        # Force a predictable window state so sessions fit the current screen.
-        driver.set_window_position(0, 0)
-        driver.maximize_window()
+        # MCP sessions should not steal the desktop unless the user opted out.
+        if resolve_mcp_start_minimized(config):
+            driver.minimize_window()
+        else:
+            driver.set_window_position(0, 0)
+            driver.maximize_window()
     except Exception:
         pass
     return driver
@@ -1944,6 +2230,7 @@ def run_profile_keepalive(
     site_results: Dict[str, Dict[str, str]] = {}
     failed_sites = []
     disabled_sites = []
+    soft_sites = []
 
     try:
         if stop_controller:
@@ -1986,10 +2273,14 @@ def run_profile_keepalive(
             except KeepAliveStoppedError:
                 raise
             except KeepAliveLoginRequiredError as exc:
-                failed_sites.append(site_name)
                 disabled_sites.append(site_name)
-                site_results[site_name] = {"status": "failed", "message": str(exc), "signed_in": False}
+                soft_sites.append(site_name)
+                site_results[site_name] = {"status": "signed_out", "message": str(exc), "signed_in": False}
                 log_message(logger, f"{profile_name}: {site_name} signed out; unchecked for next run")
+            except KeepAliveSoftFailureError as exc:
+                soft_sites.append(site_name)
+                site_results[site_name] = {"status": "attention", "message": str(exc), "signed_in": True}
+                log_message(logger, f"{profile_name}: {site_name} attention: {exc}")
             except Exception as exc:
                 if stop_controller and stop_controller.should_stop():
                     raise KeepAliveStoppedError("keepalive stopped by user") from exc
@@ -2003,6 +2294,9 @@ def run_profile_keepalive(
         elif failed_sites:
             summary_status = "partial"
             summary_message = "some sites failed"
+        elif soft_sites:
+            summary_status = "partial"
+            summary_message = "some sites require attention"
         else:
             summary_status = "success"
             summary_message = "all enabled sites succeeded"
@@ -2032,9 +2326,12 @@ def run_keepalive_job(
     stop_controller: Optional[KeepAliveStopController] = None,
     progress_callback: Optional[Callable[[str, Dict], None]] = None,
 ) -> Dict:
+    from chromium_advanced.mirror_manager import MirrorManager
+
     path = config_path or get_default_config_path()
     config = load_app_config(path)
     lock = SingleRunLock(get_lock_path())
+    mirror_lock_path = get_mirror_lock_path()
 
     if not lock.try_acquire():
         summary = {
@@ -2230,6 +2527,52 @@ def run_keepalive_job(
         keepalive["last_run_details"] = profile_results
         save_app_config(config, path)
 
+        mirror_summary = None
+        mirror_settings = config.get("mirror", {})
+        if bool(mirror_settings.get("enabled", False)):
+            config["mirror"]["last_run_at"] = now_text()
+            config["mirror"]["last_run_finished_at"] = ""
+            config["mirror"]["last_run_status"] = "running"
+            config["mirror"]["last_run_message"] = "mirror snapshot job started"
+            save_app_config(config, path)
+            try:
+                write_json_atomic(mirror_lock_path, {"started_at": now_text(), "source": source})
+            except Exception:
+                pass
+            try:
+                mirror_manager = MirrorManager(config)
+                mirror_summary = mirror_manager.refresh_snapshots(logger=logger)
+                config = load_app_config(path)
+                config["mirror"]["last_run_finished_at"] = mirror_summary.get("finished_at", now_text())
+                config["mirror"]["last_run_status"] = mirror_summary.get("status", "success")
+                config["mirror"]["last_run_message"] = mirror_summary.get("message", "mirror snapshots updated")
+                config["mirror"]["last_run_profile_count"] = len(mirror_summary.get("profiles", []))
+                for profile_result in mirror_summary.get("profiles", []):
+                    profile_name = str(profile_result.get("profile_name", "")).strip()
+                    if not profile_name:
+                        continue
+                    for profile in config.get("profiles", []):
+                        if profile.get("profile_name") != profile_name:
+                            continue
+                        profile["last_mirror_at"] = mirror_summary.get("finished_at", now_text())
+                        profile["last_mirror_status"] = profile_result.get("status", "success")
+                        profile["last_mirror_message"] = profile_result.get("message", mirror_summary.get("message", "mirror snapshots updated"))
+                        break
+                save_app_config(config, path)
+            except Exception as exc:
+                config = load_app_config(path)
+                config["mirror"]["last_run_finished_at"] = now_text()
+                config["mirror"]["last_run_status"] = "failed"
+                config["mirror"]["last_run_message"] = str(exc)
+                save_app_config(config, path)
+                log_message(logger, f"mirror finished: failed ({exc})")
+            finally:
+                try:
+                    if os.path.exists(mirror_lock_path):
+                        os.remove(mirror_lock_path)
+                except OSError:
+                    pass
+
         summary = {
             "status": final_status,
             "message": final_message,
@@ -2238,6 +2581,8 @@ def run_keepalive_job(
             "finished_at": finished_at,
             "source": source,
         }
+        if mirror_summary is not None:
+            summary["mirror"] = mirror_summary
         log_message(logger, f"keepalive finished: {final_status}")
         return summary
     finally:

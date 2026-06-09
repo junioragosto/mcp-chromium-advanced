@@ -8,7 +8,7 @@ MCP Chromium Advanced is a desktop GUI and MCP service for managing real Chromiu
 
 This project is best understood as a real Chromium identity manager plus an MCP browser service. Instead of creating a fresh disposable automation browser for every task, it is designed to let AI workflows safely reuse existing logged-in browser profiles.
 
-From a first-contact perspective, there are six key ideas:
+From a first-contact perspective, there are seven key ideas:
 
 1. It solves the "real login state" problem.
    The project lets GUI-managed Chromium profiles be exposed to MCP clients so automation can reuse cookies, local storage, extensions, bookmarks, and site permissions.
@@ -19,11 +19,13 @@ From a first-contact perspective, there are six key ideas:
 4. It exposes a more stable runtime contract than the raw engines alone.
    The managed session kernel adds structured capability metadata, normalized action errors, and generic DOM-script fallbacks so callers are less exposed to engine-specific gaps.
 5. It is designed around safe profile ownership.
-   Session checks prevent multiple tasks, threads, or keepalive jobs from silently fighting over the same logged-in browser identity.
+   Session checks prevent live-root tasks, threads, or keepalive jobs from silently fighting over the same logged-in browser identity, while mirror-isolated runtime clones provide a controlled parallel path when enabled.
 6. It attaches automation to real Chromium profiles.
    The browser is launched with the actual `user-data-dir` and `profile-directory`, then the selected execution engine connects to that persistent profile.
 7. It includes keepalive workflows in addition to MCP control.
    The GUI can run scheduled or manual keepalive tasks against real logged-in profiles for sites such as ChatGPT, Gmail, and Google.
+
+Important account boundary: a Chromium `Profile N` is a browser data container, not a universal website account. The GUI `Account` field is an operator-maintained label or note and should be treated as a hint only. Each website still has its own login state inside that browser profile, so account-sensitive automation must verify the actual logged-in account on the target site before continuing.
 
 The public user entry point is:
 
@@ -71,6 +73,33 @@ On top of that browser layer, the MCP service adds:
 - Coordinate multi-tab browser work with explicit tab listing, opening, activation, and closing tools
 - Collect structured console, page error, and network diagnostics instead of relying on screenshots alone
 - Fall back to generic DOM-based snapshot, candidate enumeration, wait, and target diagnostics when a runtime lacks native support
+
+## Engine selection
+
+The project now treats browser engines as execution strategies under one shared profile/session governance model.
+
+There are two ways to choose an engine:
+
+- GUI default engine
+  Stored in `app.browser_engine`. This is the fallback engine used when MCP callers do not pass an explicit engine.
+- Per-request explicit engine
+  MCP callers may pass `engine` to `can_start_profile_session(...)` and `start_profile_session(...)`.
+
+Recommended practical policy:
+
+- `playwright_cli`
+  Default choice for normal MCP work. Fast startup, lower interaction overhead, and good fit for `mirror_isolated` parallel sessions.
+- `selenium_uc`
+  Preferred for stealth-sensitive sites or workflows where avoiding automation detection matters more than raw throughput.
+- `patchright`
+  Preferred for complex frontend diagnosis, richer structured debugging, and the strongest snapshot/tab-aware inspection behavior.
+
+Important switching rule:
+
+- Changing the GUI default engine affects only future sessions.
+- Existing sessions keep the engine they were started with.
+- `reuse_existing=true` only reuses a compatible session for the same profile and the same engine.
+- In `mirror_isolated` mode, starting a new session with a different engine creates a new isolated runtime; it does not hot-switch an existing session in place.
 
 ## Requirements
 
@@ -143,6 +172,8 @@ Important fields:
   Path to `chromedriver`, or a directory containing it
 - `paths.user_data_root`
   Root directory that stores all persistent browser profiles
+- `paths.mirror_user_data_root`
+  Root directory used for mirror snapshots and extracted isolated runtime clones
 - `paths.bookmarks_template_path`
   Optional bookmark template used when initializing profiles
 - `paths.fingerprint_zip_path`
@@ -151,10 +182,28 @@ Important fields:
   UI language code such as `en`, `ja`, or `zh`
 - `app.browser_engine`
   Default browser execution backend, currently `selenium_uc`, `patchright`, or `playwright_cli`
+- `app.concurrency_mode`
+  Session governance mode: `block` keeps the historical single-live-root rule, while `mirror_isolated` allows parallel sessions by starting from mirror snapshots when available
 - `launch.*`
   Browser launch defaults used by the built-in Python launcher, such as `new_window`, `start_maximized`, `load_fingerprint_extension`, `check_url`, and `extra_args`
 - `mcp.host`, `mcp.port`, `mcp.worker_port`, `mcp.path`
   Network settings for the daemon and worker
+
+### Mirror-isolated concurrency
+
+The project now supports an optional snapshot-based concurrency model for real-profile work:
+
+- `block`
+  Historical behavior. Any live Chromium root usage blocks new sessions.
+- `mirror_isolated`
+  The SessionManager prefers launching from a mirror snapshot stored under `paths.mirror_user_data_root`, so concurrent work can run against extracted runtime clones instead of the live `user_data_root`.
+
+Important rules:
+
+- Keepalive and mirror refresh remain exclusive operations.
+- Mirror snapshots are refreshed after keepalive completes successfully.
+- Same-profile parallelism means independent extracted runtime clones, not multiple engines sharing the same live profile directory at once.
+- If no valid mirror snapshot exists and no other browser session is active, startup falls back to the live root. If another session is already active, startup is blocked until a mirror is available.
 
 ## MCP service
 
@@ -171,7 +220,8 @@ Operational notes:
 - The daemon is intended to stay stable while the worker is short-lived and lazily started.
 - A worker reclaimed because of `idle_timeout` is a normal managed lifecycle event, not a crash.
 - If the configured Chromium binary root already has live browser processes, session startup is intentionally blocked with states such as `external_chromium_running`.
-- That busy-state rule applies before engine startup, including `playwright_cli`.
+- That busy-state rule applies before engine startup when the session would touch the live root, including `playwright_cli`.
+- In `mirror_isolated` mode, `external_chromium_running` no longer blocks snapshot-backed starts if a valid mirror is available.
 
 Typical MCP flow:
 
@@ -184,6 +234,13 @@ Typical MCP flow:
 7. `close_profile_session(session_id)`
 
 Engine-aware callers may also pass an explicit engine when starting a session. If omitted, the configured GUI default engine is used.
+
+For example:
+
+```text
+can_start_profile_session(profile_name="Profile 4", engine="selenium_uc")
+start_profile_session(profile_name="Profile 4", engine="playwright_cli")
+```
 
 ### Multi-tab tools
 
@@ -228,6 +285,8 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Currently the most mature path in the project
 - Also powers the existing keepalive workflows
 - Uses the shared `launch.*` defaults for direct profile launch
+- Best current stealth-oriented option in the project
+- Still the code-level fallback default if no configured engine is present
 
 ### Patchright
 
@@ -240,11 +299,19 @@ The worker also exposes structured debugging helpers that are meant to replace m
 
 ### Playwright CLI
 
+- Current preferred engine for normal MCP task execution on this machine when the GUI default is set to `playwright_cli`
+- Best fit for lower-overhead task execution and snapshot-backed parallel work in `mirror_isolated` mode
+- Native stealth is weaker than `selenium_uc`
+- Native inspection fidelity is weaker than `patchright`, but the managed runtime lifts it with fallbacks, diagnostics, and structured recovery metadata
 - Added as a third parallel engine under the same `SessionManager -> BrowserEngine factory` path
 - Uses `playwright-cli open --persistent` only for startup, then reuses the named session for later commands
 - Reuses the real `user-data-dir` together with Chromium `--profile-directory=Profile N`, so logged-in state can be preserved
 - Supports the validated first-stage surface: session start, navigation, multi-tab basics, script execution, type/click/key actions, screenshot, console, requests, and coarse page diagnostics
 - Managed runtime fallbacks lift the raw CLI session with generic `snapshot`, candidate enumeration, waiting, target verification, and snapshot-ref style targeting where possible
+- Sanitizes the upstream `playwright-cli` Chromium launch args so `AutomationControlled` is not injected through `--disable-blink-features`
+- Honors `mcp.start_minimized=true` by default, so visible MCP browser sessions start minimized in the taskbar instead of stealing desktop focus while still allowing the user to click in and take over when needed
+- Keeps `mcp.headless=false` by default; headless mode is only for explicit user-requested regression or background validation, not the normal MCP browsing path
+- On session close, the runtime attempts to terminate owned `playwright-cli` daemon and Chromium processes and then cleans isolated runtime directories
 - Shared-root concurrency still does not work: one real `user_data_root` can only back one live browser session at a time, so the existing busy-state governance remains mandatory
 - Keepalive is not routed through `playwright_cli` in this stage
 - Windows packaged GUI, daemon, and worker executables have been validated against the managed runtime path

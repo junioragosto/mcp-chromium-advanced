@@ -8,7 +8,7 @@ import time
 from typing import Any, Dict
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
-from chromium_advanced.chromium_profile_lib import now_text, resolve_mcp_headless
+from chromium_advanced.chromium_profile_lib import now_text, resolve_mcp_headless, resolve_mcp_start_minimized
 
 
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
@@ -1658,6 +1658,7 @@ class PatchrightEngine(BrowserEngine):
         paths = config.get("paths", {})
         launch_settings = config.get("launch", {})
         headless = resolve_mcp_headless(config)
+        start_minimized = resolve_mcp_start_minimized(config)
         chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
         user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
         if not chromium_binary or not os.path.exists(chromium_binary):
@@ -1676,7 +1677,9 @@ class PatchrightEngine(BrowserEngine):
         # Its Chromium startup behavior differs from Selenium/uc, so not every
         # shared launch flag should be forwarded blindly.
         args = [f"--profile-directory={profile_name}"]
-        if launch_settings.get("start_maximized", True):
+        if start_minimized:
+            args.append("--start-minimized")
+        elif launch_settings.get("start_maximized", True):
             args.append("--start-maximized")
         window_size = str(launch_settings.get("window_size", "")).strip()
         if window_size:
