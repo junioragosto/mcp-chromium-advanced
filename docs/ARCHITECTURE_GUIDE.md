@@ -14,7 +14,7 @@ The key idea is:
 
 - Reuse real Chromium profile state: cookies, local storage, extensions, bookmarks, and site permissions
 - Keep identity selection explicit: callers should provide `profile_name` instead of relying on hidden defaults
-- Prevent collisions: only one active owner should control a profile session at a time
+- Prevent collisions: only one live-root owner should control a profile session at a time, while snapshot-backed isolated clones may run in parallel when mirror concurrency is enabled
 - Share one source of truth: GUI and MCP services read the same config and profile metadata
 - Start heavy browser automation lazily: keep the daemon stable, start the worker only when needed
 
@@ -48,6 +48,7 @@ Responsibilities:
 - bookmark template initialization
 - Chromium launch logic
 - keepalive helpers and shared browser automation utilities
+- mirror snapshot generation and metadata persistence after keepalive
 
 This module is the shared core used by both the GUI and the MCP side.
 
@@ -92,12 +93,15 @@ Responsibilities:
 - report service and profile occupancy
 - claim and release sessions
 - prevent unsafe concurrent use
+- allow controlled snapshot-backed concurrency when `app.concurrency_mode=mirror_isolated`
 - keep the daemon stable while allowing the worker to start on demand
 - route session creation through the selected browser engine
 - wrap raw runtime sessions through a managed session kernel before exposing them to MCP tools
-- keep busy-state governance ahead of engine startup so externally running Chromium processes cannot be bypassed by switching runtimes
+- keep busy-state governance ahead of engine startup so live-root access cannot be bypassed by switching runtimes
 - distinguish managed worker reclaim from unexpected worker exit in daemon status reporting
-- allow MCP-owned runtime sessions to run headless when `mcp.headless=true`, so automated validation can avoid stealing focus from desktop use
+- start visible MCP-owned browser sessions minimized by default when `mcp.start_minimized=true`, avoiding foreground focus theft while preserving a taskbar window for manual observation or user takeover
+- keep `mcp.headless=false` as the normal MCP browsing default; `mcp.headless=true` is reserved for explicit user-requested regression or background validation
+- materialize extracted runtime clones under `paths.mirror_user_data_root` when starting from a validated mirror snapshot
 
 ## Managed Action Kernel
 
@@ -156,6 +160,12 @@ The intended MCP lifecycle is:
 5. release the session
 
 This keeps real browser identities usable across many tasks without letting multiple tasks silently fight over the same logged-in state.
+
+When `app.concurrency_mode=mirror_isolated`, the same lifecycle still applies, but the claimed session may run from an extracted runtime clone rather than from the live profile root. In that mode:
+
+- live-root ownership is still exclusive
+- keepalive and mirror refresh remain exclusive
+- same-profile parallelism is implemented by independent snapshot clones, not by sharing one on-disk profile directory across runtimes
 
 For multi-tab tasks, the intended page lifecycle inside one session is:
 

@@ -8,6 +8,10 @@ The target path is:
 
 `GUI / MCP tools -> SessionManager -> ManagedBrowserSession / Action Kernel -> BrowserEngine runtime -> Chromium backend`
 
+For mirror-enabled concurrency, the effective runtime path may become:
+
+`GUI / MCP tools -> SessionManager -> mirror snapshot selection -> isolated runtime clone -> ManagedBrowserSession / Action Kernel -> BrowserEngine runtime -> Chromium backend`
+
 ## Scope
 
 This upgrade stays generic and open source friendly.
@@ -164,6 +168,7 @@ Status: verified by unit test and local runtime integration test
 ### Built runtime path
 
 - packaged daemon and worker can lazy-start, create a managed browser session, run browser actions, and reclaim the worker after idle timeout
+- packaged daemon and worker can also start `mirror_isolated` sessions from extracted runtime clones when a valid snapshot is available
 
 Status: verified against built executables
 
@@ -171,7 +176,8 @@ Status: verified against built executables
 
 - desktop `ChromiumProfileManager.exe` can be replaced with the rebuilt artifact
 - rebuilt desktop daemon responds on the configured MCP endpoint
-- real busy-state governance still blocks unsafe startup when the configured Chromium root is already running
+- real busy-state governance still blocks unsafe live-root startup when the configured Chromium root is already running
+- mirror-backed startup can still proceed under `external_chromium_running` when the preflight reports `accepting_new_sessions=true` and a valid mirror snapshot exists
 - the desktop GUI still shows a parent/child `ChromiumProfileManager.exe` process pair after launch, which has been confirmed as expected PyInstaller `--onefile` bootstrap behavior rather than a duplicate second GUI instance
 
 Status: verified on the Windows desktop delivery path

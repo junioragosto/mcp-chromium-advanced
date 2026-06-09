@@ -58,11 +58,14 @@ from chromium_advanced.chromium_profile_lib import (
     LEGACY_CHATGPT_PROMPT,
     KeepAliveStopController,
     build_profile_detail_text,
+    format_keepalive_site_status,
     detect_default_language,
     ensure_profile_directory,
     ensure_profile_bookmarks_initialized,
     get_default_config_path,
+    get_default_mirror_user_data_root,
     get_hidden_subprocess_kwargs,
+    is_legacy_default_mirror_root,
     find_running_chromium_processes,
     get_project_root,
     get_runtime_launch_cwd,
@@ -100,6 +103,7 @@ MCP_RECENT_HEALTH_GRACE_SECONDS = 30.0
 MCP_WATCHDOG_RESTART_FAILURES = 6
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
+CONCURRENCY_MODE_OPTIONS = ["block", "mirror_isolated"]
 LANGUAGE_OPTIONS = load_language_options()
 I18N = load_translations()
 WINDOW_STATE_SAVE_DELAY_MS = 400
@@ -107,6 +111,22 @@ ERROR_ALREADY_EXISTS = 183
 SINGLE_INSTANCE_MUTEX_NAME = "Local\\ChromiumProfileManagerGuiSingleton"
 MCP_DAEMON_EXE_NAME = "ChromiumMcpDaemon.exe"
 MCP_WORKER_EXE_NAME = "ChromiumMcpWorker.exe"
+
+
+class FocusWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+            return
+        event.ignore()
+
+
+class FocusWheelTimeEdit(QTimeEdit):
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+            return
+        event.ignore()
 
 
 def get_resource_path(*parts) -> str:
@@ -719,22 +739,22 @@ class ChromiumManagerWindow(QMainWindow):
         self.site_scope_hint.setWordWrap(True)
 
         self.keepalive_headless = QCheckBox()
-        self.keepalive_timeout = QSpinBox()
+        self.keepalive_timeout = FocusWheelSpinBox()
         self.keepalive_timeout.setRange(10, 180)
         self.keepalive_timeout.setSuffix(self.tr("unit_seconds"))
-        self.keepalive_between_profiles = QSpinBox()
+        self.keepalive_between_profiles = FocusWheelSpinBox()
         self.keepalive_between_profiles.setRange(0, 120)
         self.keepalive_between_profiles.setSuffix(self.tr("unit_seconds"))
-        self.keepalive_settle = QSpinBox()
+        self.keepalive_settle = FocusWheelSpinBox()
         self.keepalive_settle.setRange(0, 30)
         self.keepalive_settle.setSuffix(self.tr("unit_seconds"))
-        self.keepalive_site_dwell = QSpinBox()
+        self.keepalive_site_dwell = FocusWheelSpinBox()
         self.keepalive_site_dwell.setRange(0, 60)
         self.keepalive_site_dwell.setSuffix(self.tr("unit_seconds"))
         self.chatgpt_prompt = QLineEdit()
         self.chatgpt_conversation_hint = QLineEdit()
         self.google_query = QLineEdit()
-        self.schedule_time = QTimeEdit()
+        self.schedule_time = FocusWheelTimeEdit()
         self.schedule_time.setDisplayFormat("HH:mm")
         self.schedule_time.setToolTip(self.tr("schedule_time_tooltip"))
         self.chatgpt_conversation_hint.setPlaceholderText(self.tr("chatgpt_hint_placeholder"))
@@ -869,6 +889,7 @@ class ChromiumManagerWindow(QMainWindow):
             ("chromium_dir", self.tr("path_chromium"), "dir"),
             ("chromedriver_path", self.tr("path_driver"), "any"),
             ("user_data_root", self.tr("path_user_data"), "dir"),
+            ("mirror_user_data_root", self.tr("path_mirror_user_data"), "dir"),
             ("bookmarks_template_path", self.tr("path_bookmarks"), "file"),
             ("fingerprint_zip_path", self.tr("path_fingerprint"), "file"),
         ]
@@ -897,6 +918,12 @@ class ChromiumManagerWindow(QMainWindow):
             self.browser_engine_combo.addItem(engine_name, engine_name)
         self.browser_engine_combo.currentIndexChanged.connect(self.on_browser_engine_changed)
         self.form_layout.addRow(self.tr("browser_engine"), self.browser_engine_combo)
+
+        self.concurrency_mode_combo = QComboBox()
+        for mode_name in CONCURRENCY_MODE_OPTIONS:
+            self.concurrency_mode_combo.addItem(mode_name, mode_name)
+        self.concurrency_mode_combo.currentIndexChanged.connect(self.on_concurrency_mode_changed)
+        self.form_layout.addRow(self.tr("concurrency_mode"), self.concurrency_mode_combo)
         self.config_layout.addWidget(self.form_group)
 
         self.mcp_group = QGroupBox()
@@ -904,13 +931,14 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_transport_combo = QComboBox()
         self.mcp_transport_combo.addItems(MCP_TRANSPORT_OPTIONS)
         self.mcp_host_edit = QLineEdit()
-        self.mcp_port_spin = QSpinBox()
+        self.mcp_port_spin = FocusWheelSpinBox()
         self.mcp_port_spin.setRange(1, 65535)
-        self.mcp_worker_port_spin = QSpinBox()
+        self.mcp_worker_port_spin = FocusWheelSpinBox()
         self.mcp_worker_port_spin.setRange(1, 65535)
         self.mcp_path_edit = QLineEdit()
-        self.mcp_idle_timeout_spin = QSpinBox()
+        self.mcp_idle_timeout_spin = FocusWheelSpinBox()
         self.mcp_idle_timeout_spin.setRange(10, 86400)
+        self.mcp_start_minimized_checkbox = QCheckBox()
         self.mcp_log_level_combo = QComboBox()
         self.mcp_log_level_combo.addItems(MCP_LOG_LEVEL_OPTIONS)
         self.mcp_layout.addRow("Transport", self.mcp_transport_combo)
@@ -919,6 +947,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_layout.addRow("Worker Port", self.mcp_worker_port_spin)
         self.mcp_layout.addRow("Path", self.mcp_path_edit)
         self.mcp_layout.addRow("Idle Timeout(s)", self.mcp_idle_timeout_spin)
+        self.mcp_layout.addRow(self.tr("mcp_start_minimized"), self.mcp_start_minimized_checkbox)
         self.mcp_layout.addRow(self.tr("mcp_log_level"), self.mcp_log_level_combo)
         self.config_layout.addWidget(self.mcp_group)
 
@@ -1140,11 +1169,34 @@ class ChromiumManagerWindow(QMainWindow):
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(6)
         site_flags = profile.get("keepalive_sites", {}) or {}
+        last_details = profile.get("last_keepalive_details", {}) or {}
         for site_name in KEEPALIVE_SITE_ORDER:
-            checkbox = QCheckBox(self.tr(f"site_name_{site_name}"))
+            base_label = self.tr(f"site_name_{site_name}")
+            info = last_details.get(site_name, {}) if isinstance(last_details, dict) else {}
+            site_status = str((info or {}).get("status", "") or "").strip().lower()
+            suffix_map = {
+                "signed_out": self.tr("keepalive_site_badge_signed_out"),
+                "attention": self.tr("keepalive_site_badge_attention"),
+                "failed": self.tr("keepalive_site_badge_failed"),
+                "success": self.tr("keepalive_site_badge_success"),
+            }
+            checkbox_text = base_label
+            if site_status in suffix_map:
+                checkbox_text = f"{base_label} {suffix_map[site_status]}"
+            checkbox = QCheckBox(checkbox_text)
             checkbox.setChecked(bool(site_flags.get(site_name, False)))
             checkbox.setEnabled(self.keepalive_worker is None)
-            checkbox.setToolTip(self.tr("site_checkbox_tooltip"))
+            checkbox.setToolTip(
+                format_keepalive_site_status(site_name, info, self.tr) if info else self.tr("site_checkbox_tooltip")
+            )
+            if site_status == "signed_out":
+                checkbox.setStyleSheet("color: #c62828;")
+            elif site_status == "attention":
+                checkbox.setStyleSheet("color: #b26a00;")
+            elif site_status == "failed":
+                checkbox.setStyleSheet("color: #8e0000;")
+            elif site_status == "success":
+                checkbox.setStyleSheet("color: #1e7d34;")
             checkbox.stateChanged.connect(
                 lambda state, name=profile.get("profile_name", ""), site=site_name: self.set_profile_keepalive_site_enabled(
                     name, site, state == Qt.Checked
@@ -1555,6 +1607,16 @@ class ChromiumManagerWindow(QMainWindow):
                     self.browser_engine_combo.setCurrentIndex(index)
                     break
             self.browser_engine_combo.blockSignals(False)
+        if hasattr(self, "concurrency_mode_combo"):
+            current_mode = str(app_settings.get("concurrency_mode", "block") or "block").strip().lower()
+            if current_mode not in CONCURRENCY_MODE_OPTIONS:
+                current_mode = "block"
+            self.concurrency_mode_combo.blockSignals(True)
+            for index in range(self.concurrency_mode_combo.count()):
+                if self.concurrency_mode_combo.itemData(index) == current_mode:
+                    self.concurrency_mode_combo.setCurrentIndex(index)
+                    break
+            self.concurrency_mode_combo.blockSignals(False)
 
     def on_language_changed(self):
         if not hasattr(self, "language_combo"):
@@ -1584,6 +1646,21 @@ class ChromiumManagerWindow(QMainWindow):
         self.config = save_app_config(self.config, self.config_path)
         self.refresh_mcp_status_ui()
         self.append_log(f"Browser engine saved: {engine_name}")
+
+    def on_concurrency_mode_changed(self):
+        if not hasattr(self, "concurrency_mode_combo"):
+            return
+        mode_name = str(self.concurrency_mode_combo.currentData() or "block").strip().lower()
+        if mode_name not in CONCURRENCY_MODE_OPTIONS:
+            mode_name = "block"
+        current_mode = str(self.config.get("app", {}).get("concurrency_mode", "block") or "block").strip().lower()
+        if mode_name == current_mode:
+            return
+        self.config.setdefault("app", {})
+        self.config["app"]["concurrency_mode"] = mode_name
+        self.config = save_app_config(self.config, self.config_path)
+        self.append_log(f"Concurrency mode saved: {mode_name}")
+        self.refresh_mcp_status_ui()
 
     def retranslate_ui(self):
         self.setWindowTitle(self.tr("window_title"))
@@ -1643,6 +1720,7 @@ class ChromiumManagerWindow(QMainWindow):
             ("chromium_dir", "path_chromium"),
             ("chromedriver_path", "path_driver"),
             ("user_data_root", "path_user_data"),
+            ("mirror_user_data_root", "path_mirror_user_data"),
             ("bookmarks_template_path", "path_bookmarks"),
             ("fingerprint_zip_path", "path_fingerprint"),
         ]
@@ -1651,6 +1729,7 @@ class ChromiumManagerWindow(QMainWindow):
             self.path_browse_buttons[key].setText(self.tr("browse"))
         self.form_layout.labelForField(self.language_combo).setText(self.tr("language"))
         self.form_layout.labelForField(self.browser_engine_combo).setText(self.tr("browser_engine"))
+        self.form_layout.labelForField(self.concurrency_mode_combo).setText(self.tr("concurrency_mode"))
 
         self.settings_layout.labelForField(self.keepalive_headless).setText(self.tr("headless"))
         self.settings_layout.labelForField(self.site_scope_hint).setText(self.tr("site_label"))
@@ -1676,6 +1755,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_layout.labelForField(self.mcp_default_engine_label).setText(self.tr("mcp_default_engine"))
         self.mcp_status_layout.labelForField(self.mcp_status_detail_label).setText(self.tr("mcp_detail"))
 
+        self.mcp_start_minimized_checkbox.setText(self.tr("mcp_start_minimized_hint"))
+        self.mcp_layout.labelForField(self.mcp_start_minimized_checkbox).setText(self.tr("mcp_start_minimized"))
         self.mcp_layout.labelForField(self.mcp_log_level_combo).setText(self.tr("mcp_log_level"))
         if hasattr(self, "tray_action_show") and self.tray_action_show:
             self.tray_action_show.setText(self.tr("tray_show"))
@@ -1698,6 +1779,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_worker_port_spin.setValue(int(settings.get("worker_port", 28889)))
         self.mcp_path_edit.setText(str(settings.get("path", "/mcp")))
         self.mcp_idle_timeout_spin.setValue(int(settings.get("idle_timeout_seconds", 60)))
+        self.mcp_start_minimized_checkbox.setChecked(bool(settings.get("start_minimized", True)))
         log_level = str(settings.get("log_level", "info"))
         if log_level not in MCP_LOG_LEVEL_OPTIONS:
             log_level = "info"
@@ -1710,10 +1792,18 @@ class ChromiumManagerWindow(QMainWindow):
     def save_path_settings(self):
         for key, line_edit in self.path_editors.items():
             self.config["paths"][key] = line_edit.text().strip()
+        user_data_root = str(self.config["paths"].get("user_data_root", "")).strip()
+        mirror_user_data_root = str(self.config["paths"].get("mirror_user_data_root", "")).strip()
+        if not mirror_user_data_root or is_legacy_default_mirror_root(mirror_user_data_root):
+            resolved_mirror_root = get_default_mirror_user_data_root(user_data_root)
+            self.config["paths"]["mirror_user_data_root"] = resolved_mirror_root
+            if "mirror_user_data_root" in self.path_editors:
+                self.path_editors["mirror_user_data_root"].setText(resolved_mirror_root)
         self.config.setdefault("app", {})
         self.config["app"]["browser_engine"] = normalize_browser_engine_name(
             self.browser_engine_combo.currentData() or DEFAULT_BROWSER_ENGINE
         )
+        self.config["app"]["concurrency_mode"] = str(self.concurrency_mode_combo.currentData() or "block").strip().lower()
         self.config = save_app_config(self.config, self.config_path)
         self.refresh_table()
         self.append_log(self.tr("log_base_config_saved"))
@@ -1729,6 +1819,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.config["mcp"]["port"] = self.mcp_port_spin.value()
         self.config["mcp"]["worker_port"] = self.mcp_worker_port_spin.value()
         self.config["mcp"]["idle_timeout_seconds"] = self.mcp_idle_timeout_spin.value()
+        self.config["mcp"]["start_minimized"] = self.mcp_start_minimized_checkbox.isChecked()
         self.config["mcp"]["log_level"] = self.mcp_log_level_combo.currentText().strip() or "info"
         self.config["mcp"]["enabled"] = self.mcp_service_checkbox.isChecked()
         self.config = save_app_config(self.config, self.config_path)
@@ -1817,7 +1908,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_endpoint_label.setText(self.get_mcp_endpoint())
         self.mcp_worker_endpoint_label.setText(self.get_mcp_worker_endpoint())
         self.mcp_default_engine_label.setText(
-            normalize_browser_engine_name(self.config.get("app", {}).get("browser_engine", DEFAULT_BROWSER_ENGINE))
+            f"{normalize_browser_engine_name(self.config.get('app', {}).get('browser_engine', DEFAULT_BROWSER_ENGINE))}"
+            f" / {str(self.config.get('app', {}).get('concurrency_mode', 'block') or 'block')}"
         )
 
         daemon_status = self.query_mcp_status()

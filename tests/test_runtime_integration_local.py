@@ -7,10 +7,13 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from chromium_advanced.browser_engines.factory import create_browser_engine
 from chromium_advanced.browser_session_kernel import ManagedBrowserSession
 from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config, resolve_chromium_binary
+from chromium_advanced.mirror_manager import MirrorManager
+from chromium_advanced.session_manager import SessionManager
 
 
 TEST_HTML = """<!doctype html>
@@ -147,6 +150,50 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
     def test_playwright_cli_runtime_flow(self):
         self._run_runtime_flow("playwright_cli")
+
+    def test_playwright_cli_mirror_isolated_session_manager_flow(self):
+        config, runtime_root, profile_name = self._build_config()
+        config["profiles"] = [{"profile_name": profile_name}]
+        config["app"]["concurrency_mode"] = "mirror_isolated"
+        config["mirror"] = {
+            "enabled": True,
+            "cleanup_on_session_close": True,
+            "disk_dir_name": "mirror_disk",
+            "runtime_dir_name": "runtime",
+            "max_runtime_age_hours": 24,
+        }
+        config["paths"]["mirror_user_data_root"] = tempfile.mkdtemp(prefix="mcp-runtime-mirror-")
+        manager = SessionManager()
+        session_info = None
+        try:
+            MirrorManager(config).refresh_snapshots(profile_names=[profile_name])
+            with mock.patch.object(manager, "_load_config", return_value=config):
+                session_info = manager.start_session(profile_name=profile_name, engine_name="playwright_cli")
+                self.assertEqual(session_info["runtime_mode"], "mirror_isolated")
+                session = manager.resolve_session(session_info["session_id"])
+                url = f"http://127.0.0.1:{self.port}/index.html"
+                nav = session.navigate(url)
+                self.assertIn("Managed Runtime Test", nav.get("title", ""))
+                typed = session.type_text("#name", "Mirror", by="css")
+                self.assertTrue(typed.get("typed"))
+                clicked = session.click("#submit", by="css")
+                self.assertTrue(clicked.get("clicked"))
+                waited = session.wait_for("#status.ready", by="css", timeout_seconds=5, condition="visible")
+                self.assertTrue(waited.get("found"))
+                page_text = session.get_page_text()
+                self.assertIn("Submitted: Mirror", page_text.get("text", ""))
+                runtime_root_path = session_info["runtime_root"]
+                self.assertTrue(os.path.isdir(runtime_root_path))
+            close_result = manager.close_session(session_info["session_id"])
+            self.assertTrue(close_result.get("closed"))
+            self.assertFalse(os.path.exists(runtime_root_path))
+        finally:
+            with contextlib.suppress(Exception):
+                if session_info is not None:
+                    manager.close_session(session_info["session_id"])
+            shutil.rmtree(config["paths"]["mirror_user_data_root"], ignore_errors=True)
+            shutil.rmtree(runtime_root, ignore_errors=True)
+            time.sleep(1.0)
 
 
 if __name__ == "__main__":

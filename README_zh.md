@@ -23,13 +23,15 @@ MCP Chromium Advanced 是一个用于管理真实 Chromium 浏览器 Profile 的
    受管会话内核会补充结构化能力描述、统一错误码和通用 fallback，减少调用方直接面对引擎差异的概率。
 
 5. 它的核心设计是“安全占用真实身份”。  
-   会话检查会避免多个任务、线程或 keepalive 作业同时抢占同一个已登录浏览器身份。
+   会话检查会避免多个 live root 任务、线程或 keepalive 作业同时抢占同一个已登录浏览器身份；开启镜像隔离后，则通过受控的 runtime clone 提供并发路径。
 
 6. 它连接的是真实 Chromium Profile。  
    项目会用真实的 `user-data-dir` 和 `profile-directory` 启动浏览器，再由选定执行引擎接入这个持久化 Profile。
 
 7. 它除了 MCP 控制，还支持保活工作流。  
    GUI 可以对真实登录的 Profile 执行手动或定时保活任务，目标站点可以包括 ChatGPT、Gmail、Google 和 GitHub。
+
+重要账号边界：Chromium 的 `Profile N` 是浏览器数据容器，不是所有网站共用的账号。GUI 里的 `Account` 字段只是人工维护的标签或备注，只能作为线索，不能当作 GitHub、YouTube、ChatGPT、Gmail、Google 等目标网站当前登录账号的证明。涉及账号正确性的自动化任务，必须进入目标网站后读取该网站自己的登录状态再继续。
 
 公开入口仍然是：
 
@@ -76,6 +78,33 @@ python run_gui.py
 - 通过显式 tab 工具支持多标签页协作
 - 采集结构化的 console、页面错误与网络请求诊断信息
 - 对弱能力 runtime 提供通用 fallback，例如 snapshot、候选元素枚举、等待和 target 诊断
+
+## 引擎选择策略
+
+当前项目把浏览器引擎视为同一套 Profile / Session 治理之下的不同执行策略。
+
+有两种选择方式：
+
+- GUI 默认引擎
+  存在 `app.browser_engine` 中。MCP 调用方没有显式传 `engine` 时，就使用这里的默认值。
+- 单次请求显式指定引擎
+  MCP 调用方可以在 `can_start_profile_session(...)` 和 `start_profile_session(...)` 中传 `engine`。
+
+推荐的实际策略：
+
+- `playwright_cli`
+  适合作为日常 MCP 任务默认引擎。启动轻、交互开销低，且更适合 `mirror_isolated` 并发场景。
+- `selenium_uc`
+  更适合风控敏感站点、登录站点、伪装优先场景。当前项目里它仍然是 stealth 最强的一条路径。
+- `patchright`
+  更适合复杂前端诊断、结构化调试、多标签观察、snapshot/ref 相关能力要求更高的任务。
+
+关于切换引擎，有几个必须明确的边界：
+
+- 修改 GUI 默认引擎，只影响之后新启动的会话。
+- 已经运行中的 session 不会被热切换。
+- `reuse_existing=true` 只会复用“同一个 Profile + 同一个引擎”的会话。
+- 在 `mirror_isolated` 模式下，用不同引擎再开一个会话，本质上是创建新的隔离 runtime，不是把已有会话切到另一个引擎。
 
 ## 运行要求
 
@@ -140,12 +169,32 @@ pip install -r requirements.txt
   `chromedriver` 路径，或包含它的目录
 - `paths.user_data_root`
   保存所有持久化 Profile 的根目录
+- `paths.mirror_user_data_root`
+  保存镜像快照和隔离运行时副本的根目录
 - `app.browser_engine`
   默认浏览器执行后端，当前支持 `selenium_uc`、`patchright`、`playwright_cli`
+- `app.concurrency_mode`
+  会话并发治理模式。`block` 保持历史上的单 live root 规则，`mirror_isolated` 则在有镜像时优先从镜像快照启动并发会话
 - `mcp.*`
   MCP daemon 与 worker 的地址、端口、超时与日志级别
 - `profiles[]`
   Profile 名称、账号标识、备注、保活配置等
+
+### 镜像隔离并发
+
+当前版本支持基于快照的可控并发模型：
+
+- `block`
+  历史行为。只要 live `user_data_root` 被占用，就阻止新会话启动。
+- `mirror_isolated`
+  `SessionManager` 会优先从 `paths.mirror_user_data_root` 下的镜像快照提取运行时副本，让并发任务运行在隔离副本上，而不是直接共享 live `user_data_root`。
+
+需要明确的规则：
+
+- keepalive 与镜像刷新仍然是独占阶段。
+- keepalive 成功结束后会刷新镜像快照。
+- “同一个 Profile 可并发”指的是多个独立 runtime clone，不是多个引擎同时共享同一个真实 Profile 目录。
+- 如果镜像不可用且当前没有其它浏览器会话，系统会回退到 live root；如果已经有其它会话在运行，则会阻止启动，直到镜像可用。
 
 ## MCP 使用方式
 
@@ -158,6 +207,13 @@ pip install -r requirements.txt
 5. `start_profile_session(profile_name)`
 6. 执行浏览器操作
 7. `close_profile_session(session_id)`
+
+如果需要按场景显式指定引擎，可以这样调用：
+
+```text
+can_start_profile_session(profile_name="Profile 4", engine="selenium_uc")
+start_profile_session(profile_name="Profile 4", engine="playwright_cli")
+```
 
 如果是多标签页任务，建议显式使用：
 
@@ -195,6 +251,10 @@ pip install -r requirements.txt
 
 `GUI / MCP tools -> SessionManager -> ManagedBrowserSession / Action Kernel -> BrowserEngine runtime -> Chromium backend`
 
+并发开启后的实际路径则变为：
+
+`GUI / MCP tools -> SessionManager -> mirror snapshot selection -> isolated runtime clone -> BrowserEngine runtime -> Chromium backend`
+
 ## 构建
 
 Windows 下可使用：
@@ -214,6 +274,32 @@ Windows 下可使用：
 - keepalive 目前仍未切到 `playwright_cli`
 - 不同 runtime 的底层能力仍有差异，但上层会尽量通过能力模型和 fallback 统一行为
 - 对真实 Profile 的占用治理仍然优先于“强行复用”
+
+## 三种引擎的当前定位
+
+### `selenium_uc`
+
+- 当前项目里最成熟、最稳的一条路径
+- keepalive 仍然使用这条引擎链
+- 如果你的目标是“尽量像真人、尽量减少自动化暴露”，优先考虑它
+- 在代码层它仍然是兜底默认值
+
+### `patchright`
+
+- 更偏重复杂页面的结构化诊断与调试能力
+- 对 snapshot/ref、多标签上下文、DevTools 风格观测更有优势
+- 不适合作为所有高频普通任务的默认执行引擎
+
+### `playwright_cli`
+
+- 当前这台机器上适合作为普通 MCP 任务的默认高性能引擎
+- 在 `mirror_isolated` 模式下更适合并发任务
+- stealth 不如 `selenium_uc`
+- 原生观测能力不如 `patchright`，但受管运行时已经补了不少统一 fallback
+- 已对 upstream `playwright-cli` 的 Chromium 启动参数做清洗，避免通过 `--disable-blink-features` 注入 `AutomationControlled`
+- 默认遵守 `mcp.start_minimized=true`，可见 MCP 浏览器会先最小化到任务栏，避免抢占桌面焦点，同时用户需要时仍可点开窗口接管或观察
+- 默认保持 `mcp.headless=false`；headless 只用于用户明确要求的回归测试或后台验证，不作为普通 MCP 浏览任务的默认方案
+- session 关闭时会尝试清理归属的 `playwright-cli` daemon、Chromium 子进程和隔离 runtime 目录，降低残留窗口风险
 
 ## 开发说明
 

@@ -1,6 +1,17 @@
 import unittest
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+from unittest import mock
 
-from chromium_advanced.browser_engines.playwright_cli_engine import PlaywrightCliBrowserSession
+from chromium_advanced.browser_engines.playwright_cli_engine import (
+    PLAYWRIGHT_CLI_BLINK_SENTINEL_ARG,
+    PlaywrightCliEngine,
+    PlaywrightCliBrowserSession,
+    _normalize_playwright_cli_launch_args,
+)
 
 
 class FakePlaywrightCliSession(PlaywrightCliBrowserSession):
@@ -76,6 +87,84 @@ class FakePlaywrightCliSession(PlaywrightCliBrowserSession):
 
 
 class PlaywrightCliEngineTests(unittest.TestCase):
+    def _create_session_with_mocked_open(self, *, headless, start_minimized=True):
+        temp_dir = tempfile.mkdtemp()
+        chrome_path = os.path.join(temp_dir, "chrome.exe")
+        profile_root = os.path.join(temp_dir, "UserData")
+        os.makedirs(os.path.join(profile_root, "Profile 1"), exist_ok=True)
+        with open(chrome_path, "w", encoding="utf-8"):
+            pass
+        config = {
+            "paths": {"chromium_dir": chrome_path, "user_data_root": profile_root},
+            "mcp": {"headless": bool(headless), "start_minimized": bool(start_minimized)},
+            "launch": {
+                "start_maximized": False,
+                "load_fingerprint_extension": False,
+                "extra_args": [],
+            },
+        }
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+        run_patch = mock.patch(
+            "chromium_advanced.browser_engines.playwright_cli_engine.subprocess.run",
+            return_value=completed,
+        )
+        which_patch = mock.patch(
+            "chromium_advanced.browser_engines.playwright_cli_engine.shutil.which",
+            return_value="playwright-cli",
+        )
+        rmtree_patch = mock.patch("chromium_advanced.browser_engines.playwright_cli_engine.shutil.rmtree")
+        with run_patch as run_mock, which_patch, rmtree_patch:
+            session = PlaywrightCliEngine().create_session(config, "Profile 1")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        config_path = run_mock.call_args.args[0][run_mock.call_args.args[0].index("--config") + 1]
+        with open(config_path, "r", encoding="utf-8") as handle:
+            cli_config = json.load(handle)
+        return session, run_mock.call_args.args[0], cli_config
+
+    def test_launch_args_block_upstream_automation_controlled_injection(self):
+        args = _normalize_playwright_cli_launch_args([
+            "--no-first-run",
+            "--disable-blink-features=AutomationControlled",
+        ])
+        self.assertIn(PLAYWRIGHT_CLI_BLINK_SENTINEL_ARG, args)
+        self.assertFalse(any("AutomationControlled" in item for item in args))
+        self.assertFalse(any(item.startswith("--disable-blink-features") for item in args))
+
+    def test_launch_args_preserve_existing_non_automation_blink_features(self):
+        args = _normalize_playwright_cli_launch_args([
+            "--disable-blink-features=IdleDetection,AutomationControlled",
+        ])
+        self.assertEqual(args, ["--disable-blink-features=IdleDetection"])
+
+    def test_headless_open_does_not_force_headed_cli_window(self):
+        session, command, _cli_config = self._create_session_with_mocked_open(headless=True)
+        self.assertNotIn("--headed", command)
+        self.assertEqual(session.engine_name, "playwright_cli")
+
+    def test_headed_open_keeps_explicit_headed_mode(self):
+        _session, command, _cli_config = self._create_session_with_mocked_open(headless=False)
+        self.assertIn("--headed", command)
+
+    def test_mcp_start_minimized_uses_minimized_chromium_window(self):
+        _session, _command, cli_config = self._create_session_with_mocked_open(headless=False, start_minimized=True)
+        args = cli_config["browser"]["launchOptions"]["args"]
+        self.assertIn("--start-minimized", args)
+        self.assertNotIn("--start-maximized", args)
+
+    def test_mcp_can_opt_out_of_minimized_window(self):
+        _session, _command, cli_config = self._create_session_with_mocked_open(headless=False, start_minimized=False)
+        args = cli_config["browser"]["launchOptions"]["args"]
+        self.assertNotIn("--start-minimized", args)
+
+    def test_close_attempts_owned_process_cleanup(self):
+        session = FakePlaywrightCliSession()
+        with mock.patch.object(session, "_run_cli", return_value={"parsed": {}}) as run_cli:
+            with mock.patch.object(session, "_terminate_owned_processes") as cleanup:
+                with mock.patch("chromium_advanced.browser_engines.playwright_cli_engine.shutil.rmtree"):
+                    session.close()
+        run_cli.assert_called_once()
+        cleanup.assert_called_once()
+
     def test_sticky_tab_is_used_when_no_tab_id_is_provided(self):
         session = FakePlaywrightCliSession()
         session._remember_page("tab-000", url="https://studio.youtube.com/comments", title="Community - YouTube Studio")
@@ -130,6 +219,15 @@ class PlaywrightCliEngineTests(unittest.TestCase):
         self.assertTrue(result["clicked"])
         self.assertFalse(result["page_drift"]["drifted"])
         self.assertEqual(result["page_drift"]["expected_url"], "https://studio.youtube.com/comments?sort=newest")
+
+    def test_activate_tab_by_index_ignores_sticky_tab_bias(self):
+        session = FakePlaywrightCliSession()
+        session._sticky_tab_id = "tab-001"
+        result = session.activate_tab(index=0)
+        self.assertTrue(result["activated"])
+        self.assertEqual(result["tab"]["index"], 0)
+        self.assertEqual(result["tab_id"], "tab-000")
+        self.assertEqual(session._sticky_tab_id, "tab-000")
 
 
 if __name__ == "__main__":

@@ -10,12 +10,15 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+import psutil
+
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
 from chromium_advanced.chromium_profile_lib import (
     detect_fingerprint_extension_dir,
     get_hidden_subprocess_kwargs,
     now_text,
     resolve_mcp_headless,
+    resolve_mcp_start_minimized,
     resolve_chromium_binary,
 )
 
@@ -26,6 +29,8 @@ REQUEST_LINE_PATTERN = re.compile(
     r"^(?P<index>\d+)\.\s+\[(?P<method>[A-Z]+)\]\s+(?P<url>\S+)(?:\s+=>\s+\[(?P<status>\d+)\](?:\s+.*)?)?\s*$"
 )
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
+PLAYWRIGHT_CLI_AUTOMATION_BLINK_FEATURE = "AutomationControlled"
+PLAYWRIGHT_CLI_BLINK_SENTINEL_ARG = "--no-first-run=--disable-blink-features-sentinel"
 
 
 def _slugify(value: str) -> str:
@@ -78,6 +83,37 @@ def _selector_to_target(selector: str, by: str = "css") -> str:
 
 def _tab_id_for_index(index: int) -> str:
     return f"tab-{int(index):03d}"
+
+
+def _normalize_playwright_cli_launch_args(args: List[str]) -> List[str]:
+    normalized: List[str] = []
+    has_disable_blink_features = False
+    for item in args:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if text.startswith("--disable-blink-features"):
+            name, separator, value = text.partition("=")
+            features = [part.strip() for part in value.split(",") if part.strip()]
+            features = [part for part in features if part != PLAYWRIGHT_CLI_AUTOMATION_BLINK_FEATURE]
+            if features:
+                normalized.append(f"{name}{separator}{','.join(features)}")
+                has_disable_blink_features = True
+            continue
+        normalized.append(text)
+    if not has_disable_blink_features:
+        normalized.append(PLAYWRIGHT_CLI_BLINK_SENTINEL_ARG)
+    return normalized
+
+
+def _command_line_text(proc: psutil.Process) -> str:
+    try:
+        cmdline = proc.cmdline()
+    except Exception:
+        return ""
+    if isinstance(cmdline, list):
+        return " ".join(str(item) for item in cmdline)
+    return str(cmdline or "")
 
 
 class PlaywrightCliBrowserSession(BrowserSession):
@@ -363,7 +399,9 @@ class PlaywrightCliBrowserSession(BrowserSession):
         self._run_cli(["tab-select", str(int(index)), "--json"])
 
     def _ensure_tab_selected(self, tab_id: str = "", index: int = -1, title_contains: str = "", url_contains: str = "") -> int:
-        resolved_tab_id = str(tab_id or "").strip() or self._preferred_tab_id()
+        explicit_tab_id = str(tab_id or "").strip()
+        has_explicit_target = bool(explicit_tab_id) or int(index) >= 0 or bool(str(title_contains or "").strip()) or bool(str(url_contains or "").strip())
+        resolved_tab_id = explicit_tab_id if explicit_tab_id else ("" if has_explicit_target else self._preferred_tab_id())
         resolved_index = self._resolve_index(tab_id=resolved_tab_id, index=index, title_contains=title_contains, url_contains=url_contains)
         self._select_index(resolved_index)
         self._sticky_tab_id = _tab_id_for_index(resolved_index)
@@ -1196,10 +1234,55 @@ class PlaywrightCliBrowserSession(BrowserSession):
         try:
             self._run_cli(["close", "--json"], expect_process_success=True, expect_action_success=False)
         finally:
+            self._terminate_owned_processes()
             try:
                 shutil.rmtree(self.output_root, ignore_errors=True)
             except Exception:
                 pass
+
+    def _terminate_owned_processes(self) -> None:
+        needles = [
+            str(self.session_name or "").strip(),
+            os.path.abspath(os.path.expanduser(str(self.config_path or ""))),
+            os.path.abspath(os.path.expanduser(str(self.user_data_root or ""))),
+        ]
+        needles = [item for item in needles if item]
+        if not needles:
+            return
+
+        current_pid = os.getpid()
+        targets: Dict[int, psutil.Process] = {}
+        for proc in psutil.process_iter(["pid", "name"]):
+            if proc.pid == current_pid:
+                continue
+            command_line = _command_line_text(proc)
+            if not command_line:
+                continue
+            command_line_cmp = os.path.normcase(command_line)
+            if any(os.path.normcase(needle) in command_line_cmp for needle in needles):
+                targets[proc.pid] = proc
+                try:
+                    for child in proc.children(recursive=True):
+                        targets[child.pid] = child
+                except Exception:
+                    pass
+
+        if not targets:
+            return
+        processes = list(targets.values())
+        for proc in processes:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        _, alive = psutil.wait_procs(processes, timeout=3)
+        for proc in alive:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if alive:
+            psutil.wait_procs(alive, timeout=3)
 
 
 class PlaywrightCliEngine(BrowserEngine):
@@ -1213,6 +1296,7 @@ class PlaywrightCliEngine(BrowserEngine):
         paths = config.get("paths", {})
         launch_settings = config.get("launch", {})
         headless = resolve_mcp_headless(config)
+        start_minimized = resolve_mcp_start_minimized(config)
         chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
         user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
         if not chromium_binary or not os.path.exists(chromium_binary):
@@ -1230,7 +1314,9 @@ class PlaywrightCliEngine(BrowserEngine):
             "--no-default-browser-check",
             f"--profile-directory={profile_name}",
         ]
-        if bool(launch_settings.get("start_maximized", True)):
+        if start_minimized:
+            launch_args.append("--start-minimized")
+        elif bool(launch_settings.get("start_maximized", True)):
             launch_args.append("--start-maximized")
         window_size = str(launch_settings.get("window_size", "") or "").strip()
         if window_size:
@@ -1243,6 +1329,7 @@ class PlaywrightCliEngine(BrowserEngine):
         extra_args = launch_settings.get("extra_args", [])
         if isinstance(extra_args, list):
             launch_args.extend([str(item).strip() for item in extra_args if str(item).strip()])
+        launch_args = _normalize_playwright_cli_launch_args(launch_args)
         cli_config = {
             "browser": {
                 "browserName": "chromium",
@@ -1275,8 +1362,9 @@ class PlaywrightCliEngine(BrowserEngine):
                 "about:blank",
                 "--persistent",
                 "--json",
-                "--headed",
             ]
+            if not bool(headless):
+                command.append("--headed")
             completed = subprocess.run(
                 command,
                 capture_output=True,
