@@ -84,14 +84,22 @@ class FakePlaywrightCliSession(PlaywrightCliBrowserSession):
             if "document.activeElement" in func_text:
                 return {"parsed": {"result": {"tag_name": "body", "text": page["text"], "id": "html-body", "class": "", "value": ""}}, "stdout": "", "stderr": "", "returncode": 0}
             if "element.scrollIntoView" in func_text and "MouseEvent" in func_text:
-                target = command[2] if len(command) > 2 else ""
+                selector_match = re.search(r"document\.querySelector\((.*?)\)", func_text)
+                target = ""
+                if selector_match:
+                    try:
+                        target = json.loads(selector_match.group(1))
+                    except Exception:
+                        target = ""
+                if not target and len(command) > 2:
+                    target = command[2]
                 self.clicked_targets.append(target)
                 replacement = self.next_click_page_by_tab.pop(active["tab_id"], None)
                 if isinstance(replacement, dict):
                     self.page_by_tab[active["tab_id"]].update(replacement)
                 return {"parsed": {"result": {"ok": True, "tag_name": "button", "id": target.strip("#"), "text": "clicked"}}}
-            if "element.scrollIntoView" in func_text and "InputEvent" in func_text:
-                match = re.search(r"const value = (.*?);", func_text)
+            if "element.scrollIntoView" in func_text and "Event('input'" in func_text:
+                match = re.search(r"const value\s*=\s*(.*?);", func_text)
                 value = ""
                 if match:
                     try:

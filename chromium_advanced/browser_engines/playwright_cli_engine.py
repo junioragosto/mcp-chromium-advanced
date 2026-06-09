@@ -567,24 +567,20 @@ class PlaywrightCliBrowserSession(BrowserSession):
         return bool(normalized_target) and not SNAPSHOT_REF_PATTERN.match(normalized_target)
 
     def _fast_dom_click(self, target: str, *, double_click: bool = False) -> Dict[str, Any]:
-        result = self._eval_on_target(
-            target,
-            """
-(element) => {
-  const visible = !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
-  const disabled = !!element.disabled || element.getAttribute('aria-disabled') === 'true';
-  if (!visible) return {ok: false, reason: 'target_not_visible'};
-  if (disabled) return {ok: false, reason: 'target_disabled'};
-  element.scrollIntoView({block: 'center', inline: 'center'});
-  if (typeof element.click === 'function' && !%DOUBLE_CLICK%) {
-    element.click();
-  } else {
-    const eventName = %DOUBLE_CLICK% ? 'dblclick' : 'click';
-    element.dispatchEvent(new MouseEvent(eventName, {bubbles: true, cancelable: true, view: window}));
-  }
-  return {ok: true, tag_name: (element.tagName || '').toLowerCase(), id: element.id || '', text: (element.innerText || element.textContent || '').trim().slice(0, 200)};
-}
-""".replace("%DOUBLE_CLICK%", "true" if double_click else "false"),
+        result = self._eval_json(
+            (
+                "() => { const element=document.querySelector(%SELECTOR%);"
+                " if(!element) return {ok:false,reason:'target_not_found'};"
+                " const visible=!!(element.offsetWidth||element.offsetHeight||element.getClientRects().length);"
+                " const disabled=!!element.disabled||element.getAttribute('aria-disabled')==='true';"
+                " if(!visible) return {ok:false,reason:'target_not_visible'};"
+                " if(disabled) return {ok:false,reason:'target_disabled'};"
+                " element.scrollIntoView({block:'center',inline:'center'});"
+                " const dbl=%DOUBLE_CLICK%;"
+                " if(typeof element.click==='function'&&!dbl){element.click();}"
+                " else {element.dispatchEvent(new MouseEvent(dbl?'dblclick':'click',{bubbles:true,cancelable:true,view:window}));}"
+                " return {ok:true,tag_name:(element.tagName||'').toLowerCase(),id:element.id||'',text:(element.innerText||element.textContent||'').trim().slice(0,200)}; }"
+            ).replace("%SELECTOR%", json.dumps(str(target))).replace("%DOUBLE_CLICK%", "true" if double_click else "false"),
         )
         if not isinstance(result, dict) or not result.get("ok"):
             reason = result.get("reason") if isinstance(result, dict) else "fast_dom_click_failed"
@@ -592,32 +588,24 @@ class PlaywrightCliBrowserSession(BrowserSession):
         return result
 
     def _fast_dom_fill(self, target: str, text: str, *, submit: bool = False) -> Dict[str, Any]:
-        result = self._eval_on_target(
-            target,
-            """
-(element) => {
-  const value = %TEXT%;
-  const visible = !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
-  const disabled = !!element.disabled || element.getAttribute('aria-disabled') === 'true';
-  if (!visible) return {ok: false, reason: 'target_not_visible'};
-  if (disabled || element.readOnly) return {ok: false, reason: 'target_disabled'};
-  element.scrollIntoView({block: 'center', inline: 'center'});
-  element.focus();
-  if ('value' in element) {
-    element.value = value;
-  } else {
-    element.textContent = value;
-  }
-  element.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: value}));
-  element.dispatchEvent(new Event('change', {bubbles: true}));
-  if (%SUBMIT%) {
-    const form = element.form || element.closest('form');
-    if (form && typeof form.requestSubmit === 'function') form.requestSubmit();
-    else element.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
-  }
-  return {ok: true, value: 'value' in element ? String(element.value || '') : String(element.textContent || '')};
-}
-""".replace("%TEXT%", json.dumps(str(text))).replace("%SUBMIT%", "true" if submit else "false"),
+        result = self._eval_json(
+            (
+                "() => { const element=document.querySelector(%SELECTOR%);"
+                " if(!element) return {ok:false,reason:'target_not_found'};"
+                " const value=%TEXT%;"
+                " const visible=!!(element.offsetWidth||element.offsetHeight||element.getClientRects().length);"
+                " const disabled=!!element.disabled||element.getAttribute('aria-disabled')==='true';"
+                " if(!visible) return {ok:false,reason:'target_not_visible'};"
+                " if(disabled||element.readOnly) return {ok:false,reason:'target_disabled'};"
+                " element.scrollIntoView({block:'center',inline:'center'}); element.focus();"
+                " if('value' in element){element.value=value;} else {element.textContent=value;}"
+                " element.dispatchEvent(new Event('input',{bubbles:true}));"
+                " element.dispatchEvent(new Event('change',{bubbles:true}));"
+                " if(%SUBMIT%){const form=element.form||element.closest('form');"
+                " if(form&&typeof form.requestSubmit==='function') form.requestSubmit();"
+                " else element.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));}"
+                " return {ok:true,value:'value' in element?String(element.value||''):String(element.textContent||'')}; }"
+            ).replace("%SELECTOR%", json.dumps(str(target))).replace("%TEXT%", json.dumps(str(text))).replace("%SUBMIT%", "true" if submit else "false"),
         )
         if not isinstance(result, dict) or not result.get("ok"):
             reason = result.get("reason") if isinstance(result, dict) else "fast_dom_fill_failed"
