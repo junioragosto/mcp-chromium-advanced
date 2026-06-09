@@ -1374,6 +1374,138 @@ $items | ConvertTo-Json -Compress
     return matches
 
 
+def get_chromium_processes_for_profile(config: Dict, profile_name: str) -> List[Dict]:
+    normalized = normalize_config(config)
+    paths = normalized.get("paths", {})
+    chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
+    user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
+    if not chromium_binary or not user_data_root or not profile_name:
+        return []
+
+    chromium_root = os.path.dirname(chromium_binary)
+    binary_norm = normalize_fs_path(chromium_binary)
+    root_norm = normalize_fs_path(chromium_root)
+    user_data_norm = normalize_fs_path(user_data_root)
+    profile_arg = f"--profile-directory={profile_name}".lower()
+
+    matches: List[Dict] = []
+    for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+        try:
+            if proc.info.get("pid") == os.getpid():
+                continue
+
+            cmdline = [str(item or "") for item in (proc.info.get("cmdline") or [])]
+            candidates = []
+            if proc.info.get("exe"):
+                candidates.append(proc.info["exe"])
+            if cmdline:
+                candidates.append(cmdline[0])
+
+            binary_matched = False
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                candidate_norm = normalize_fs_path(candidate)
+                if candidate_norm == binary_norm:
+                    binary_matched = True
+                    break
+                try:
+                    common = os.path.commonpath([candidate_norm, root_norm])
+                except ValueError:
+                    common = ""
+                if common == root_norm:
+                    binary_matched = True
+                    break
+
+            if not binary_matched:
+                continue
+
+            joined = " ".join(cmdline)
+            joined_norm = joined.replace("/", os.sep).replace("\\", os.sep).lower()
+            joined_lower = joined.lower()
+            if user_data_norm.lower() not in joined_norm:
+                continue
+            if profile_arg not in joined_lower and profile_name.lower() not in joined_lower:
+                continue
+
+            matches.append(
+                {
+                    "pid": proc.info.get("pid"),
+                    "name": proc.info.get("name", ""),
+                    "path": proc.info.get("exe", "") or (cmdline[0] if cmdline else ""),
+                    "cmdline": cmdline,
+                }
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    return matches
+
+
+def terminate_chromium_processes(processes: Sequence[Dict], logger: Optional[Callable[[str], None]] = None) -> int:
+    pids = []
+    for item in processes or []:
+        try:
+            pid = int(item.get("pid") or 0)
+        except Exception:
+            pid = 0
+        if pid > 0 and pid not in pids:
+            pids.append(pid)
+
+    terminated = 0
+    for pid in pids:
+        try:
+            proc = psutil.Process(pid)
+            children = proc.children(recursive=True)
+            for child in children:
+                try:
+                    child.kill()
+                    terminated += 1
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            proc.kill()
+            terminated += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    if terminated:
+        log_message(logger, f"cleaned up {terminated} owned chromium process(es)")
+    return terminated
+
+
+def cleanup_keepalive_profile_processes(
+    config: Dict,
+    profile_name: str,
+    before_pids: Optional[Sequence[int]] = None,
+    logger: Optional[Callable[[str], None]] = None,
+) -> int:
+    before = {int(pid) for pid in (before_pids or []) if str(pid).isdigit()}
+    matches = []
+    for item in get_chromium_processes_for_profile(config, profile_name):
+        try:
+            pid = int(item.get("pid") or 0)
+        except Exception:
+            pid = 0
+        if pid and pid not in before:
+            matches.append(item)
+    return terminate_chromium_processes(matches, logger=logger)
+
+
+def is_browser_closed_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    markers = (
+        "invalid session id",
+        "chrome not reachable",
+        "disconnected",
+        "target window already closed",
+        "no such window",
+        "web view not found",
+        "session deleted",
+        "connection refused",
+    )
+    return any(marker in text for marker in markers)
+
+
 class SingleRunLock:
     def __init__(self, lock_path: str, stale_seconds: int = 12 * 60 * 60):
         self.lock_path = lock_path
@@ -2231,6 +2363,11 @@ def run_profile_keepalive(
     failed_sites = []
     disabled_sites = []
     soft_sites = []
+    before_pids = [
+        int(item.get("pid") or 0)
+        for item in get_chromium_processes_for_profile(config, profile_name)
+        if int(item.get("pid") or 0) > 0
+    ]
 
     try:
         if stop_controller:
@@ -2284,6 +2421,8 @@ def run_profile_keepalive(
             except Exception as exc:
                 if stop_controller and stop_controller.should_stop():
                     raise KeepAliveStoppedError("keepalive stopped by user") from exc
+                if is_browser_closed_error(exc):
+                    raise KeepAliveStoppedError("keepalive browser closed unexpectedly") from exc
                 failed_sites.append(site_name)
                 site_results[site_name] = {"status": "failed", "message": str(exc)}
                 log_message(logger, f"{profile_name}: {site_name} failed: {exc}")
@@ -2316,6 +2455,7 @@ def run_profile_keepalive(
                 driver.quit()
             except Exception:
                 pass
+        cleanup_keepalive_profile_processes(config, profile_name, before_pids=before_pids, logger=logger)
 
 
 def run_keepalive_job(
