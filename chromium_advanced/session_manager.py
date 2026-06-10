@@ -12,12 +12,15 @@ from chromium_advanced.browser_engines.factory import create_browser_engine, res
 from chromium_advanced.chromium_profile_lib import (
     ensure_profile_bookmarks_initialized,
     find_running_chromium_processes,
+    get_chromium_processes_for_profile,
     get_lock_path,
     get_mirror_lock_path,
+    get_profile_runtime_lock_path,
     load_app_config,
     normalize_config,
     normalize_fs_path,
     now_text,
+    SingleRunLock,
 )
 from chromium_advanced.mirror_manager import MirrorManager
 
@@ -34,6 +37,7 @@ class SessionRecord:
     runtime_root: str
     mirror_generated_at: str
     cleanup_runtime_on_close: bool
+    profile_lock: object = None
 
     def to_summary(self) -> Dict:
         summary = self.browser_session.get_summary()
@@ -99,7 +103,7 @@ class SessionManager:
         return [session for session in self._sessions_by_id.values() if session.runtime_mode == "live_root"]
 
     def _isolated_sessions_locked(self) -> List[SessionRecord]:
-        return [session for session in self._sessions_by_id.values() if session.runtime_mode == "mirror_isolated"]
+        return []
 
     def _get_external_busy_details(self, config: Optional[Dict] = None) -> Dict:
         config = normalize_config(config or self._load_config())
@@ -159,7 +163,7 @@ class SessionManager:
             sessions = profile_sessions.get(profile_name, [])
             active_summary = sessions[0].to_summary() if sessions else {}
             live_session_count = sum(1 for session in sessions if session.runtime_mode == "live_root")
-            isolated_session_count = sum(1 for session in sessions if session.runtime_mode == "mirror_isolated")
+            isolated_session_count = 0
             mirror_validation = manager.validate_profile_snapshot(profile_name)
             results.append(
                 {
@@ -209,7 +213,7 @@ class SessionManager:
 
     def get_server_status(self) -> Dict:
         config = normalize_config(self._load_config())
-        concurrency_mode = str(config.get("app", {}).get("concurrency_mode", "block") or "block")
+        concurrency_mode = str(config.get("app", {}).get("concurrency_mode", "per_profile_live") or "per_profile_live")
         default_engine_name = resolve_browser_engine_name(config)
         with self._lock:
             self._purge_dead_sessions_locked()
@@ -255,31 +259,27 @@ class SessionManager:
             return {
                 **base,
                 "state": "mirroring",
-                "busy": True,
-                "accepting_new_sessions": False,
-                "message": "mirror snapshot job is running",
+                "busy": False,
+                "accepting_new_sessions": True,
+                "message": "mirror snapshot job is running in background",
             }
 
         if keepalive_lock_active:
             return {
                 **base,
                 "state": "keepalive_running",
-                "busy": True,
-                "accepting_new_sessions": False,
-                "message": "keepalive job is running",
+                "busy": False,
+                "accepting_new_sessions": True,
+                "message": "keepalive scheduler is running; per-profile locks still apply",
             }
 
         if live_sessions:
-            owner = live_sessions[0]
             return {
                 **base,
-                "state": "occupied",
-                "busy": True,
-                "accepting_new_sessions": False,
-                "owner_profile_name": owner.get("profile_name", ""),
-                "owner_session_id": owner.get("session_id", ""),
-                "started_at": owner.get("created_at", 0),
-                "message": f"profile is in use: {owner.get('profile_name', '')}",
+                "state": "active_sessions",
+                "busy": False,
+                "accepting_new_sessions": True,
+                "message": f"{len(live_sessions)} active per-profile session(s)",
             }
 
         if isolated_sessions:
@@ -295,12 +295,9 @@ class SessionManager:
             return {
                 **base,
                 "state": "external_chromium_running",
-                "busy": concurrency_mode == "block",
-                "accepting_new_sessions": concurrency_mode == "mirror_isolated",
-                "message": (
-                    f"chromium is already running ({len(running_processes)} process(es)); "
-                    + ("mirror-isolated sessions may still start" if concurrency_mode == "mirror_isolated" else "startup blocked")
-                ),
+                "busy": False,
+                "accepting_new_sessions": True,
+                "message": f"chromium is running on {len(running_processes)} process(es); profile-level gating applies",
             }
 
         return {
@@ -322,50 +319,32 @@ class SessionManager:
             raise ValueError(f"profile not found: {profile_name}")
 
         status = self.get_server_status()
-        manager = self._mirror_manager(config)
-        mirror_validation = manager.validate_profile_snapshot(profile_name)
-        concurrency_mode = str(config.get("app", {}).get("concurrency_mode", "block") or "block")
+        profile_lock_path = get_profile_runtime_lock_path(config, profile_name)
+        profile_lock_active = bool(profile_lock_path and os.path.exists(profile_lock_path))
+        profile_processes = get_chromium_processes_for_profile(config, profile_name)
 
         with self._lock:
             self._purge_dead_sessions_locked()
             profile_sessions = self._sessions_for_profile_locked(profile_name)
             reusable_session = self._reuse_candidate_locked(profile_name, resolved_engine_name)
-            any_active_sessions = bool(self._sessions_by_id)
-
-        same_profile_parallel_supported = bool(
-            concurrency_mode == "mirror_isolated"
-            and config.get("mirror", {}).get("enabled", False)
-            and mirror_validation.get("available")
-        )
+        same_profile_parallel_supported = False
         start_mode = "live_root"
         allowed = False
         reason = ""
 
-        if status.get("state") in {"starting", "keepalive_running", "mirroring"}:
+        if status.get("state") == "starting":
             reason = str(status.get("message", "") or "browser service is busy")
-        elif concurrency_mode == "mirror_isolated" and mirror_validation.get("available"):
-            allowed = True
-            start_mode = "mirror_isolated"
-            reason = "mirror snapshot available"
-        elif concurrency_mode == "mirror_isolated" and not mirror_validation.get("available"):
-            if any_active_sessions:
-                reason = "mirror snapshot unavailable while other sessions are active"
-            elif status.get("state") == "external_chromium_running":
-                reason = "mirror snapshot unavailable and live root is blocked by external chromium"
-            else:
-                allowed = True
-                start_mode = "live_root"
-                reason = "mirror snapshot unavailable; falling back to live root"
-        elif any_active_sessions:
-            if reusable_session:
-                reason = "profile already has a reusable session"
-            else:
-                reason = "another browser session is already active"
-        elif status.get("state") == "external_chromium_running":
-            reason = str(status.get("message", "") or "chromium is already running")
+        elif reusable_session:
+            reason = "profile already has a reusable session"
+        elif profile_sessions:
+            reason = "profile is already in use by another MCP session"
+        elif profile_lock_active:
+            reason = "profile runtime lock is already held"
+        elif profile_processes:
+            reason = "profile chromium is already running"
         else:
             allowed = True
-            reason = "service is idle"
+            reason = "profile is available"
 
         return {
             "allowed": bool(allowed),
@@ -378,8 +357,10 @@ class SessionManager:
             "reason": reason,
             "same_profile_parallel_supported": same_profile_parallel_supported,
             "active_profile_session_count": len(profile_sessions),
-            "mirror_available": bool(mirror_validation.get("available")),
-            "mirror_generated_at": mirror_validation.get("generated_at", ""),
+            "profile_lock_active": profile_lock_active,
+            "external_profile_process_count": len(profile_processes),
+            "mirror_available": False,
+            "mirror_generated_at": "",
         }
 
     def start_session(self, profile_name: str, reuse_existing: bool = False, engine_name: str = "") -> Dict:
@@ -414,25 +395,20 @@ class SessionManager:
         mirror_generated_at = ""
         runtime_mode = str(preflight.get("start_mode", "live_root") or "live_root")
         cleanup_runtime_on_close = False
+        profile_lock = SingleRunLock(get_profile_runtime_lock_path(config, profile_name))
         try:
+            if not profile_lock.try_acquire():
+                raise RuntimeError(f"profile runtime lock is already held: {profile_name}")
             print(
                 f"[{now_text()}] [SESSION] start_session begin: profile={profile_name} engine={resolved_engine_name} mode={runtime_mode}",
                 flush=True,
             )
             config_for_launch = copy.deepcopy(config)
-            if runtime_mode == "mirror_isolated":
-                mirror_manager = self._mirror_manager(config)
-                runtime_info = mirror_manager.materialize_runtime(profile_name)
-                runtime_root = runtime_info.runtime_root
-                mirror_generated_at = runtime_info.profile_snapshot_generated_at or runtime_info.root_snapshot_generated_at
-                cleanup_runtime_on_close = bool(config.get("mirror", {}).get("cleanup_on_session_close", True))
-                config_for_launch["paths"]["user_data_root"] = runtime_root
-            else:
-                ensure_profile_bookmarks_initialized(config_for_launch, profile_name)
-                print(
-                    f"[{now_text()}] [SESSION] bookmarks ready: profile={profile_name}",
-                    flush=True,
-                )
+            ensure_profile_bookmarks_initialized(config_for_launch, profile_name)
+            print(
+                f"[{now_text()}] [SESSION] bookmarks ready: profile={profile_name}",
+                flush=True,
+            )
 
             engine = create_browser_engine(resolved_engine_name)
             print(
@@ -457,6 +433,7 @@ class SessionManager:
                 runtime_root=runtime_root,
                 mirror_generated_at=mirror_generated_at,
                 cleanup_runtime_on_close=cleanup_runtime_on_close,
+                profile_lock=profile_lock,
             )
             with self._lock:
                 self._sessions_by_id[session_id] = session
@@ -471,11 +448,7 @@ class SessionManager:
                 "reused": False,
             }
         except Exception:
-            if runtime_root:
-                try:
-                    self._mirror_manager(config).cleanup_runtime(runtime_root)
-                except Exception:
-                    pass
+            profile_lock.release()
             raise
         finally:
             with self._lock:
@@ -539,11 +512,9 @@ class SessionManager:
                 session.browser_session.close()
             except Exception:
                 pass
-        if session.runtime_mode == "mirror_isolated" and session.runtime_root:
-            self._terminate_runtime_processes(session.runtime_root)
-        if session.runtime_mode == "mirror_isolated" and session.cleanup_runtime_on_close and session.runtime_root:
+        if session.profile_lock is not None:
             try:
-                self._mirror_manager(self._load_config()).cleanup_runtime(session.runtime_root)
+                session.profile_lock.release()
             except Exception:
                 pass
 

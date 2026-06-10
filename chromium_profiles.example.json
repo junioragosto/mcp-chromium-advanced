@@ -3,8 +3,9 @@
   "paths": {
     "chromium_dir": "/absolute/path/to/chromium-or-chrome",
     "chromedriver_path": "/absolute/path/to/chromedriver",
-    "user_data_root": "/absolute/path/to/user-data",
-    "mirror_user_data_root": "/absolute/path/to/temp-user-data",
+    "user_data_root": "/absolute/path/to/legacy-shared-user-data",
+    "user_data_profiles_root": "/absolute/path/to/UserDataSplited",
+    "mirror_user_data_root": "/absolute/path/to/UserDataSplited/mirror_disk",
     "bookmarks_template_path": "/absolute/path/to/bookmarks_template.html",
     "fingerprint_zip_path": "/absolute/path/to/fingerprint-extension.zip"
   },
@@ -12,7 +13,7 @@
     "minimize_to_tray_on_close": true,
     "language": "en",
     "browser_engine": "selenium_uc",
-    "concurrency_mode": "block",
+    "concurrency_mode": "per_profile_live",
     "window_bounds": {
       "x": -1,
       "y": -1,
@@ -54,6 +55,7 @@
   "profiles": [
     {
       "profile_name": "Profile 1",
+      "user_data_dir_name": "UserDataProfile1",
       "account": "account-label@example.com",
       "keepalive_enabled": false,
       "keepalive_sites": {

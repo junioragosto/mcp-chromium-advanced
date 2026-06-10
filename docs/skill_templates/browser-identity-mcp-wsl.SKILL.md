@@ -39,7 +39,7 @@ Recommended engine-selection policy remains the same from WSL:
 - use `selenium_uc` for stealth-sensitive or higher anti-detection workflows
 - use `patchright` for richer structured diagnostics and complex frontend inspection
 
-Changing the GUI default engine still affects only future sessions. Existing sessions keep their original engine, and same-profile multi-engine starts in `mirror_isolated` mode create separate isolated runtimes rather than mutating a live session in place.
+Changing the GUI default engine still affects only future sessions. Existing sessions keep their original engine, and same-profile multi-engine starts are blocked rather than mutating a live session in place.
 
 For `playwright_cli`, the Windows runtime sanitizes upstream Chromium launch args so `AutomationControlled` is not injected through a real `--disable-blink-features` switch. Visible MCP sessions normally honor `mcp.start_minimized=true` so they stay in the taskbar instead of stealing focus while still allowing the user to click in and take over. Do not enable `mcp.headless=true` just to reduce desktop interference; use headless only when the user explicitly asks for headless/regression/background validation.
 
@@ -79,4 +79,4 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - The Windows MCP server publishes standard tool annotations, treating normal profile/session operations, navigation, tab operations, browser actions, screenshots, diagnostics, and cleanup as trusted low-risk. Arbitrary JavaScript remains non-read-only. Use those hints when the WSL-side client supports trusted/read-only execution, but do not bypass identity or occupancy checks.
 - Treat partial `playwright_cli` diagnostics with `diagnostic_errors` as useful signal. The runtime intentionally bounds heavy console/network calls, classifies common noise, and avoids long MCP worker stalls.
 - `playwright_cli` simple selector click/fill actions may use the fast DOM eval path before native CLI fallback. This is expected and should be treated as the high-performance path.
-- If the Windows side reports `external_chromium_running`, do not assume it is always a hard block. In `mirror_isolated` mode, first inspect whether `accepting_new_sessions=true` and whether the preflight allows a snapshot-backed start.
+- If the Windows side reports `external_chromium_running`, do not assume the entire service is blocked. Check whether the target profile itself is the one that is occupied.

@@ -38,7 +38,7 @@ class FakeEngine:
         return FakeBrowserSession()
 
 
-class SessionManagerMirrorTests(unittest.TestCase):
+class SessionManagerPerProfileTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="session-manager-mirror-")
         self.user_data_root = f"{self.temp_dir}/user-data"
@@ -69,30 +69,26 @@ class SessionManagerMirrorTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_same_profile_parallel_snapshot_sessions_are_allowed(self):
+    def test_same_profile_parallel_session_is_blocked(self):
         engine = FakeEngine()
         manager = SessionManager()
         with mock.patch.object(manager, "_load_config", return_value=self.config):
             with mock.patch("chromium_advanced.session_manager.create_browser_engine", return_value=engine):
                 first = manager.start_session("Profile 4", engine_name="playwright_cli")
-                second = manager.start_session("Profile 4", engine_name="playwright_cli")
                 status = manager.get_server_status()
                 preflight = manager.can_start_session("Profile 4", engine_name="playwright_cli")
+                with self.assertRaises(RuntimeError):
+                    manager.start_session("Profile 4", engine_name="playwright_cli")
 
-        self.assertEqual(first["runtime_mode"], "mirror_isolated")
-        self.assertEqual(second["runtime_mode"], "mirror_isolated")
-        self.assertNotEqual(first["runtime_root"], second["runtime_root"])
-        self.assertEqual(status["state"], "isolated_runtime_active")
+        self.assertEqual(first["runtime_mode"], "live_root")
+        self.assertEqual(status["state"], "active_sessions")
         self.assertFalse(status["busy"])
-        self.assertTrue(preflight["allowed"])
-        self.assertTrue(preflight["same_profile_parallel_supported"])
-        self.assertEqual(len(manager.list_sessions()), 2)
+        self.assertFalse(preflight["allowed"])
+        self.assertFalse(preflight["same_profile_parallel_supported"])
+        self.assertEqual(len(manager.list_sessions()), 1)
 
-        runtime_roots = [session["runtime_root"] for session in manager.list_sessions()]
         close_all = manager.close_all()
-        self.assertEqual(close_all["closed_count"], 2)
-        for runtime_root in runtime_roots:
-            self.assertFalse(os.path.exists(runtime_root))
+        self.assertEqual(close_all["closed_count"], 1)
 
     def test_mirror_mode_falls_back_to_live_root_when_snapshot_missing(self):
         engine = FakeEngine()
@@ -109,12 +105,11 @@ class SessionManagerMirrorTests(unittest.TestCase):
         self.assertEqual(result["runtime_mode"], "live_root")
         manager.close_all()
 
-    def test_dead_isolated_session_is_closed_before_purge(self):
+    def test_dead_session_is_closed_before_purge(self):
         manager = SessionManager()
         browser_session = FakeBrowserSession()
         browser_session.alive = False
-        runtime_root = os.path.join(self.mirror_root, "runtime", "profile-4-dead")
-        os.makedirs(runtime_root, exist_ok=True)
+        lock = mock.Mock()
         record = SessionRecord(
             session_id="session-dead",
             profile_name="Profile 4",
@@ -122,20 +117,19 @@ class SessionManagerMirrorTests(unittest.TestCase):
             created_at=1.0,
             last_used_at=1.0,
             browser_session=browser_session,
-            runtime_mode="mirror_isolated",
-            runtime_root=runtime_root,
+            runtime_mode="live_root",
+            runtime_root="",
             mirror_generated_at="",
             cleanup_runtime_on_close=True,
+            profile_lock=lock,
         )
         manager._sessions_by_id[record.session_id] = record
         manager._session_ids_by_profile.setdefault(record.profile_name, []).append(record.session_id)
 
         with mock.patch.object(manager, "_load_config", return_value=self.config):
-            with mock.patch.object(manager, "_terminate_runtime_processes") as terminate_runtime:
-                with self.assertRaises(RuntimeError):
-                    manager.get_session(record.session_id)
+            with self.assertRaises(RuntimeError):
+                manager.get_session(record.session_id)
 
         self.assertEqual(browser_session.close_count, 1)
-        terminate_runtime.assert_called_once_with(runtime_root)
+        lock.release.assert_called_once()
         self.assertNotIn(record.session_id, manager._sessions_by_id)
-        self.assertFalse(os.path.exists(runtime_root))

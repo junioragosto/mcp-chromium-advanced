@@ -8,7 +8,12 @@ import time
 from typing import Any, Dict
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
-from chromium_advanced.chromium_profile_lib import now_text, resolve_mcp_headless, resolve_mcp_start_minimized
+from chromium_advanced.chromium_profile_lib import (
+    get_profile_user_data_root,
+    now_text,
+    resolve_mcp_headless,
+    resolve_mcp_start_minimized,
+)
 
 
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
@@ -1660,11 +1665,11 @@ class PatchrightEngine(BrowserEngine):
         headless = resolve_mcp_headless(config)
         start_minimized = resolve_mcp_start_minimized(config)
         chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
-        user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
+        user_data_root = get_profile_user_data_root(config, profile_name)
         if not chromium_binary or not os.path.exists(chromium_binary):
             raise FileNotFoundError(f"chromium browser not found: {chromium_binary or paths.get('chromium_dir', '')}")
         if not os.path.isdir(user_data_root):
-            raise FileNotFoundError(f"UserData root not found: {user_data_root}")
+            raise FileNotFoundError(f"Profile UserData root not found: {user_data_root}")
         print(
             (
                 f"[{now_text()}] [PATCHRIGHT] create_session begin: "

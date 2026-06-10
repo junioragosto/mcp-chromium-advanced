@@ -91,11 +91,16 @@ class RuntimeIntegrationTests(unittest.TestCase):
             "app": {"browser_engine": "playwright_cli"},
             "mcp": {"headless": True},
         }
-        runtime_root = tempfile.mkdtemp(prefix="mcp-runtime-profile-")
+        split_root = tempfile.mkdtemp(prefix="mcp-runtime-profile-")
         profile_name = "Profile 1"
+        user_data_dir_name = "UserDataProfile1"
+        runtime_root = os.path.join(split_root, user_data_dir_name)
         os.makedirs(os.path.join(runtime_root, profile_name), exist_ok=True)
-        config["paths"]["user_data_root"] = runtime_root
-        return config, runtime_root, profile_name
+        config["paths"]["user_data_root"] = split_root
+        config["paths"]["user_data_profiles_root"] = split_root
+        config["paths"]["mirror_user_data_root"] = os.path.join(split_root, "mirror_disk")
+        config["profiles"] = [{"profile_name": profile_name, "user_data_dir_name": user_data_dir_name}]
+        return config, split_root, profile_name
 
     def _run_runtime_flow(self, engine_name: str):
         config, runtime_root, profile_name = self._build_config()
@@ -151,9 +156,8 @@ class RuntimeIntegrationTests(unittest.TestCase):
     def test_playwright_cli_runtime_flow(self):
         self._run_runtime_flow("playwright_cli")
 
-    def test_playwright_cli_mirror_isolated_session_manager_flow(self):
+    def test_playwright_cli_per_profile_live_session_manager_flow(self):
         config, runtime_root, profile_name = self._build_config()
-        config["profiles"] = [{"profile_name": profile_name}]
         config["app"]["concurrency_mode"] = "mirror_isolated"
         config["mirror"] = {
             "enabled": True,
@@ -169,7 +173,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             MirrorManager(config).refresh_snapshots(profile_names=[profile_name])
             with mock.patch.object(manager, "_load_config", return_value=config):
                 session_info = manager.start_session(profile_name=profile_name, engine_name="playwright_cli")
-                self.assertEqual(session_info["runtime_mode"], "mirror_isolated")
+                self.assertEqual(session_info["runtime_mode"], "live_root")
                 session = manager.resolve_session(session_info["session_id"])
                 url = f"http://127.0.0.1:{self.port}/index.html"
                 nav = session.navigate(url)
@@ -183,10 +187,9 @@ class RuntimeIntegrationTests(unittest.TestCase):
                 page_text = session.get_page_text()
                 self.assertIn("Submitted: Mirror", page_text.get("text", ""))
                 runtime_root_path = session_info["runtime_root"]
-                self.assertTrue(os.path.isdir(runtime_root_path))
+                self.assertEqual(runtime_root_path, "")
             close_result = manager.close_session(session_info["session_id"])
             self.assertTrue(close_result.get("closed"))
-            self.assertFalse(os.path.exists(runtime_root_path))
         finally:
             with contextlib.suppress(Exception):
                 if session_info is not None:

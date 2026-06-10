@@ -146,7 +146,7 @@ Important engine-switching boundary:
 - changing the GUI default engine affects only future sessions
 - an already running session keeps the engine it started with
 - `reuse_existing=true` should only be used when the caller wants the same profile and the same engine session
-- in `mirror_isolated` mode, starting the same profile with a different engine creates a separate isolated runtime rather than hot-switching the existing session
+- starting the same profile with a different engine still does not hot-switch the existing session in place
 
 ## Chromium-Specific Notes
 
@@ -157,10 +157,10 @@ Important engine-switching boundary:
 - A first request to `/mcp` may lazily start the worker; this is normal.
 - If `get_server_status` reports `starting`, `keepalive_running`, or `mirroring`, do not force a new browser session.
 - If `get_server_status` reports `occupied`, treat that as the live-root path being occupied. Do not steal it.
-- If `get_server_status` reports `external_chromium_running`, check whether the service also reports `accepting_new_sessions=true`; in `mirror_isolated` mode that can still be a valid snapshot-backed start path.
+- If `get_server_status` reports `external_chromium_running`, treat it as a profile-scoped signal, not an automatic full-service outage.
 - If `external_chromium_running` is reported, the practical meaning is usually that the configured Chromium binary root is already open outside MCP, so governance is blocking startup before the engine is even created.
 - If the same profile is already occupied on a live-root session, prefer surfacing that state first. Reuse should be explicit, not implicit.
-- If `can_start_profile_session(profile_name)` reports `same_profile_parallel_supported=true` and `start_mode="mirror_isolated"`, that means the service supports same-profile parallel work by extracting isolated runtime clones from a mirror snapshot. Treat that as safe parallelism, not as live profile sharing.
+- If `can_start_profile_session(profile_name)` reports `allowed=false` for the same profile, do not try to force parallel reuse. Same-profile concurrency is intentionally blocked.
 - For multi-tab tasks, do not assume a newly opened tab became the effective action target unless you explicitly activated it or the tool says it was activated.
 - When diagnosing broken pages, prefer the MCP debug tools over manual screenshots of DevTools whenever possible.
 - The managed runtime now exposes `session_health.recovery_actions` and `resolution_trace`; use them to decide whether to retry directly, refresh candidate search, or recreate the session.
@@ -177,7 +177,7 @@ Important engine-switching boundary:
 - When a `playwright_cli` session closes, the manager should release the named session and clean owned daemon/browser processes; startup also prunes stale temp dirs that are not referenced by live processes. If a browser window remains, treat it as an orphan-process bug and inspect the runtime root/session name.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.
-- `playwright_cli` is a supported parallel engine. In `mirror_isolated` mode it still obeys the same governance rules, but its runtime may be launched from an extracted snapshot clone instead of the live profile root.
+- `playwright_cli` is the default high-throughput engine for the per-profile live runtime. It still obeys the same profile-occupancy rules as the other engines.
 
 ## Example User Wording
 

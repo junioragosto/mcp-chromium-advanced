@@ -199,6 +199,29 @@ class KeepaliveGuiContractTests(unittest.TestCase):
         self.assertFalse(window.btn_plugin_delete.isEnabled())
         self.assertTrue(window.plugin_source_editor.isReadOnly())
 
+    def test_resolve_keepalive_target_profiles_expands_enabled_profiles_for_all(self):
+        window = self.make_window()
+        window.config = normalize_config(
+            {
+                "profiles": [
+                    {"profile_name": "Profile 1", "keepalive_enabled": True},
+                    {"profile_name": "Profile 2", "keepalive_enabled": False},
+                    {"profile_name": "Profile 3", "keepalive_enabled": True},
+                ]
+            }
+        )
+        self.assertEqual(window.resolve_keepalive_target_profiles([]), ["Profile 1", "Profile 3"])
+
+    def test_profile_keepalive_ui_lock_only_applies_to_targeted_profiles(self):
+        window = self.make_window()
+        window.keepalive_worker = mock.Mock()
+        window.keepalive_target_profiles = ["Profile 1", "Profile 3"]
+        window.keepalive_running_profile_name = "Profile 1"
+
+        self.assertTrue(window.is_profile_keepalive_ui_locked("Profile 1"))
+        self.assertTrue(window.is_profile_keepalive_ui_locked("Profile 3"))
+        self.assertFalse(window.is_profile_keepalive_ui_locked("Profile 2"))
+
     def test_unknown_false_site_is_not_exposed_in_registry(self):
         config = normalize_config(
             {

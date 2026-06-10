@@ -88,7 +88,7 @@ There are two ways to choose an engine:
 Recommended practical policy:
 
 - `playwright_cli`
-  Default choice for normal MCP work. Fast startup, lower interaction overhead, and good fit for `mirror_isolated` parallel sessions.
+  Default choice for normal MCP work. Fast startup, lower interaction overhead, and the best fit for the new per-profile live concurrency model.
 - `selenium_uc`
   Preferred for stealth-sensitive sites or workflows where avoiding automation detection matters more than raw throughput.
 - `patchright`
@@ -99,7 +99,7 @@ Important switching rule:
 - Changing the GUI default engine affects only future sessions.
 - Existing sessions keep the engine they were started with.
 - `reuse_existing=true` only reuses a compatible session for the same profile and the same engine.
-- In `mirror_isolated` mode, starting a new session with a different engine creates a new isolated runtime; it does not hot-switch an existing session in place.
+- Starting a new session with a different engine never hot-switches an existing session in place. Existing sessions keep their original engine.
 
 ## Requirements
 
@@ -175,9 +175,11 @@ Important fields:
 - `paths.chromedriver_path`
   Path to `chromedriver`, or a directory containing it
 - `paths.user_data_root`
-  Root directory that stores all persistent browser profiles
+  Legacy shared-root path kept for migration compatibility
+- `paths.user_data_profiles_root`
+  Split root that stores one dedicated UserData root per profile, for example `UserDataProfile1/Profile 1`
 - `paths.mirror_user_data_root`
-  Root directory used for mirror snapshots and extracted isolated runtime clones
+  Backup snapshot path. Runtime no longer depends on extracted mirror clones for normal MCP startup
 - `paths.bookmarks_template_path`
   Optional bookmark template used when initializing profiles
 - `paths.fingerprint_zip_path`
@@ -187,27 +189,37 @@ Important fields:
 - `app.browser_engine`
   Default browser execution backend, currently `selenium_uc`, `patchright`, or `playwright_cli`
 - `app.concurrency_mode`
-  Session governance mode: `block` keeps the historical single-live-root rule, while `mirror_isolated` allows parallel sessions by starting from mirror snapshots when available
+  Session governance mode. `per_profile_live` is the current default and allows different profiles to run concurrently while keeping the same profile exclusive
 - `launch.*`
   Browser launch defaults used by the built-in Python launcher, such as `new_window`, `start_maximized`, `load_fingerprint_extension`, `check_url`, and `extra_args`
 - `mcp.host`, `mcp.port`, `mcp.worker_port`, `mcp.path`
   Network settings for the daemon and worker
 
-### Mirror-isolated concurrency
+### Per-profile live concurrency
 
-The project now supports an optional snapshot-based concurrency model for real-profile work:
+The runtime now uses one dedicated UserData root per logical profile.
 
+- `per_profile_live`
+  Current default. Different profiles can run concurrently, but the same profile remains exclusive across GUI launch, keepalive, and MCP.
 - `block`
-  Historical behavior. Any live Chromium root usage blocks new sessions.
-- `mirror_isolated`
-  The SessionManager prefers launching from a mirror snapshot stored under `paths.mirror_user_data_root`, so concurrent work can run against extracted runtime clones instead of the live `user_data_root`.
+  Optional conservative mode if you want historical single-session gating.
 
 Important rules:
 
-- Keepalive and mirror refresh remain exclusive operations.
-- Mirror snapshots are refreshed after keepalive completes successfully.
-- Same-profile parallelism means independent extracted runtime clones, not multiple engines sharing the same live profile directory at once.
-- If no valid mirror snapshot exists and no other browser session is active, startup falls back to the live root. If another session is already active, startup is blocked until a mirror is available.
+- Keepalive and mirror refresh are no longer global live-root operations; keepalive locks one profile at a time.
+- Mirror snapshots are now backup artifacts, not the primary normal-session startup path.
+- Same-profile parallelism is intentionally blocked.
+
+### Manual launch and close behavior
+
+The GUI `Launch` button is now a runtime toggle for the selected profile:
+
+- If that profile is not currently running, the button launches a visible Chromium window for that profile.
+- If Chromium for that profile is already running, the same button changes to `Close` and terminates only that profile's matching Chromium processes.
+- If the user closes the Chromium window manually, the GUI re-detects the real process state and automatically changes the button back to `Launch` once the profile has fully exited.
+- If the window is gone but a background Chromium process still remains, the GUI continues to show `Close` so operators can reclaim the leftover process explicitly.
+
+This behavior is profile-scoped. It does not terminate other profiles.
 
 ## MCP service
 
@@ -224,8 +236,7 @@ Operational notes:
 - The daemon is intended to stay stable while the worker is short-lived and lazily started.
 - A worker reclaimed because of `idle_timeout` is a normal managed lifecycle event, not a crash.
 - If the configured Chromium binary root already has live browser processes, session startup is intentionally blocked with states such as `external_chromium_running`.
-- That busy-state rule applies before engine startup when the session would touch the live root, including `playwright_cli`.
-- In `mirror_isolated` mode, `external_chromium_running` no longer blocks snapshot-backed starts if a valid mirror is available.
+- That busy-state rule is now enforced per profile root, including `playwright_cli`.
 - MCP tools publish standard tool annotations so clients can distinguish trusted local/browser operations from arbitrary script execution.
 - These annotations reduce unnecessary approval prompts in clients that honor MCP hints, but they do not bypass the client approval policy or this project's profile/busy-state governance.
 - Normal profile/session operations, navigation, tab operations, clicking, typing, key presses, mouse actions, screenshots, diagnostics, and cleanup are treated as trusted low-risk MCP operations for local real-profile workflows. `run_script` remains non-read-only because arbitrary JavaScript is the highest-risk browser action.
@@ -311,7 +322,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 ### Playwright CLI
 
 - Current preferred engine for normal MCP task execution on this machine when the GUI default is set to `playwright_cli`
-- Best fit for lower-overhead task execution and snapshot-backed parallel work in `mirror_isolated` mode
+- Best fit for lower-overhead task execution in the new per-profile live runtime
 - Native stealth is weaker than `selenium_uc`
 - Native inspection fidelity is weaker than `patchright`, but the managed runtime lifts it with fallbacks, diagnostics, and structured recovery metadata
 - Added as a third parallel engine under the same `SessionManager -> BrowserEngine factory` path
@@ -325,7 +336,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Honors `mcp.start_minimized=true` by default, so visible MCP browser sessions start minimized in the taskbar instead of stealing desktop focus while still allowing the user to click in and take over when needed
 - Keeps `mcp.headless=false` by default; headless mode is only for explicit user-requested regression or background validation, not the normal MCP browsing path
 - On session close, the runtime attempts to terminate owned `playwright-cli` daemon and Chromium processes and then cleans isolated runtime directories; startup also prunes stale empty or old `chromium-advanced-playwright-cli-*` temp directories that are not referenced by live processes
-- Shared-root concurrency still does not work: one real `user_data_root` can only back one live browser session at a time, so the existing busy-state governance remains mandatory
+- Shared-root runtime is now treated as a migration-only legacy layout. Normal operation should use `paths.user_data_profiles_root`
 - Keepalive is not routed through `playwright_cli` in this stage
 - Windows packaged GUI, daemon, and worker executables have been validated against the managed runtime path
 
@@ -356,6 +367,12 @@ These files are examples for Codex or other AI workflows that need to consume th
 Keepalive sites use a plugin-style runtime. Built-in site logic exists for `chatgpt`, `google`, `gmail`, and `github`; custom Python plugins can add new site IDs such as `youtube` or `youtube_studio` without rebuilding the app. The desktop GUI now includes a dedicated Keepalive Plugins tab for browsing built-in plugin source, creating external plugins, and editing trusted local plugin code. Additional trusted plugin directories can still be configured in the GUI keepalive settings or in `keepalive.plugin_dirs`.
 
 - [Keepalive Plugin Guide](./docs/KEEPALIVE_PLUGIN_GUIDE.md)
+
+## Operational notes
+
+- The GUI `Account` column is only an operator label. It is not a guaranteed website account identity.
+- Keepalive cleans cache-like data for the finished profile automatically after each profile run. It removes re-creatable cache, lock, and log artifacts rather than wiping the whole profile.
+- A keepalive batch is still one global keepalive task, but runtime locking is profile-scoped. In normal `per_profile_live` mode, other profiles can still be used by MCP as long as they are not the same locked profile.
 
 Typical usage:
 
