@@ -1,6 +1,9 @@
 import copy
 import datetime
 import glob
+import hashlib
+import importlib.util
+import inspect
 import json
 import locale
 import os
@@ -10,13 +13,16 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import textwrap
 import traceback
 import uuid
 from html.parser import HTMLParser
-from typing import Callable, Dict, List, Optional, Sequence
-from urllib.parse import quote_plus
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote_plus, urlparse
+from urllib.request import Request, urlopen
 
 import psutil
 import undetected_chromedriver as uc
@@ -41,6 +47,41 @@ PROFILE_MARKER_URL = "https://www.google.com/generate_204"
 LEGACY_CHATGPT_PROMPT = "Reply with one word: alive"
 SYSTEM_NAME = platform.system()
 KEEPALIVE_SITE_ORDER = ("chatgpt", "gmail", "google", "github")
+BUILTIN_KEEPALIVE_SITE_METADATA = {
+    "chatgpt": {
+        "site_id": "chatgpt",
+        "display_name": "ChatGPT",
+        "home_url": "https://chatgpt.com/",
+        "icon_url": "https://chatgpt.com/favicon.ico",
+        "builtin": True,
+    },
+    "gmail": {
+        "site_id": "gmail",
+        "display_name": "Gmail",
+        "home_url": "https://mail.google.com/",
+        "icon_url": "https://mail.google.com/favicon.ico",
+        "builtin": True,
+    },
+    "google": {
+        "site_id": "google",
+        "display_name": "Google",
+        "home_url": "https://www.google.com/",
+        "icon_url": "https://www.google.com/favicon.ico",
+        "builtin": True,
+    },
+    "github": {
+        "site_id": "github",
+        "display_name": "GitHub",
+        "home_url": "https://github.com/",
+        "icon_url": "https://github.com/favicon.ico",
+        "builtin": True,
+    },
+}
+_KEEPALIVE_PLUGIN_METADATA_CACHE = {
+    "signature": None,
+    "metadata": {},
+}
+
 DEFAULT_CHATGPT_PROMPTS = [
     "I just got back. Reply with a short greeting.",
     "I am checking in briefly. Reply with one short sentence.",
@@ -321,6 +362,7 @@ def build_default_config() -> Dict:
             "chatgpt_prompt": "",
             "chatgpt_conversation_hint": "",
             "google_query": "profile keepalive",
+            "plugin_dirs": [],
             "last_run_at": "",
             "last_run_finished_at": "",
             "last_run_status": "never",
@@ -423,16 +465,550 @@ def get_mirror_lock_path() -> str:
     return os.path.join(get_state_storage_dir(), MIRROR_LOCK_FILENAME)
 
 
+def get_keepalive_plugin_root() -> str:
+    path = os.path.join(get_state_storage_dir(), "keepalive_plugins")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def get_keepalive_icon_cache_dir() -> str:
+    path = os.path.join(get_state_storage_dir(), "keepalive_site_icons")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def safe_copy(value):
     return copy.deepcopy(value)
 
 
-def normalize_keepalive_site_flags(value, default: bool = False) -> Dict[str, bool]:
-    flags = {site_name: bool(default) for site_name in KEEPALIVE_SITE_ORDER}
+def normalize_site_id(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9_.-]+", "_", text)
+    return text.strip("._-")
+
+
+def _iter_keepalive_plugin_dirs(config: Optional[Dict] = None) -> List[str]:
+    configured = []
+    if isinstance(config, dict):
+        keepalive = config.get("keepalive", {})
+        if isinstance(keepalive, dict) and isinstance(keepalive.get("plugin_dirs"), list):
+            configured.extend(str(item) for item in keepalive.get("plugin_dirs", []) if str(item or "").strip())
+    return unique_paths([get_keepalive_plugin_root(), *configured])
+
+
+def _get_keepalive_plugin_signature(config: Optional[Dict] = None) -> List:
+    signature = []
+    for plugin_dir in _iter_keepalive_plugin_dirs(config):
+        if not os.path.isdir(plugin_dir):
+            signature.append((plugin_dir, "missing"))
+            continue
+        files = []
+        for path in sorted(glob.glob(os.path.join(plugin_dir, "*.py"))):
+            if os.path.basename(path).startswith("_"):
+                continue
+            try:
+                stat = os.stat(path)
+                files.append((path, int(stat.st_mtime_ns), int(stat.st_size)))
+            except OSError:
+                files.append((path, "unreadable"))
+        signature.append((plugin_dir, tuple(files)))
+    return signature
+
+
+def _normalize_keepalive_plugin_payload(raw: Dict, source: str = "") -> Dict:
+    payload = dict(raw) if isinstance(raw, dict) else {}
+    site_id = normalize_site_id(payload.get("site_id") or payload.get("id") or payload.get("name"))
+    if not site_id:
+        return {}
+    home_url = str(payload.get("home_url", "") or "").strip()
+    icon_url = str(payload.get("icon_url", "") or "").strip()
+    if not icon_url and home_url:
+        parsed = urlparse(home_url)
+        if parsed.scheme and parsed.netloc:
+            icon_url = f"{parsed.scheme}://{parsed.netloc}/favicon.ico"
+    return {
+        "site_id": site_id,
+        "display_name": str(payload.get("display_name") or payload.get("label") or site_id.title()).strip(),
+        "home_url": home_url,
+        "icon_url": icon_url,
+        "builtin": bool(payload.get("builtin", False)),
+        "source": source,
+        "module_name": str(payload.get("module_name", "") or "").strip(),
+        "function_name": str(payload.get("function_name", "keepalive") or "keepalive").strip(),
+        "class_name": str(payload.get("class_name", "") or "").strip(),
+        "plugin_type": str(payload.get("plugin_type", "") or "").strip(),
+        "load_error": str(payload.get("load_error", "") or "").strip(),
+    }
+
+
+def _extract_keepalive_plugin_metadata_from_module(module, path: str, module_name: str) -> Dict:
+    raw = None
+    if hasattr(module, "get_plugin"):
+        raw = module.get_plugin()
+    elif hasattr(module, "SITE_PLUGIN"):
+        raw = module.SITE_PLUGIN
+    elif hasattr(module, "PLUGIN"):
+        raw = module.PLUGIN
+    elif hasattr(module, "KeepalivePlugin"):
+        plugin_class = getattr(module, "KeepalivePlugin")
+        if inspect.isclass(plugin_class):
+            instance = plugin_class()
+            if hasattr(instance, "get_plugin"):
+                raw = instance.get_plugin()
+            else:
+                raw = getattr(instance, "metadata", None)
+            if isinstance(raw, dict):
+                raw = dict(raw)
+                raw.setdefault("class_name", "KeepalivePlugin")
+                raw.setdefault("function_name", "keepalive")
+                raw.setdefault("plugin_type", "class")
+    if not isinstance(raw, dict):
+        return {}
+    raw = dict(raw)
+    raw["source"] = path
+    raw["module_name"] = module_name
+    return _normalize_keepalive_plugin_payload(raw, source=path)
+
+
+def discover_external_keepalive_site_metadata(config: Optional[Dict] = None) -> Dict[str, Dict]:
+    signature = _get_keepalive_plugin_signature(config)
+    if _KEEPALIVE_PLUGIN_METADATA_CACHE["signature"] == signature:
+        return {site_id: dict(meta) for site_id, meta in _KEEPALIVE_PLUGIN_METADATA_CACHE["metadata"].items()}
+
+    discovered: Dict[str, Dict] = {}
+    for plugin_dir in _iter_keepalive_plugin_dirs(config):
+        if not os.path.isdir(plugin_dir):
+            continue
+        for path in sorted(glob.glob(os.path.join(plugin_dir, "*.py"))):
+            if os.path.basename(path).startswith("_"):
+                continue
+            module_name = f"chromium_advanced_user_keepalive_{hashlib.sha1(path.encode('utf-8')).hexdigest()[:12]}"
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, path)
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                metadata = _extract_keepalive_plugin_metadata_from_module(module, path, module_name)
+                if metadata:
+                    discovered[metadata["site_id"]] = metadata
+            except Exception as exc:
+                site_id = normalize_site_id(os.path.splitext(os.path.basename(path))[0])
+                if site_id:
+                    discovered[site_id] = _normalize_keepalive_plugin_payload(
+                        {
+                            "site_id": site_id,
+                            "display_name": site_id.replace("_", " ").title(),
+                            "source": path,
+                            "module_name": module_name,
+                            "plugin_type": "external",
+                            "load_error": str(exc),
+                        },
+                        source=path,
+                    )
+    _KEEPALIVE_PLUGIN_METADATA_CACHE["signature"] = signature
+    _KEEPALIVE_PLUGIN_METADATA_CACHE["metadata"] = {site_id: dict(meta) for site_id, meta in discovered.items()}
+    return discovered
+
+
+def get_keepalive_site_registry(config: Optional[Dict] = None) -> Dict[str, Dict]:
+    registry = {site_id: dict(meta) for site_id, meta in BUILTIN_KEEPALIVE_SITE_METADATA.items()}
+    registry.update(discover_external_keepalive_site_metadata(config))
+    if isinstance(config, dict):
+        for profile in config.get("profiles", []):
+            keepalive_sites = profile.get("keepalive_sites", {})
+            if isinstance(keepalive_sites, dict):
+                for site_id, enabled in keepalive_sites.items():
+                    normalized = normalize_site_id(site_id)
+                    if normalized and bool(enabled) and normalized not in registry:
+                        registry[normalized] = {
+                            "site_id": normalized,
+                            "display_name": normalized.title(),
+                            "home_url": "",
+                            "icon_url": "",
+                            "builtin": False,
+                        }
+            last_keepalive_details = profile.get("last_keepalive_details", {})
+            if isinstance(last_keepalive_details, dict):
+                for site_id in last_keepalive_details:
+                    normalized = normalize_site_id(site_id)
+                    if normalized and normalized not in registry:
+                        registry[normalized] = {
+                            "site_id": normalized,
+                            "display_name": normalized.title(),
+                            "home_url": "",
+                            "icon_url": "",
+                            "builtin": False,
+                        }
+    return registry
+
+
+def get_keepalive_plugin_records(config: Optional[Dict] = None) -> List[Dict]:
+    records = []
+    for site_id in get_keepalive_site_ids(config):
+        metadata = dict(get_keepalive_site_registry(config).get(site_id, {}))
+        if not metadata:
+            continue
+        metadata.setdefault("site_id", site_id)
+        metadata["plugin_type"] = "system" if metadata.get("builtin") else "external"
+        metadata["editable"] = not metadata.get("builtin")
+        if metadata.get("builtin") and not metadata.get("source"):
+            action = BUILTIN_KEEPALIVE_SITE_ACTIONS.get(site_id)
+            if action:
+                metadata["source"] = f"builtin::{action.__name__}"
+        records.append(metadata)
+    return records
+
+
+def get_keepalive_site_ids(config: Optional[Dict] = None) -> List[str]:
+    registry = get_keepalive_site_registry(config)
+    ordered = [site_id for site_id in KEEPALIVE_SITE_ORDER if site_id in registry]
+    extras = sorted(site_id for site_id in registry if site_id not in ordered)
+    return ordered + extras
+
+
+def get_keepalive_site_label(site_id: str, config: Optional[Dict] = None) -> str:
+    normalized = normalize_site_id(site_id)
+    return str(get_keepalive_site_registry(config).get(normalized, {}).get("display_name") or normalized.title())
+
+
+def get_keepalive_plugin_root_for_site(site_id: str, config: Optional[Dict] = None) -> str:
+    normalized = normalize_site_id(site_id)
+    registry = get_keepalive_site_registry(config)
+    metadata = registry.get(normalized, {})
+    source = str(metadata.get("source", "") or "").strip()
+    if source:
+        return source
+    return os.path.join(get_keepalive_plugin_root(), f"{normalized}.py")
+
+
+def get_keepalive_plugin_source_text(site_id: str, config: Optional[Dict] = None) -> str:
+    normalized = normalize_site_id(site_id)
+    if normalized in BUILTIN_KEEPALIVE_SITE_ACTIONS:
+        action = BUILTIN_KEEPALIVE_SITE_ACTIONS[normalized]
+        try:
+            return inspect.getsource(action).strip() + "\n"
+        except (OSError, IOError, TypeError):
+            return build_builtin_keepalive_plugin_reference_source(normalized)
+    source_path = get_keepalive_plugin_root_for_site(normalized, config)
+    if not source_path or not os.path.exists(source_path):
+        raise FileNotFoundError(f"keepalive plugin source not found for {normalized}: {source_path}")
+    with open(source_path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def build_builtin_keepalive_plugin_reference_source(site_id: str) -> str:
+    normalized = normalize_site_id(site_id)
+    if normalized == "google":
+        return textwrap.dedent(
+            """\
+            class KeepalivePlugin:
+                metadata = {
+                    "site_id": "google",
+                    "display_name": "Google",
+                    "home_url": "https://www.google.com/",
+                    "icon_url": "https://www.google.com/favicon.ico",
+                }
+
+                def keepalive(self, context):
+                    browser = context["browser"]
+                    results = context["results"]
+                    settings = context["settings"]
+
+                    query = str(settings.get("google_query", "")).strip() or "profile keepalive"
+                    browser.goto("https://www.google.com/")
+                    browser.wait_ready()
+
+                    if browser.exists("a[href*='ServiceLogin']", by="css", timeout=0):
+                        return results.signed_out("Google is not signed in for this profile.")
+
+                    browser.fill("textarea[name='q']", query, by="css", timeout=10)
+                    browser.press(Keys.ENTER)
+                    browser.wait_ready()
+                    browser.sleep(int(settings.get("site_dwell_seconds", 6)))
+                    return results.success(f"search results loaded for query: {query}")
+            """
+        )
+    if normalized == "gmail":
+        return textwrap.dedent(
+            """\
+            class KeepalivePlugin:
+                metadata = {
+                    "site_id": "gmail",
+                    "display_name": "Gmail",
+                    "home_url": "https://mail.google.com/",
+                    "icon_url": "https://mail.google.com/favicon.ico",
+                }
+
+                def keepalive(self, context):
+                    browser = context["browser"]
+                    results = context["results"]
+                    settings = context["settings"]
+
+                    browser.goto("https://mail.google.com/")
+                    browser.wait_ready()
+
+                    current_url = browser.current_url().lower()
+                    if "service=mail" in current_url or "accounts.google.com" in current_url:
+                        return results.signed_out("Gmail is not signed in for this profile.")
+
+                    browser.sleep(int(settings.get("site_dwell_seconds", 6)))
+                    return results.success("gmail inbox loaded")
+            """
+        )
+    if normalized == "github":
+        return textwrap.dedent(
+            """\
+            class KeepalivePlugin:
+                metadata = {
+                    "site_id": "github",
+                    "display_name": "GitHub",
+                    "home_url": "https://github.com/",
+                    "icon_url": "https://github.com/favicon.ico",
+                }
+
+                def keepalive(self, context):
+                    browser = context["browser"]
+                    results = context["results"]
+                    settings = context["settings"]
+
+                    browser.goto("https://github.com/")
+                    browser.wait_ready()
+
+                    user_login = browser.execute(
+                        "const meta = document.querySelector('meta[name=\"user-login\"]'); return meta ? meta.content || '' : '';"
+                    )
+                    if not str(user_login or "").strip():
+                        return results.signed_out("GitHub is not signed in for this profile.")
+
+                    browser.goto("https://github.com/pulls")
+                    browser.wait_ready()
+                    browser.sleep(int(settings.get("site_dwell_seconds", 6)))
+                    return results.success("pull requests page loaded")
+            """
+        )
+    if normalized == "chatgpt":
+        return textwrap.dedent(
+            """\
+            class KeepalivePlugin:
+                metadata = {
+                    "site_id": "chatgpt",
+                    "display_name": "ChatGPT",
+                    "home_url": "https://chatgpt.com/",
+                    "icon_url": "https://chatgpt.com/favicon.ico",
+                }
+
+                def keepalive(self, context):
+                    browser = context["browser"]
+                    results = context["results"]
+                    settings = context["settings"]
+
+                    browser.goto("https://chatgpt.com/")
+                    browser.wait_ready()
+
+                    current_url = browser.current_url().lower()
+                    if "auth" in current_url or "login" in current_url:
+                        return results.signed_out("ChatGPT is not signed in for this profile.")
+
+                    prompt = str(settings.get("chatgpt_prompt", "")).strip() or "Reply with one word: alive"
+                    browser.fill("#prompt-textarea", prompt, by="css", timeout=15)
+                    browser.press(Keys.ENTER)
+                    browser.sleep(int(settings.get("site_dwell_seconds", 6)))
+                    return results.success("prompt sent and reply flow observed")
+            """
+        )
+    return build_keepalive_plugin_template(normalized, normalized.replace("_", " ").title(), f"https://example.com/{normalized}")
+
+
+def build_keepalive_plugin_template(site_id: str, display_name: str = "", home_url: str = "") -> str:
+    normalized = normalize_site_id(site_id) or "example_site"
+    label = str(display_name or normalized.replace("_", " ").title()).strip()
+    home = str(home_url or f"https://example.com/{normalized}").strip()
+    parsed = urlparse(home)
+    icon_url = f"{parsed.scheme}://{parsed.netloc}/favicon.ico" if parsed.scheme and parsed.netloc else ""
+    return textwrap.dedent(
+        f"""\
+        class KeepalivePlugin:
+            metadata = {{
+                "site_id": "{normalized}",
+                "display_name": "{label}",
+                "home_url": "{home}",
+                "icon_url": "{icon_url}",
+            }}
+
+            def get_plugin(self):
+                return dict(self.metadata)
+
+            def keepalive(self, context):
+                browser = context["browser"]
+                results = context["results"]
+                log = context["log"]
+
+                browser.goto("{home}")
+                browser.wait_ready()
+
+                if "login" in browser.current_url().lower():
+                    return results.signed_out("{label} is not signed in for this profile.")
+
+                log("page opened")
+                return results.success("{label} page opened")
+        """
+    )
+
+
+def inspect_keepalive_plugin_source(site_id: str, source_text: str) -> Dict:
+    normalized = normalize_site_id(site_id)
+    if not normalized:
+        raise ValueError("plugin site_id is required")
+    source_text = str(source_text or "")
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8", newline="\n") as handle:
+        handle.write(source_text)
+        temp_path = handle.name
+    module_name = f"chromium_advanced_preview_keepalive_{hashlib.sha1((normalized + source_text).encode('utf-8')).hexdigest()[:12]}"
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, temp_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("failed to load keepalive plugin spec")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        metadata = _extract_keepalive_plugin_metadata_from_module(module, temp_path, module_name)
+        if not metadata:
+            raise RuntimeError("keepalive plugin does not expose metadata")
+        return metadata
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+
+def save_keepalive_plugin_source(site_id: str, source_text: str, config: Optional[Dict] = None) -> Dict:
+    normalized = normalize_site_id(site_id)
+    if not normalized:
+        raise ValueError("plugin site_id is required")
+    registry = get_keepalive_site_registry(config)
+    if registry.get(normalized, {}).get("builtin"):
+        raise ValueError(f"builtin keepalive plugin '{normalized}' is read-only")
+    metadata = inspect_keepalive_plugin_source(normalized, source_text)
+    resolved_site_id = normalize_site_id(metadata.get("site_id", "")) or normalized
+    if registry.get(resolved_site_id, {}).get("builtin"):
+        raise ValueError(f"builtin keepalive plugin '{resolved_site_id}' is read-only")
+    source_path = get_keepalive_plugin_root_for_site(normalized, config)
+    target_path = get_keepalive_plugin_root_for_site(resolved_site_id, config)
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    with open(target_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(source_text)
+    source_path = os.path.normcase(os.path.abspath(source_path)) if source_path else ""
+    target_path_norm = os.path.normcase(os.path.abspath(target_path))
+    if source_path and source_path != target_path_norm and os.path.exists(source_path):
+        try:
+            os.remove(source_path)
+        except OSError:
+            pass
+    return {
+        "path": target_path,
+        "site_id": resolved_site_id,
+        "display_name": str(metadata.get("display_name", "") or resolved_site_id),
+        "home_url": str(metadata.get("home_url", "") or ""),
+        "icon_url": str(metadata.get("icon_url", "") or ""),
+        "previous_site_id": normalized,
+    }
+
+
+def delete_keepalive_plugin_source(site_id: str, config: Optional[Dict] = None) -> str:
+    normalized = normalize_site_id(site_id)
+    registry = get_keepalive_site_registry(config)
+    if registry.get(normalized, {}).get("builtin"):
+        raise ValueError(f"builtin keepalive plugin '{normalized}' cannot be deleted")
+    target_path = get_keepalive_plugin_root_for_site(normalized, config)
+    if not target_path or not os.path.exists(target_path):
+        raise FileNotFoundError(f"keepalive plugin source not found for {normalized}: {target_path}")
+    os.remove(target_path)
+    return target_path
+
+
+def migrate_keepalive_site_id_references(config: Dict, old_site_id: str, new_site_id: str) -> Tuple[Dict, bool]:
+    normalized_old = normalize_site_id(old_site_id)
+    normalized_new = normalize_site_id(new_site_id)
+    if not normalized_old or not normalized_new or normalized_old == normalized_new:
+        return config, False
+
+    payload = dict(config) if isinstance(config, dict) else {}
+    changed = False
+
+    keepalive = payload.get("keepalive", {})
+    if isinstance(keepalive, dict):
+        enabled_sites = keepalive.get("enabled_sites")
+        if isinstance(enabled_sites, dict) and normalized_old in enabled_sites:
+            old_value = bool(enabled_sites.pop(normalized_old))
+            enabled_sites[normalized_new] = bool(enabled_sites.get(normalized_new, False) or old_value)
+            changed = True
+
+    profiles = payload.get("profiles", [])
+    if isinstance(profiles, list):
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            keepalive_sites = profile.get("keepalive_sites")
+            if isinstance(keepalive_sites, dict) and normalized_old in keepalive_sites:
+                old_value = bool(keepalive_sites.pop(normalized_old))
+                if old_value or normalized_new in keepalive_sites:
+                    keepalive_sites[normalized_new] = bool(keepalive_sites.get(normalized_new, False) or old_value)
+                changed = True
+            last_keepalive_details = profile.get("last_keepalive_details")
+            if isinstance(last_keepalive_details, dict) and normalized_old in last_keepalive_details:
+                old_detail = last_keepalive_details.pop(normalized_old)
+                last_keepalive_details.setdefault(normalized_new, old_detail)
+                changed = True
+    return payload, changed
+
+
+def get_keepalive_site_icon_path(site_id: str, config: Optional[Dict] = None, fetch: bool = True) -> str:
+    normalized = normalize_site_id(site_id)
+    if not normalized:
+        return ""
+    registry = get_keepalive_site_registry(config)
+    metadata = registry.get(normalized, {})
+    icon_url = str(metadata.get("icon_url", "") or "").strip()
+    if not icon_url:
+        return ""
+    cache_dir = get_keepalive_icon_cache_dir()
+    extension = os.path.splitext(urlparse(icon_url).path)[1].lower()
+    if extension not in {".ico", ".png", ".jpg", ".jpeg", ".webp"}:
+        extension = ".ico"
+    target = os.path.join(cache_dir, f"{normalized}-{hashlib.sha1(icon_url.encode('utf-8')).hexdigest()[:12]}{extension}")
+    if os.path.exists(target) or not fetch:
+        return target if os.path.exists(target) else ""
+    try:
+        request = Request(icon_url, headers={"User-Agent": f"{APP_NAME}/1.0"})
+        with urlopen(request, timeout=5) as response:
+            data = response.read(512 * 1024)
+        if data:
+            with open(target, "wb") as handle:
+                handle.write(data)
+            return target
+    except Exception:
+        return ""
+    return ""
+
+
+def warm_keepalive_site_icon_cache(config: Optional[Dict] = None) -> Dict[str, str]:
+    results: Dict[str, str] = {}
+    for site_id in get_keepalive_site_ids(config):
+        path = get_keepalive_site_icon_path(site_id, config, fetch=True)
+        if path:
+            results[site_id] = path
+    return results
+
+
+def normalize_keepalive_site_flags(value, default: bool = False, site_ids: Optional[Sequence[str]] = None) -> Dict[str, bool]:
+    ordered_site_ids = list(site_ids or [])
+    flags = {site_name: bool(default) for site_name in ordered_site_ids}
     if isinstance(value, dict):
-        for site_name in KEEPALIVE_SITE_ORDER:
-            if site_name in value:
-                flags[site_name] = bool(value.get(site_name))
+        for raw_site_name, enabled in value.items():
+            site_name = normalize_site_id(raw_site_name)
+            if site_name:
+                flags[site_name] = bool(enabled)
     return flags
 
 
@@ -440,10 +1016,39 @@ def format_keepalive_sites_text(site_flags: Dict, translate: Optional[Callable[[
     tr = translate or (lambda key, fallback="": fallback or key)
     labels = []
     normalized = normalize_keepalive_site_flags(site_flags, default=False)
-    for site_name in KEEPALIVE_SITE_ORDER:
+    for site_name in get_keepalive_site_ids({"profiles": [{"keepalive_sites": normalized}]}):
         if normalized.get(site_name):
-            labels.append(tr(f"site_name_{site_name}", site_name.title()))
+            labels.append(tr(f"site_name_{site_name}", get_keepalive_site_label(site_name)))
     return ", ".join(labels) if labels else "-"
+
+
+def normalize_keepalive_site_result_for_display(info: Dict) -> Dict:
+    payload = dict(info) if isinstance(info, dict) else {}
+    status = str(payload.get("status", "") or "").strip().lower()
+    message = str(payload.get("message", "") or "")
+    if status == "failed" and is_browser_closed_error(RuntimeError(message)):
+        payload["status"] = "attention"
+        payload.setdefault("signed_in", None)
+    return payload
+
+
+def normalize_keepalive_action_result(site_name: str, result: Dict) -> Dict:
+    payload = dict(result) if isinstance(result, dict) else {}
+    status = str(payload.get("status", "") or "").strip().lower()
+    if status not in {"success", "signed_out", "attention", "failed", "skipped"}:
+        status = "success" if status in {"", "ok"} else "attention"
+    message = str(payload.get("message", "") or "").strip()
+    if not message:
+        message = f"{site_name} {status}"
+    signed_in = payload.get("signed_in")
+    if status == "success":
+        signed_in = True if signed_in is None else bool(signed_in)
+    elif status == "signed_out":
+        signed_in = False
+    elif status in {"attention", "failed"} and signed_in is None:
+        signed_in = None
+    payload.update({"status": status, "message": message, "signed_in": signed_in})
+    return payload
 
 
 def format_keepalive_site_status(
@@ -452,10 +1057,10 @@ def format_keepalive_site_status(
     translate: Optional[Callable[[str, str], str]] = None,
 ) -> str:
     tr = translate or (lambda key, fallback="": fallback or key)
-    payload = info if isinstance(info, dict) else {}
+    payload = normalize_keepalive_site_result_for_display(info)
     status = str(payload.get("status", "unknown") or "unknown").strip().lower()
     message = str(payload.get("message", "") or "").strip()
-    site_label = tr(f"site_name_{site_name}", site_name.title())
+    site_label = tr(f"site_name_{site_name}", get_keepalive_site_label(site_name))
     status_label = {
         "success": tr("keepalive_site_status_success", "ok"),
         "signed_out": tr("keepalive_site_status_signed_out", "signed out"),
@@ -510,7 +1115,7 @@ def merge_profile_entries(existing: Dict, incoming: Dict) -> Dict:
 
     merged_sites = normalize_keepalive_site_flags(merged.get("keepalive_sites"), default=False)
     candidate_sites = normalize_keepalive_site_flags(candidate.get("keepalive_sites"), default=False)
-    for site_name in KEEPALIVE_SITE_ORDER:
+    for site_name in set(merged_sites) | set(candidate_sites):
         if candidate_sites.get(site_name):
             merged_sites[site_name] = True
     merged["keepalive_sites"] = merged_sites
@@ -638,14 +1243,10 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     if isinstance(loaded_keepalive, dict):
         enabled_sites = loaded_keepalive.get("enabled_sites", {})
         if isinstance(enabled_sites, dict):
-            normalized["keepalive"]["enabled_sites"].update(
-                {
-                    "chatgpt": bool(enabled_sites.get("chatgpt", normalized["keepalive"]["enabled_sites"]["chatgpt"])),
-                    "gmail": bool(enabled_sites.get("gmail", normalized["keepalive"]["enabled_sites"]["gmail"])),
-                    "google": bool(enabled_sites.get("google", normalized["keepalive"]["enabled_sites"]["google"])),
-                    "github": bool(enabled_sites.get("github", normalized["keepalive"]["enabled_sites"]["github"])),
-                }
-            )
+            normalized["keepalive"]["enabled_sites"].update(normalize_keepalive_site_flags(enabled_sites, default=False))
+        plugin_dirs = loaded_keepalive.get("plugin_dirs", [])
+        if isinstance(plugin_dirs, list):
+            normalized["keepalive"]["plugin_dirs"] = [str(item).strip() for item in plugin_dirs if str(item or "").strip()]
 
         for key in (
             "schedule_time",
@@ -1218,7 +1819,7 @@ def build_profile_detail_text(profile: Dict, translate: Optional[Callable[[str, 
     tr = translate or (lambda key, fallback="": fallback or key)
     details = profile.get("last_keepalive_details", {}) or {}
     site_parts = []
-    for site_name in KEEPALIVE_SITE_ORDER:
+    for site_name in get_keepalive_site_ids({"profiles": [profile]}):
         info = details.get(site_name, {})
         if not info:
             continue
@@ -1603,6 +2204,153 @@ def interruptible_sleep(seconds: int, stop_controller: Optional[KeepAliveStopCon
         remaining -= interval
 
 
+def normalize_keepalive_locator_by(value: str) -> str:
+    normalized = str(value or "css").strip().lower()
+    mapping = {
+        "css": By.CSS_SELECTOR,
+        "xpath": By.XPATH,
+        "id": By.ID,
+        "name": By.NAME,
+        "class": By.CLASS_NAME,
+        "tag": By.TAG_NAME,
+        "link_text": By.LINK_TEXT,
+        "partial_link_text": By.PARTIAL_LINK_TEXT,
+    }
+    if normalized not in mapping:
+        raise ValueError(f"unsupported locator type: {value}")
+    return mapping[normalized]
+
+
+class KeepaliveResultFactory:
+    def success(self, message: str, **extra) -> Dict:
+        return {"status": "success", "message": str(message or "success"), **extra}
+
+    def signed_out(self, message: str, **extra) -> Dict:
+        return {"status": "signed_out", "message": str(message or "signed out"), "signed_in": False, **extra}
+
+    def attention(self, message: str, **extra) -> Dict:
+        return {"status": "attention", "message": str(message or "attention"), **extra}
+
+    def failed(self, message: str, **extra) -> Dict:
+        return {"status": "failed", "message": str(message or "failed"), **extra}
+
+    def skipped(self, message: str, **extra) -> Dict:
+        return {"status": "skipped", "message": str(message or "skipped"), **extra}
+
+
+class KeepaliveBrowserApi:
+    def __init__(self, driver, settings: Dict, stop_controller: Optional[KeepAliveStopController] = None):
+        self.driver = driver
+        self.settings = settings
+        self.stop_controller = stop_controller
+
+    def _timeout(self, timeout: Optional[int] = None) -> int:
+        value = timeout if timeout is not None else self.settings.get("page_timeout_seconds", 45)
+        return max(1, int(value))
+
+    def _check(self) -> None:
+        if self.stop_controller:
+            self.stop_controller.check_or_raise()
+
+    def wait_ready(self, timeout: Optional[int] = None) -> None:
+        self._check()
+        WebDriverWait(self.driver, self._timeout(timeout)).until(
+            lambda current: current.execute_script("return document.readyState") == "complete"
+        )
+        self._check()
+
+    def goto(self, url: str, wait_ready: bool = True, timeout: Optional[int] = None) -> str:
+        self._check()
+        self.driver.get(str(url))
+        if wait_ready:
+            self.wait_ready(timeout=timeout)
+        return self.current_url()
+
+    def sleep(self, seconds: int) -> None:
+        interruptible_sleep(int(seconds), self.stop_controller)
+
+    def current_url(self) -> str:
+        return str(getattr(self.driver, "current_url", "") or "")
+
+    def title(self) -> str:
+        return str(getattr(self.driver, "title", "") or "")
+
+    def execute(self, script: str, *args):
+        self._check()
+        return self.driver.execute_script(script, *args)
+
+    def find(self, selector: str, by: str = "css", timeout: Optional[int] = None):
+        self._check()
+        locator_by = normalize_keepalive_locator_by(by)
+        if timeout is None or int(timeout) <= 0:
+            return self.driver.find_element(locator_by, selector)
+        return WebDriverWait(self.driver, self._timeout(timeout)).until(
+            lambda current: current.find_element(locator_by, selector)
+        )
+
+    def find_all(self, selector: str, by: str = "css") -> List:
+        self._check()
+        return self.driver.find_elements(normalize_keepalive_locator_by(by), selector)
+
+    def exists(self, selector: str, by: str = "css", timeout: int = 0) -> bool:
+        try:
+            element = self.find(selector, by=by, timeout=timeout)
+            return bool(element)
+        except Exception:
+            return False
+
+    def click(self, selector: str, by: str = "css", timeout: Optional[int] = None):
+        element = self.find(selector, by=by, timeout=timeout)
+        self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+        try:
+            element.click()
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", element)
+        self._check()
+        return element
+
+    def fill(self, selector: str, text: str, by: str = "css", timeout: Optional[int] = None, clear: bool = True):
+        element = self.find(selector, by=by, timeout=timeout)
+        self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+        try:
+            element.click()
+        except Exception:
+            self.driver.execute_script("arguments[0].focus();", element)
+        if clear:
+            try:
+                element.clear()
+            except Exception:
+                pass
+            try:
+                element.send_keys(Keys.CONTROL, "a")
+                element.send_keys(Keys.DELETE)
+            except Exception:
+                pass
+        element.send_keys(str(text or ""))
+        self._check()
+        return element
+
+    def press(self, keys, selector: str = "", by: str = "css", timeout: Optional[int] = None):
+        element = self.find(selector, by=by, timeout=timeout) if selector else None
+        target = element or self.driver.switch_to.active_element
+        if isinstance(keys, (list, tuple)):
+            target.send_keys(*keys)
+        else:
+            target.send_keys(keys)
+        self._check()
+        return target
+
+    def text(self, selector: str = "", by: str = "css", timeout: Optional[int] = None) -> str:
+        if not selector:
+            return str(self.driver.execute_script("return document.body ? (document.body.innerText || '') : '';") or "")
+        return str((self.find(selector, by=by, timeout=timeout).text or "").strip())
+
+    def html(self, selector: str = "", by: str = "css", timeout: Optional[int] = None) -> str:
+        if not selector:
+            return str(self.driver.execute_script("return document.documentElement.outerHTML || '';") or "")
+        return str(self.find(selector, by=by, timeout=timeout).get_attribute("outerHTML") or "")
+
+
 def update_profile_launch_time(config: Dict, profile_name: str) -> Dict:
     normalized = normalize_config(config)
     for item in normalized["profiles"]:
@@ -1824,6 +2572,44 @@ def list_chatgpt_sidebar_conversations(driver) -> List:
             if href and "/c/" in href:
                 conversations.append(item)
     return conversations
+
+
+def is_chatgpt_authenticated(driver) -> bool:
+    try:
+        current_url = str(driver.current_url or "").lower()
+    except Exception:
+        current_url = ""
+    if "auth" in current_url or "login" in current_url:
+        return False
+
+    try:
+        authenticated = bool(
+            driver.execute_script(
+                """
+                const href = String(location.href || '').toLowerCase();
+                if (href.includes('/auth') || href.includes('/login')) return false;
+                const loginText = Array.from(document.querySelectorAll('a, button'))
+                  .map((node) => (node.innerText || node.textContent || '').trim().toLowerCase())
+                  .filter(Boolean)
+                  .slice(0, 80);
+                if (loginText.some((text) => text === 'log in' || text === 'sign up' || text === '登录' || text === '注册')) {
+                  return false;
+                }
+                const hasConversation = !!document.querySelector("a[href^='/c/'], a[href*='/c/']");
+                const hasAccountMenu = !!document.querySelector(
+                  "[data-testid*='profile'], [data-testid*='account'], button[aria-label*='profile' i], button[aria-label*='account' i]"
+                );
+                const hasComposer = !!document.querySelector(
+                  "#prompt-textarea[contenteditable='true'], textarea#prompt-textarea, [contenteditable='true'][data-lexical-editor='true']"
+                );
+                const hasAppChrome = !!document.querySelector("nav, aside, main");
+                return hasConversation || hasAccountMenu || (hasComposer && hasAppChrome && !href.includes('logged-out'));
+                """
+            )
+        )
+    except Exception:
+        authenticated = False
+    return authenticated
 
 
 def open_chatgpt_existing_conversation(
@@ -2166,7 +2952,7 @@ def keepalive_chatgpt(
     WebDriverWait(driver, timeout).until(lambda current: current.execute_script("return document.readyState") == "complete")
 
     current_url = driver.current_url.lower()
-    if "auth" in current_url or "login" in current_url:
+    if "auth" in current_url or "login" in current_url or not is_chatgpt_authenticated(driver):
         raise KeepAliveLoginRequiredError("chatgpt", "ChatGPT is not signed in for this profile.")
 
     composer = find_first_interactable(
@@ -2286,6 +3072,79 @@ def keepalive_github(
     return {"status": "success", "message": f"pull requests page loaded and stayed {dwell_seconds}s"}
 
 
+BUILTIN_KEEPALIVE_SITE_ACTIONS = {
+    "chatgpt": keepalive_chatgpt,
+    "gmail": keepalive_gmail,
+    "google": keepalive_google,
+    "github": keepalive_github,
+}
+
+
+def run_external_keepalive_plugin(
+    site_id: str,
+    metadata: Dict,
+    driver,
+    settings: Dict,
+    profile_entry: Dict,
+    logger: Optional[Callable[[str], None]],
+    stop_controller: Optional[KeepAliveStopController] = None,
+) -> Dict:
+    source = str(metadata.get("source", "") or "").strip()
+    if not source or not os.path.exists(source):
+        raise RuntimeError(f"keepalive plugin source not found for {site_id}: {source}")
+    module_name = str(metadata.get("module_name", "") or "").strip() or (
+        f"chromium_advanced_user_keepalive_{hashlib.sha1(source.encode('utf-8')).hexdigest()[:12]}"
+    )
+    spec = importlib.util.spec_from_file_location(module_name, source)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load keepalive plugin spec for {site_id}: {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    action = None
+    class_name = str(metadata.get("class_name", "") or "").strip()
+    if class_name:
+        plugin_class = getattr(module, class_name, None)
+        if inspect.isclass(plugin_class):
+            action = getattr(plugin_class(), str(metadata.get("function_name", "keepalive") or "keepalive"), None)
+    if action is None:
+        action = getattr(module, str(metadata.get("function_name", "keepalive") or "keepalive"), None)
+    if not callable(action):
+        raise RuntimeError(f"keepalive plugin {site_id} does not expose callable keepalive(context)")
+    browser = KeepaliveBrowserApi(driver, settings, stop_controller=stop_controller)
+    results = KeepaliveResultFactory()
+    context = {
+        "site_id": site_id,
+        "metadata": metadata,
+        "driver": driver,
+        "browser": browser,
+        "results": results,
+        "settings": settings,
+        "profile": profile_entry,
+        "logger": logger,
+        "stop_controller": stop_controller,
+        "log": lambda message: log_message(logger, f"{site_id}: {message}"),
+    }
+    result = action(context)
+    if not isinstance(result, dict):
+        raise RuntimeError(f"keepalive plugin {site_id} returned non-dict result")
+    return result
+
+
+def run_keepalive_site_action(
+    site_id: str,
+    metadata: Dict,
+    driver,
+    settings: Dict,
+    profile_entry: Dict,
+    logger: Optional[Callable[[str], None]],
+    stop_controller: Optional[KeepAliveStopController] = None,
+) -> Dict:
+    normalized = normalize_site_id(site_id)
+    if normalized in BUILTIN_KEEPALIVE_SITE_ACTIONS:
+        return BUILTIN_KEEPALIVE_SITE_ACTIONS[normalized](driver, settings, logger, stop_controller)
+    return run_external_keepalive_plugin(normalized, metadata, driver, settings, profile_entry, logger, stop_controller)
+
+
 def create_driver_for_profile(config: Dict, profile_name: str):
     paths = config["paths"]
     chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
@@ -2357,7 +3216,12 @@ def run_profile_keepalive(
         (item for item in config.get("profiles", []) if item.get("profile_name") == profile_name),
         {},
     )
-    enabled_sites = normalize_keepalive_site_flags(profile_entry.get("keepalive_sites", {}), default=False)
+    site_registry = get_keepalive_site_registry(config)
+    enabled_sites = normalize_keepalive_site_flags(
+        profile_entry.get("keepalive_sites", {}),
+        default=False,
+        site_ids=get_keepalive_site_ids(config),
+    )
     driver = None
     site_results: Dict[str, Dict[str, str]] = {}
     failed_sites = []
@@ -2378,15 +3242,11 @@ def run_profile_keepalive(
             stop_controller.check_or_raise()
         interruptible_sleep(int(settings["settle_seconds"]), stop_controller)
 
-        actions = []
-        if enabled_sites.get("chatgpt"):
-            actions.append(("chatgpt", keepalive_chatgpt))
-        if enabled_sites.get("gmail"):
-            actions.append(("gmail", keepalive_gmail))
-        if enabled_sites.get("google"):
-            actions.append(("google", keepalive_google))
-        if enabled_sites.get("github"):
-            actions.append(("github", keepalive_github))
+        actions = [
+            (site_id, site_registry.get(site_id, {}))
+            for site_id in get_keepalive_site_ids(config)
+            if enabled_sites.get(site_id)
+        ]
 
         if not actions:
             return {
@@ -2397,14 +3257,29 @@ def run_profile_keepalive(
                 "disabled_sites": [],
             }
 
-        for site_name, action in actions:
+        for site_name, metadata in actions:
             if stop_controller:
                 stop_controller.check_or_raise()
             try:
                 log_message(logger, f"{profile_name}: start {site_name}")
-                result = action(driver, settings, logger, stop_controller)
-                result["signed_in"] = True
+                result = normalize_keepalive_action_result(
+                    site_name,
+                    run_keepalive_site_action(site_name, metadata, driver, settings, profile_entry, logger, stop_controller),
+                )
                 site_results[site_name] = result
+                if result["status"] == "signed_out":
+                    disabled_sites.append(site_name)
+                    soft_sites.append(site_name)
+                    log_message(logger, f"{profile_name}: {site_name} signed out; unchecked for next run")
+                elif result["status"] == "attention":
+                    soft_sites.append(site_name)
+                    log_message(logger, f"{profile_name}: {site_name} attention: {result['message']}")
+                elif result["status"] == "failed":
+                    failed_sites.append(site_name)
+                    log_message(logger, f"{profile_name}: {site_name} failed: {result['message']}")
+                elif result["status"] == "skipped":
+                    soft_sites.append(site_name)
+                    log_message(logger, f"{profile_name}: {site_name} skipped: {result['message']}")
                 if stop_controller:
                     stop_controller.check_or_raise()
             except KeepAliveStoppedError:
@@ -2422,10 +3297,13 @@ def run_profile_keepalive(
                 if stop_controller and stop_controller.should_stop():
                     raise KeepAliveStoppedError("keepalive stopped by user") from exc
                 if is_browser_closed_error(exc):
-                    raise KeepAliveStoppedError("keepalive browser closed unexpectedly") from exc
-                failed_sites.append(site_name)
-                site_results[site_name] = {"status": "failed", "message": str(exc)}
-                log_message(logger, f"{profile_name}: {site_name} failed: {exc}")
+                    soft_sites.append(site_name)
+                    site_results[site_name] = {"status": "attention", "message": str(exc), "signed_in": None}
+                    log_message(logger, f"{profile_name}: {site_name} browser state needs recheck: {exc}")
+                else:
+                    failed_sites.append(site_name)
+                    site_results[site_name] = {"status": "failed", "message": str(exc), "signed_in": None}
+                    log_message(logger, f"{profile_name}: {site_name} failed: {exc}")
 
         if failed_sites and len(failed_sites) == len(actions):
             summary_status = "failed"
@@ -2496,7 +3374,9 @@ def run_keepalive_job(
         save_app_config(config, path)
 
         running_processes = find_running_chromium_processes(config)
-        if running_processes:
+        selected_set = {item for item in (selected_profiles or []) if item}
+        manual_single_profile = source.startswith("manual:profile:") and len(selected_set) == 1
+        if running_processes and not manual_single_profile:
             finished_at = now_text()
             pid_text = ", ".join(str(item.get("pid")) for item in running_processes[:6])
             message = f"chromium already running, skip keepalive (pid: {pid_text})"
@@ -2516,7 +3396,29 @@ def run_keepalive_job(
                 "source": source,
             }
 
-        selected_set = {item for item in (selected_profiles or []) if item}
+        if manual_single_profile:
+            target_profile_name = next(iter(selected_set))
+            target_profile_processes = get_chromium_processes_for_profile(config, target_profile_name)
+            if target_profile_processes:
+                finished_at = now_text()
+                pid_text = ", ".join(str(item.get("pid")) for item in target_profile_processes[:6])
+                message = f"{target_profile_name} chromium already running, skip keepalive (pid: {pid_text})"
+                keepalive["last_run_finished_at"] = finished_at
+                keepalive["last_run_status"] = "skipped"
+                keepalive["last_run_message"] = message
+                keepalive["last_run_profile_count"] = 0
+                keepalive["last_run_details"] = []
+                save_app_config(config, path)
+                log_message(logger, message)
+                return {
+                    "status": "skipped",
+                    "message": message,
+                    "profile_results": [],
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "source": source,
+                }
+
         target_profiles = []
         for item in config["profiles"]:
             profile_name = item.get("profile_name", "")
@@ -2599,7 +3501,11 @@ def run_keepalive_job(
                 for profile in config["profiles"]:
                     if profile.get("profile_name") != profile_name:
                         continue
-                    profile_sites = normalize_keepalive_site_flags(profile.get("keepalive_sites", {}), default=False)
+                    profile_sites = normalize_keepalive_site_flags(
+                        profile.get("keepalive_sites", {}),
+                        default=False,
+                        site_ids=get_keepalive_site_ids(config),
+                    )
                     for site_name in result.get("disabled_sites", []):
                         profile_sites[site_name] = False
                     profile["keepalive_sites"] = profile_sites

@@ -173,6 +173,9 @@ Configure these fields in the GUI or config file:
 - `mcp.headless`: normally `false`.
 - `mcp.start_minimized`: normally `true`, so MCP browser windows stay in the taskbar instead of stealing foreground focus.
 - `keepalive.schedule_time`: recommended low-usage time, commonly `06:00`.
+- `keepalive.plugin_dirs`: optional trusted local directories for Python keepalive site plugins; the GUI keepalive settings panel can also edit this field.
+
+Keepalive plugins can add new site logic without rebuilding the app. The GUI exposes a dedicated Keepalive Plugins tab for inspecting built-in plugin source and editing trusted local plugins. See `docs/KEEPALIVE_PLUGIN_GUIDE.md`.
 
 Do not treat `chromium_profiles.example.json` as a real config. It is a sanitized template.
 
