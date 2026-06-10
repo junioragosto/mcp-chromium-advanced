@@ -17,6 +17,8 @@ import psutil
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
 from chromium_advanced.chromium_profile_lib import (
     detect_fingerprint_extension_dir,
+    get_profile_directory_path,
+    get_profile_user_data_root,
     get_hidden_subprocess_kwargs,
     now_text,
     resolve_mcp_headless,
@@ -1574,13 +1576,14 @@ class PlaywrightCliEngine(BrowserEngine):
         headless = resolve_mcp_headless(config)
         start_minimized = resolve_mcp_start_minimized(config)
         chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
-        user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
+        user_data_root = get_profile_user_data_root(config, profile_name)
+        profile_directory = get_profile_directory_path(config, profile_name)
         if not chromium_binary or not os.path.exists(chromium_binary):
             raise FileNotFoundError(f"chromium browser not found: {chromium_binary or paths.get('chromium_dir', '')}")
         if not os.path.isdir(user_data_root):
-            raise FileNotFoundError(f"UserData root not found: {user_data_root}")
-        if not os.path.isdir(os.path.join(user_data_root, profile_name)):
-            raise FileNotFoundError(f"Profile directory not found: {os.path.join(user_data_root, profile_name)}")
+            raise FileNotFoundError(f"Profile UserData root not found: {user_data_root}")
+        if not os.path.isdir(profile_directory):
+            raise FileNotFoundError(f"Profile directory not found: {profile_directory}")
 
         output_root = tempfile.mkdtemp(prefix=f"chromium-advanced-playwright-cli-{_slugify(profile_name)}-")
         session_name = f"playwright-cli-{_slugify(profile_name)}-{uuid.uuid4().hex[:8]}"

@@ -127,20 +127,22 @@ Recommended Windows layout:
 <tool_root>\UserData\temp_user_data
 ```
 
-The mirror root should be configured as:
+The split-profile root should be configured as:
 
 ```text
-paths.mirror_user_data_root = <tool_root>\UserData\temp_user_data
+paths.user_data_profiles_root = <tool_root>\UserData\UserDataSplited
+paths.mirror_user_data_root = <tool_root>\UserData\UserDataSplited\mirror_disk
 ```
 
-The project stores mirror files under:
+The project stores split-profile data and backups under:
 
 ```text
-<mirror_user_data_root>\mirror_disk
-<mirror_user_data_root>\runtime
+<user_data_profiles_root>\UserDataProfile1\Profile 1
+<user_data_profiles_root>\UserDataProfile2\Profile 2
+<user_data_profiles_root>\mirror_disk
 ```
 
-The directory name is `mirror_disk`.
+The backup directory name remains `mirror_disk`.
 
 ## 5. First GUI Launch And Config
 
@@ -162,10 +164,11 @@ Configure these fields in the GUI or config file:
 
 - `paths.chromium_dir`: browser executable path, or directory containing the browser executable.
 - `paths.chromedriver_path`: ChromeDriver executable path, or directory containing it.
-- `paths.user_data_root`: persistent root containing real Chromium profile directories.
-- `paths.mirror_user_data_root`: mirror snapshot and runtime clone root.
+- `paths.user_data_root`: legacy shared-root path kept for migration compatibility.
+- `paths.user_data_profiles_root`: split-profile root used at runtime.
+- `paths.mirror_user_data_root`: backup snapshot directory, normally `<user_data_profiles_root>\mirror_disk`.
 - `app.browser_engine`: recommended `playwright_cli` for normal MCP work.
-- `app.concurrency_mode`: use `block` for strict single live root, or `mirror_isolated` for snapshot-backed parallelism.
+- `app.concurrency_mode`: use `per_profile_live` as the normal mode. Use `block` only if you intentionally want conservative single-session gating.
 - `mcp.enabled`: `true`.
 - `mcp.host`: normally `127.0.0.1`.
 - `mcp.port`: normally `28888`.
@@ -199,20 +202,22 @@ Important account rule:
 
 ## 7. Keepalive And Mirror Refresh
 
-Keepalive uses real browser profiles to refresh selected sites. It is exclusive with MCP session startup.
+Keepalive uses real browser profiles to refresh selected sites. It now locks one profile at a time instead of blocking every profile globally.
 
 Expected behavior:
 
-- While keepalive or mirroring is running, MCP startup should report unavailable states such as `keepalive_running` or `mirroring`.
-- After keepalive completes successfully, mirror snapshots are refreshed when mirror support is enabled.
-- In `mirror_isolated` mode, MCP sessions can run from extracted runtime clones instead of the live `user_data_root`.
-- Same-profile parallelism means multiple isolated clones from snapshots, not multiple sessions sharing the same live profile directory.
+- Keepalive may run while other profiles remain available for MCP, as long as they are not the same locked profile.
+- After each finished profile run, the app automatically clears re-creatable cache, lock, and log artifacts from that profile's dedicated UserData root.
+- After keepalive completes successfully, backup snapshots are refreshed when mirror support is enabled.
+- Normal MCP sessions launch from the live per-profile root, not from extracted runtime clones.
+- Same-profile parallelism is intentionally blocked.
+- In the GUI, a profile row's `Launch` button becomes `Close` while that profile's Chromium processes are still alive. If the user closes the browser window manually, the GUI flips back to `Launch` after process exit is detected.
 
 Verify mirror output:
 
 ```powershell
-Get-ChildItem -Recurse '<mirror_user_data_root>\mirror_disk' | Select-Object -First 40
-Get-ChildItem -Recurse '<mirror_user_data_root>\runtime' | Select-Object -First 40
+Get-ChildItem -Recurse '<user_data_profiles_root>\mirror_disk' | Select-Object -First 40
+Get-ChildItem '<user_data_profiles_root>' -Directory | Select-Object Name, FullName
 ```
 
 If `mirror_disk` is empty after a successful keepalive, inspect GUI logs and the mirror status in the config.
@@ -337,7 +342,7 @@ ChromeDriver mismatch:
 
 - A live browser is using the real root.
 - In `block` mode, close that browser before MCP startup.
-- In `mirror_isolated` mode, ensure a valid mirror snapshot exists.
+- In `per_profile_live` mode, only the matching profile is blocked; other profiles can still start.
 
 `keepalive_running` or `mirroring`:
 

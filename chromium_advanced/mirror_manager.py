@@ -12,39 +12,25 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from chromium_advanced.chromium_profile_lib import (
-    discover_profile_directories,
+    PROFILE_RUNTIME_LOCK_FILENAME,
+    SPLIT_PROFILE_CACHE_DIRS,
+    SPLIT_PROFILE_EXCLUDE_FILES,
+    SPLIT_USER_DATA_ROOT_EXCLUDE_DIRS,
+    SPLIT_USER_DATA_ROOT_EXCLUDE_FILES,
+    get_profile_directory_path,
+    get_profile_user_data_root,
+    get_user_data_profiles_root,
     normalize_config,
     now_text,
     write_json_atomic,
 )
 
 
-ROOT_SNAPSHOT_FILENAME = "root_snapshot.zip"
-ROOT_METADATA_FILENAME = "root_snapshot.json"
+ROOT_SNAPSHOT_FILENAME = "template_root.zip"
+ROOT_METADATA_FILENAME = "template_root.json"
 PROFILE_METADATA_DIRNAME = "profiles"
 RUNTIME_METADATA_FILENAME = "runtime_snapshot.json"
 MIRROR_MANIFEST_FILENAME = "mirror_manifest.json"
-
-ROOT_EXCLUDE_DIRS = {
-    "BrowserMetrics",
-    "Crashpad",
-    "DeferredBrowserMetrics",
-    "GraphiteDawnCache",
-    "GrShaderCache",
-    "ShaderCache",
-    "component_crx_cache",
-}
-ROOT_EXCLUDE_FILES = {"lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"}
-PROFILE_CACHE_DIRS = {
-    "Cache",
-    "Code Cache",
-    "GPUCache",
-    "GrShaderCache",
-    "DawnGraphiteCache",
-    "DawnWebGPUCache",
-}
-PROFILE_EXCLUDE_FILES = {"LOCK", "LOG", "LOG.old", "SingletonLock", "SingletonSocket", "SingletonCookie"}
-
 
 def _slugify(text: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "-", str(text or "").strip()).strip("-").lower()
@@ -97,18 +83,17 @@ class MirrorManager:
         self.config = normalize_config(config)
         self.paths = self.config.get("paths", {})
         self.mirror_settings = self.config.get("mirror", {})
-        self.user_data_root = os.path.abspath(os.path.expanduser(self.paths.get("user_data_root", "")))
-        self.mirror_user_data_root = os.path.abspath(os.path.expanduser(self.paths.get("mirror_user_data_root", "")))
+        self.user_data_profiles_root = get_user_data_profiles_root(self.config)
 
     def disk_root(self) -> str:
         return os.path.join(
-            self.mirror_user_data_root,
+            self.user_data_profiles_root,
             str(self.mirror_settings.get("disk_dir_name", "mirror_disk")).strip() or "mirror_disk",
         )
 
     def runtime_root(self) -> str:
         return os.path.join(
-            self.mirror_user_data_root,
+            self.user_data_profiles_root,
             str(self.mirror_settings.get("runtime_dir_name", "runtime")).strip() or "runtime",
         )
 
@@ -170,32 +155,46 @@ class MirrorManager:
         if logger:
             logger(message)
 
-    def _iter_root_items(self) -> Iterable[str]:
-        if not os.path.isdir(self.user_data_root):
+    def _iter_root_items(self, source_profile_root: str) -> Iterable[str]:
+        if not os.path.isdir(source_profile_root):
             return []
-        discovered_profiles = set(discover_profile_directories(self.user_data_root))
         results: List[str] = []
-        for name in os.listdir(self.user_data_root):
-            if name in ROOT_EXCLUDE_FILES or name in ROOT_EXCLUDE_DIRS or name in discovered_profiles:
+        for name in os.listdir(source_profile_root):
+            if (
+                name in SPLIT_USER_DATA_ROOT_EXCLUDE_FILES
+                or name in SPLIT_USER_DATA_ROOT_EXCLUDE_DIRS
+                or re.match(r"^Profile\s+\d+$", name)
+            ):
                 continue
             results.append(name)
         return sorted(results)
 
     def _zip_root_snapshot(self, logger: Optional[Callable[[str], None]] = None) -> Dict:
+        source_profile_root = ""
+        for item in self.config.get("profiles", []):
+            profile_name = str(item.get("profile_name", "")).strip()
+            if not profile_name:
+                continue
+            candidate = get_profile_user_data_root(self.config, profile_name)
+            if os.path.isdir(candidate):
+                source_profile_root = candidate
+                break
+        if not source_profile_root:
+            raise FileNotFoundError("no profile UserData root available for template snapshot")
         os.makedirs(self.disk_root(), exist_ok=True)
         fd, temp_zip_path = tempfile.mkstemp(prefix="chromium-root-snapshot-", suffix=".zip", dir=self.disk_root())
         os.close(fd)
         try:
             with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
-                for item_name in self._iter_root_items():
-                    source_path = os.path.join(self.user_data_root, item_name)
+                for item_name in self._iter_root_items(source_profile_root):
+                    source_path = os.path.join(source_profile_root, item_name)
                     if os.path.isfile(source_path):
                         archive.write(source_path, arcname=item_name)
                         continue
                     if not os.path.isdir(source_path):
                         continue
                     for dirpath, _dirnames, filenames in os.walk(source_path):
-                        rel_dir = os.path.relpath(dirpath, self.user_data_root)
+                        rel_dir = os.path.relpath(dirpath, source_profile_root)
                         for filename in filenames:
                             source_file = os.path.join(dirpath, filename)
                             arcname = os.path.join(rel_dir, filename)
@@ -204,8 +203,8 @@ class MirrorManager:
             metadata = {
                 "kind": "root",
                 "generated_at": now_text(),
-                "source_root": self.user_data_root,
-                "included_items": list(self._iter_root_items()),
+                "source_root": source_profile_root,
+                "included_items": list(self._iter_root_items(source_profile_root)),
                 **_archive_stats(temp_zip_path),
             }
             _atomic_replace(temp_zip_path, self.root_snapshot_path())
@@ -220,7 +219,7 @@ class MirrorManager:
                     pass
 
     def _zip_profile_snapshot(self, profile_name: str, logger: Optional[Callable[[str], None]] = None) -> Dict:
-        profile_dir = os.path.join(self.user_data_root, profile_name)
+        profile_dir = get_profile_directory_path(self.config, profile_name)
         if not os.path.isdir(profile_dir):
             raise FileNotFoundError(f"profile directory not found: {profile_dir}")
 
@@ -234,10 +233,14 @@ class MirrorManager:
         try:
             with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
                 for dirpath, dirnames, filenames in os.walk(profile_dir):
-                    dirnames[:] = [name for name in dirnames if name not in PROFILE_CACHE_DIRS]
+                    dirnames[:] = [
+                        name
+                        for name in dirnames
+                        if name not in SPLIT_PROFILE_CACHE_DIRS and name not in SPLIT_USER_DATA_ROOT_EXCLUDE_DIRS
+                    ]
                     rel_dir = os.path.relpath(dirpath, profile_dir)
                     for filename in filenames:
-                        if filename in PROFILE_EXCLUDE_FILES:
+                        if filename in SPLIT_PROFILE_EXCLUDE_FILES or filename in SPLIT_USER_DATA_ROOT_EXCLUDE_FILES:
                             continue
                         source_file = os.path.join(dirpath, filename)
                         arcname = os.path.join(rel_dir, filename) if rel_dir != "." else filename
@@ -249,8 +252,8 @@ class MirrorManager:
                 "profile_name": profile_name,
                 "generated_at": now_text(),
                 "source_profile_dir": profile_dir,
-                "excluded_cache_dirs": sorted(PROFILE_CACHE_DIRS),
-                "excluded_files": sorted(PROFILE_EXCLUDE_FILES),
+                "excluded_cache_dirs": sorted(SPLIT_PROFILE_CACHE_DIRS),
+                "excluded_files": sorted(set(SPLIT_PROFILE_EXCLUDE_FILES) | {PROFILE_RUNTIME_LOCK_FILENAME}),
                 **source_stats,
                 **_archive_stats(temp_zip_path),
             }
@@ -339,7 +342,7 @@ class MirrorManager:
         generated_at = str(profile_metadata.get("generated_at", "") or root_metadata.get("generated_at", "") or "")
         return {
             "profile_name": profile_name,
-            "available": bool(root_available and profile_available),
+            "available": bool(profile_available),
             "root_available": bool(root_available),
             "profile_available": bool(profile_available),
             "generated_at": generated_at,
@@ -353,7 +356,7 @@ class MirrorManager:
 
     def materialize_runtime(self, profile_name: str) -> MirrorRuntimeInfo:
         validation = self.validate_profile_snapshot(profile_name)
-        if not validation.get("available"):
+        if not validation.get("profile_available"):
             raise RuntimeError(f"mirror snapshot unavailable for profile: {profile_name}")
 
         runtime_id = f"{_slugify(profile_name)}-{uuid.uuid4().hex[:10]}"
@@ -361,8 +364,9 @@ class MirrorManager:
         runtime_profile_dir = os.path.join(runtime_root, profile_name)
         os.makedirs(runtime_root, exist_ok=True)
         try:
-            with zipfile.ZipFile(validation["root_snapshot_path"], "r") as root_archive:
-                root_archive.extractall(runtime_root)
+            if validation.get("root_snapshot_path"):
+                with zipfile.ZipFile(validation["root_snapshot_path"], "r") as root_archive:
+                    root_archive.extractall(runtime_root)
             os.makedirs(runtime_profile_dir, exist_ok=True)
             with zipfile.ZipFile(validation["profile_snapshot_path"], "r") as profile_archive:
                 profile_archive.extractall(runtime_profile_dir)

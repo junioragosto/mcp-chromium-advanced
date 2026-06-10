@@ -70,11 +70,14 @@ from chromium_advanced.chromium_profile_lib import (
     ensure_profile_directory,
     ensure_profile_bookmarks_initialized,
     get_default_config_path,
-    get_default_mirror_user_data_root,
+    get_default_split_user_data_profiles_root,
+    get_chromium_processes_for_profile,
     get_hidden_subprocess_kwargs,
     get_keepalive_site_icon_path,
     get_keepalive_site_ids,
     get_keepalive_site_label,
+    get_profile_directory_path,
+    get_profile_user_data_root,
     is_legacy_default_mirror_root,
     find_running_chromium_processes,
     get_project_root,
@@ -90,6 +93,7 @@ from chromium_advanced.chromium_profile_lib import (
     save_keepalive_plugin_source,
     migrate_keepalive_site_id_references,
     sync_profiles_with_user_data,
+    terminate_chromium_processes,
     update_profile_launch_time,
     warm_keepalive_site_icon_cache,
     run_keepalive_job,
@@ -116,7 +120,7 @@ MCP_RECENT_HEALTH_GRACE_SECONDS = 30.0
 MCP_WATCHDOG_RESTART_FAILURES = 6
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
-CONCURRENCY_MODE_OPTIONS = ["block", "mirror_isolated"]
+CONCURRENCY_MODE_OPTIONS = ["per_profile_live", "block"]
 LANGUAGE_OPTIONS = load_language_options()
 I18N = load_translations()
 WINDOW_STATE_SAVE_DELAY_MS = 400
@@ -530,6 +534,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.keepalive_running_profile_name = ""
         self.keepalive_log_prefix = ""
         self.keepalive_stop_requested = False
+        self.external_profile_process_signature = ""
+        self.external_profile_process_map: Dict[str, List[int]] = {}
         self.force_exit_requested = False
         self.tray_message_shown = False
         self.scheduler_notice_key = ""
@@ -1066,7 +1072,7 @@ class ChromiumManagerWindow(QMainWindow):
         fields = [
             ("chromium_dir", self.tr("path_chromium"), "dir"),
             ("chromedriver_path", self.tr("path_driver"), "any"),
-            ("user_data_root", self.tr("path_user_data"), "dir"),
+            ("user_data_profiles_root", self.tr("path_user_data"), "dir"),
             ("mirror_user_data_root", self.tr("path_mirror_user_data"), "dir"),
             ("bookmarks_template_path", self.tr("path_bookmarks"), "file"),
             ("fingerprint_zip_path", self.tr("path_fingerprint"), "file"),
@@ -1279,10 +1285,106 @@ class ChromiumManagerWindow(QMainWindow):
             self.plugin_source_editor.setReadOnly((not enabled) or (not editable_plugin_selected))
         self.refresh_table()
 
+    def build_external_profile_process_signature(self) -> str:
+        process_map = self.build_external_profile_process_map()
+        return self.serialize_external_profile_process_map(process_map)
+
+    def build_external_profile_process_map(self) -> Dict[str, List[int]]:
+        entries: Dict[str, List[int]] = {}
+        for profile in self.config.get("profiles", []):
+            profile_name = str(profile.get("profile_name", "") or "").strip()
+            if not profile_name:
+                continue
+            pids = sorted(
+                int(item.get("pid") or 0)
+                for item in get_chromium_processes_for_profile(self.config, profile_name)
+                if int(item.get("pid") or 0) > 0
+            )
+            entries[profile_name] = pids
+        return entries
+
+    def serialize_external_profile_process_map(self, process_map: Dict[str, List[int]]) -> str:
+        return "|".join(
+            f"{profile_name}:{','.join(str(pid) for pid in process_map.get(profile_name, []))}"
+            for profile_name in sorted(process_map.keys())
+        )
+
+    def refresh_external_profile_process_state(self) -> None:
+        process_map = self.build_external_profile_process_map()
+        signature = self.serialize_external_profile_process_map(process_map)
+        if signature == self.external_profile_process_signature:
+            return
+        previous_map = dict(self.external_profile_process_map)
+        self.external_profile_process_signature = signature
+        self.external_profile_process_map = process_map
+        if previous_map:
+            self.log_external_profile_process_transitions(previous_map, process_map)
+        self.refresh_table()
+        self.update_selected_profile_status()
+
+    def log_external_profile_process_transitions(
+        self,
+        previous_map: Dict[str, List[int]],
+        current_map: Dict[str, List[int]],
+    ) -> None:
+        for profile_name in sorted(set(previous_map.keys()) | set(current_map.keys())):
+            before = sorted(int(pid) for pid in previous_map.get(profile_name, []) if int(pid) > 0)
+            after = sorted(int(pid) for pid in current_map.get(profile_name, []) if int(pid) > 0)
+            if before == after:
+                continue
+            if not before and after:
+                self.append_log(
+                    self.tr("log_profile_runtime_detected_started", "{profile_name} external Chromium detected: {pid_text}").format(
+                        profile_name=profile_name,
+                        pid_text=", ".join(str(pid) for pid in after),
+                    )
+                )
+                continue
+            if before and not after:
+                self.append_log(
+                    self.tr("log_profile_runtime_detected_stopped", "{profile_name} external Chromium fully exited.").format(
+                        profile_name=profile_name,
+                    )
+                )
+                continue
+            self.append_log(
+                self.tr("log_profile_runtime_detected_changed", "{profile_name} external Chromium changed: {pid_text}").format(
+                    profile_name=profile_name,
+                    pid_text=", ".join(str(pid) for pid in after),
+                )
+            )
+
+    def build_profile_runtime_state_text(self, profile_name: str) -> str:
+        profile_name = str(profile_name or "").strip()
+        if not profile_name:
+            return self.tr("runtime_state_unknown", "Unknown")
+        if self.is_profile_keepalive_running(profile_name):
+            return self.tr("runtime_state_keepalive", "Keepalive running")
+        pids = self.external_profile_process_map.get(profile_name, [])
+        if pids:
+            return self.tr("runtime_state_external_running", "External Chromium running: {pid_text}").format(
+                pid_text=", ".join(str(pid) for pid in pids)
+            )
+        return self.tr("runtime_state_idle", "Idle")
+
+    def resolve_keepalive_target_profiles(self, selected_profiles: List[str]) -> List[str]:
+        selected = [str(item or "").strip() for item in (selected_profiles or []) if str(item or "").strip()]
+        if selected:
+            return selected
+        return [
+            str(item.get("profile_name", "")).strip()
+            for item in self.config.get("profiles", [])
+            if str(item.get("profile_name", "")).strip() and bool(item.get("keepalive_enabled", False))
+        ]
+
     def refresh_all(self):
         self.load_config_from_disk()
         self.current_language = normalize_language_code(
             self.config.get("app", {}).get("language", detect_default_language())
+        )
+        self.external_profile_process_map = self.build_external_profile_process_map()
+        self.external_profile_process_signature = self.serialize_external_profile_process_map(
+            self.external_profile_process_map
         )
         self.load_app_settings_to_ui()
         self.retranslate_ui()
@@ -1339,7 +1441,11 @@ class ChromiumManagerWindow(QMainWindow):
         if not profile:
             self.selected_profile_status.setPlainText(self.tr("status_no_profile_selected"))
             return
-        self.selected_profile_status.setPlainText(build_profile_detail_text(profile, self.tr))
+        base_text = build_profile_detail_text(profile, self.tr)
+        runtime_text = self.build_profile_runtime_state_text(profile.get("profile_name", ""))
+        self.selected_profile_status.setPlainText(
+            f"{base_text}\n{self.tr('detail_runtime_state', 'Runtime State')}: {runtime_text}"
+        )
 
     def is_profile_keepalive_running(self, profile_name: str) -> bool:
         profile_name = str(profile_name or "").strip()
@@ -1348,6 +1454,19 @@ class ChromiumManagerWindow(QMainWindow):
         if self.keepalive_running_profile_name == profile_name:
             return True
         return len(self.keepalive_target_profiles) == 1 and self.keepalive_target_profiles[0] == profile_name
+
+    def is_single_profile_keepalive_active(self) -> bool:
+        return self.keepalive_worker is not None and len(self.keepalive_target_profiles) == 1
+
+    def is_profile_keepalive_ui_locked(self, profile_name: str) -> bool:
+        profile_name = str(profile_name or "").strip()
+        if not profile_name or self.keepalive_worker is None:
+            return False
+        if self.is_profile_keepalive_running(profile_name):
+            return True
+        if not self.keepalive_target_profiles:
+            return False
+        return profile_name in self.keepalive_target_profiles
 
     def status_color_for_profile(self, profile: Dict) -> Optional[QColor]:
         status = profile.get("last_keepalive_status", "never")
@@ -1620,10 +1739,14 @@ class ChromiumManagerWindow(QMainWindow):
                 self.table.setCellWidget(row, 2, self.create_profile_site_selector(profile))
 
                 keepalive_checkbox = QCheckBox()
+                profile_name = profile.get("profile_name", "")
+                row_locked = self.is_profile_keepalive_ui_locked(profile_name)
+                is_running = self.is_profile_keepalive_running(profile_name)
+
                 keepalive_checkbox.setChecked(bool(profile.get("keepalive_enabled", False)))
                 keepalive_checkbox.setEnabled(self.keepalive_worker is None)
                 keepalive_checkbox.stateChanged.connect(
-                    lambda state, name=profile.get("profile_name", ""): self.set_profile_keepalive_enabled(
+                    lambda state, name=profile_name: self.set_profile_keepalive_enabled(
                         name, state == Qt.Checked
                     )
                 )
@@ -1635,9 +1758,16 @@ class ChromiumManagerWindow(QMainWindow):
                 self.table.setCellWidget(row, 3, keepalive_wrapper)
 
                 launch_button = QPushButton(self.tr("action_launch"))
-                launch_button.setEnabled(self.keepalive_worker is None)
-                launch_button.clicked.connect(lambda _, name=profile.get("profile_name", ""): self.launch_profile_by_name(name))
-                is_running = self.is_profile_keepalive_running(profile.get("profile_name", ""))
+                external_running = bool(get_chromium_processes_for_profile(self.config, profile_name))
+                launch_button.setText(self.tr("action_close", "Close") if external_running else self.tr("action_launch"))
+                launch_button.setEnabled(not row_locked)
+                if row_locked:
+                    launch_button.setToolTip(self.tr("info_keepalive_already_running"))
+                elif external_running:
+                    launch_button.setToolTip(self.tr("profile_close_tooltip", "Close this profile and kill its Chromium processes."))
+                else:
+                    launch_button.setToolTip("")
+                launch_button.clicked.connect(lambda _, name=profile_name: self.toggle_profile_launch_by_name(name))
                 keepalive_button = QPushButton(self.tr("action_stop") if is_running else self.tr("action_keepalive"))
                 if is_running:
                     keepalive_button.setStyleSheet("background-color: #f8d7da; color: #b00020;")
@@ -1645,7 +1775,8 @@ class ChromiumManagerWindow(QMainWindow):
                     keepalive_button.setStyleSheet("")
                     if self.keepalive_worker is not None:
                         keepalive_button.setEnabled(False)
-                keepalive_button.clicked.connect(lambda _, name=profile.get("profile_name", ""): self.run_keepalive_for_profile(name))
+                        keepalive_button.setToolTip(self.tr("info_keepalive_already_running"))
+                keepalive_button.clicked.connect(lambda _, name=profile_name: self.run_keepalive_for_profile(name))
                 button_wrapper = QWidget()
                 button_layout = QHBoxLayout(button_wrapper)
                 button_layout.setContentsMargins(4, 2, 4, 2)
@@ -1668,7 +1799,7 @@ class ChromiumManagerWindow(QMainWindow):
             self.table.setUpdatesEnabled(True)
 
     def add_profile(self):
-        user_data_root = self.config["paths"].get("user_data_root", "")
+        user_data_root = self.config["paths"].get("user_data_profiles_root", "")
         if not user_data_root:
             QMessageBox.warning(self, self.tr("warn_missing_path_title"), self.tr("warn_missing_user_data_root"))
             return
@@ -1676,6 +1807,7 @@ class ChromiumManagerWindow(QMainWindow):
         profile_name = next_profile_name(self.config)
         new_profile = {
             "profile_name": profile_name,
+            "user_data_dir_name": "",
             "account": "",
             "keepalive_enabled": False,
             "keepalive_sites": {},
@@ -1687,7 +1819,7 @@ class ChromiumManagerWindow(QMainWindow):
 
         new_profile.update(dialog.get_data())
         try:
-            ensure_profile_directory(user_data_root, profile_name)
+            ensure_profile_directory(self.config, profile_name)
         except Exception as exc:
             QMessageBox.critical(self, self.tr("error_create_failed_title"), self.trf("error_create_profile_dir", error=exc))
             return
@@ -1731,8 +1863,7 @@ class ChromiumManagerWindow(QMainWindow):
             QMessageBox.information(self, self.tr("info_title"), self.tr("info_select_profile_first"))
             return
 
-        user_data_root = self.config["paths"].get("user_data_root", "")
-        profile_dir = os.path.join(user_data_root, profile.get("profile_name", ""))
+        profile_dir = get_profile_directory_path(self.config, profile.get("profile_name", ""))
         if os.path.isdir(profile_dir):
             QMessageBox.information(self, self.tr("cannot_remove_entry_title"), self.tr("cannot_remove_entry_message"))
             return
@@ -1771,17 +1902,17 @@ class ChromiumManagerWindow(QMainWindow):
             QMessageBox.information(self, self.tr("info_title"), self.tr("info_keepalive_running_delete"))
             return
 
-        running_processes = find_running_chromium_processes(self.config)
+        running_processes = get_chromium_processes_for_profile(self.config, profile_name)
         if running_processes:
             QMessageBox.information(self, self.tr("close_chromium_title"), self.tr("close_chromium_before_delete"))
             return
 
-        user_data_root = os.path.abspath(self.config["paths"].get("user_data_root", "").strip())
+        user_data_root = os.path.abspath(get_profile_user_data_root(self.config, profile_name).strip())
         if not user_data_root:
             QMessageBox.warning(self, self.tr("warn_missing_path_title"), self.tr("warn_missing_user_data_root"))
             return
 
-        profile_dir = os.path.abspath(os.path.join(user_data_root, profile_name))
+        profile_dir = os.path.abspath(get_profile_directory_path(self.config, profile_name))
         try:
             if os.path.commonpath([profile_dir, user_data_root]) != user_data_root:
                 raise ValueError("profile directory escaped user data root")
@@ -1848,12 +1979,42 @@ class ChromiumManagerWindow(QMainWindow):
         if result.returncode != 0:
             QMessageBox.warning(self, self.tr("warn_launch_return_title"), details)
 
+    def close_profile_by_name(self, profile_name: str):
+        profile_name = str(profile_name or "").strip()
+        if not profile_name:
+            return
+        processes = get_chromium_processes_for_profile(self.config, profile_name)
+        if not processes:
+            self.refresh_external_profile_process_state()
+            return
+        terminated = terminate_chromium_processes(processes, logger=None)
+        self.selected_profile_name = profile_name
+        self.refresh_external_profile_process_state()
+        details = self.tr("profile_close_none", "no matching Chromium process found")
+        if terminated:
+            details = self.tr("profile_close_killed_count", "terminated {count} Chromium process(es)").format(count=terminated)
+        self.append_log(
+            self.tr("log_profile_closed", "{profile_name} closed: {details}").format(
+                profile_name=profile_name,
+                details=details,
+            )
+        )
+
+    def toggle_profile_launch_by_name(self, profile_name: str):
+        profile_name = str(profile_name or "").strip()
+        if not profile_name:
+            return
+        if get_chromium_processes_for_profile(self.config, profile_name):
+            self.close_profile_by_name(profile_name)
+            return
+        self.launch_profile_by_name(profile_name)
+
     def launch_selected_profile(self):
         profile = self.get_selected_profile()
         if not profile:
             QMessageBox.information(self, self.tr("info_title"), self.tr("info_select_profile_first"))
             return
-        self.launch_profile_by_name(profile.get("profile_name", ""))
+        self.toggle_profile_launch_by_name(profile.get("profile_name", ""))
 
     def get_selected_profile_names(self) -> List[str]:
         profile = self.get_selected_profile()
@@ -2011,9 +2172,9 @@ class ChromiumManagerWindow(QMainWindow):
                     break
             self.browser_engine_combo.blockSignals(False)
         if hasattr(self, "concurrency_mode_combo"):
-            current_mode = str(app_settings.get("concurrency_mode", "block") or "block").strip().lower()
+            current_mode = str(app_settings.get("concurrency_mode", "per_profile_live") or "per_profile_live").strip().lower()
             if current_mode not in CONCURRENCY_MODE_OPTIONS:
-                current_mode = "block"
+                current_mode = "per_profile_live"
             self.concurrency_mode_combo.blockSignals(True)
             for index in range(self.concurrency_mode_combo.count()):
                 if self.concurrency_mode_combo.itemData(index) == current_mode:
@@ -2053,10 +2214,10 @@ class ChromiumManagerWindow(QMainWindow):
     def on_concurrency_mode_changed(self):
         if not hasattr(self, "concurrency_mode_combo"):
             return
-        mode_name = str(self.concurrency_mode_combo.currentData() or "block").strip().lower()
+        mode_name = str(self.concurrency_mode_combo.currentData() or "per_profile_live").strip().lower()
         if mode_name not in CONCURRENCY_MODE_OPTIONS:
-            mode_name = "block"
-        current_mode = str(self.config.get("app", {}).get("concurrency_mode", "block") or "block").strip().lower()
+            mode_name = "per_profile_live"
+        current_mode = str(self.config.get("app", {}).get("concurrency_mode", "per_profile_live") or "per_profile_live").strip().lower()
         if mode_name == current_mode:
             return
         self.config.setdefault("app", {})
@@ -2130,7 +2291,7 @@ class ChromiumManagerWindow(QMainWindow):
         path_keys = [
             ("chromium_dir", "path_chromium"),
             ("chromedriver_path", "path_driver"),
-            ("user_data_root", "path_user_data"),
+            ("user_data_profiles_root", "path_user_data"),
             ("mirror_user_data_root", "path_mirror_user_data"),
             ("bookmarks_template_path", "path_bookmarks"),
             ("fingerprint_zip_path", "path_fingerprint"),
@@ -2222,10 +2383,16 @@ class ChromiumManagerWindow(QMainWindow):
     def save_path_settings(self):
         for key, line_edit in self.path_editors.items():
             self.config["paths"][key] = line_edit.text().strip()
-        user_data_root = str(self.config["paths"].get("user_data_root", "")).strip()
+        user_data_root = str(self.config["paths"].get("user_data_profiles_root", "")).strip()
+        if not user_data_root:
+            user_data_root = get_default_split_user_data_profiles_root(str(self.config["paths"].get("user_data_root", "")).strip())
+            self.config["paths"]["user_data_profiles_root"] = user_data_root
+            if "user_data_profiles_root" in self.path_editors:
+                self.path_editors["user_data_profiles_root"].setText(user_data_root)
         mirror_user_data_root = str(self.config["paths"].get("mirror_user_data_root", "")).strip()
+        resolved_default_mirror_root = os.path.join(user_data_root, "mirror_disk")
         if not mirror_user_data_root or is_legacy_default_mirror_root(mirror_user_data_root):
-            resolved_mirror_root = get_default_mirror_user_data_root(user_data_root)
+            resolved_mirror_root = resolved_default_mirror_root
             self.config["paths"]["mirror_user_data_root"] = resolved_mirror_root
             if "mirror_user_data_root" in self.path_editors:
                 self.path_editors["mirror_user_data_root"].setText(resolved_mirror_root)
@@ -2233,7 +2400,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.config["app"]["browser_engine"] = normalize_browser_engine_name(
             self.browser_engine_combo.currentData() or DEFAULT_BROWSER_ENGINE
         )
-        self.config["app"]["concurrency_mode"] = str(self.concurrency_mode_combo.currentData() or "block").strip().lower()
+        self.config["app"]["concurrency_mode"] = str(self.concurrency_mode_combo.currentData() or "per_profile_live").strip().lower()
         self.config = save_app_config(self.config, self.config_path)
         self.refresh_table()
         self.append_log(self.tr("log_base_config_saved"))
@@ -2358,7 +2525,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_trace_path_label.setText(self.get_mcp_trace_path())
         self.mcp_default_engine_label.setText(
             f"{normalize_browser_engine_name(self.config.get('app', {}).get('browser_engine', DEFAULT_BROWSER_ENGINE))}"
-            f" / {str(self.config.get('app', {}).get('concurrency_mode', 'block') or 'block')}"
+            f" / {str(self.config.get('app', {}).get('concurrency_mode', 'per_profile_live') or 'per_profile_live')}"
         )
 
         daemon_status = self.query_mcp_status()
@@ -2616,6 +2783,7 @@ class ChromiumManagerWindow(QMainWindow):
             )
 
     def on_mcp_watchdog_timer(self):
+        self.refresh_external_profile_process_state()
         self.refresh_mcp_status_ui()
         if not self.is_mcp_expected_enabled():
             return
@@ -2816,13 +2984,6 @@ class ChromiumManagerWindow(QMainWindow):
             self.global_task_last_result.setText(self.tr("schedule_result_not_triggered_today"))
             return
 
-        running_processes = find_running_chromium_processes(self.config)
-        if running_processes:
-            self.global_task_status.setText(self.tr("schedule_status_waiting_chromium"))
-            self.global_task_next_run.setText(self.tr("schedule_next_run_when_idle"))
-            self.global_task_last_result.setText(self.tr("schedule_result_chromium_running"))
-            return
-
         self.global_task_status.setText(self.tr("schedule_status_due"))
         self.global_task_next_run.setText(self.tr("schedule_next_run_when_ready"))
         self.global_task_last_result.setText(self.tr("schedule_result_not_triggered_today"))
@@ -2846,18 +3007,6 @@ class ChromiumManagerWindow(QMainWindow):
         today_text = now_dt.strftime("%Y-%m-%d")
         last_scheduled_date = str(keepalive.get("last_scheduled_run_date", "")).strip()
         if last_scheduled_date == today_text or now_dt < schedule_dt:
-            return
-
-        running_processes = find_running_chromium_processes(self.config)
-        if running_processes:
-            notice_key = f"{today_text}:chromium-running"
-            if self.scheduler_notice_key != notice_key:
-                pid_text = ", ".join(str(item.get("pid")) for item in running_processes[:6])
-                self.append_log(
-                    self.trf("log_schedule_waiting_chromium", pid_text=pid_text),
-                    prefix=self.tr("keepalive_source_scheduled"),
-                )
-                self.scheduler_notice_key = notice_key
             return
 
         self.start_keepalive_worker([], "internal-schedule", persist_ui_settings=False)
@@ -2885,7 +3034,7 @@ class ChromiumManagerWindow(QMainWindow):
         )
         self.keepalive_log_prefix = describe_keepalive_source(source, [item for item in selected_profiles if item])
         self.append_log(f"{self.tr('log_keepalive_started')} (engine={engine_name})", prefix=self.keepalive_log_prefix)
-        self.keepalive_target_profiles = [item for item in selected_profiles if item]
+        self.keepalive_target_profiles = self.resolve_keepalive_target_profiles(selected_profiles)
         self.keepalive_running_profile_name = self.keepalive_target_profiles[0] if len(self.keepalive_target_profiles) == 1 else ""
         self.keepalive_stop_requested = False
         self.set_keepalive_buttons_enabled(False)

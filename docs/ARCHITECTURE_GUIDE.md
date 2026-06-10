@@ -30,7 +30,7 @@ Responsibilities:
 
 - edit browser paths and runtime settings
 - manage profile entries
-- start profiles manually
+- start or close profiles manually based on real per-profile Chromium process state
 - run keepalive jobs
 - show status, logs, and MCP state
 
@@ -93,7 +93,7 @@ Responsibilities:
 - report service and profile occupancy
 - claim and release sessions
 - prevent unsafe concurrent use
-- allow controlled snapshot-backed concurrency when `app.concurrency_mode=mirror_isolated`
+- allow per-profile live concurrency when `app.concurrency_mode=per_profile_live`
 - keep the daemon stable while allowing the worker to start on demand
 - route session creation through the selected browser engine
 - wrap raw runtime sessions through a managed session kernel before exposing them to MCP tools
@@ -101,7 +101,7 @@ Responsibilities:
 - distinguish managed worker reclaim from unexpected worker exit in daemon status reporting
 - start visible MCP-owned browser sessions minimized by default when `mcp.start_minimized=true`, avoiding foreground focus theft while preserving a taskbar window for manual observation or user takeover
 - keep `mcp.headless=false` as the normal MCP browsing default; `mcp.headless=true` is reserved for explicit user-requested regression or background validation
-- materialize extracted runtime clones under `paths.mirror_user_data_root` when starting from a validated mirror snapshot
+- resolve one dedicated UserData root per profile under `paths.user_data_profiles_root`
 
 ## Managed Action Kernel
 
@@ -161,11 +161,22 @@ The intended MCP lifecycle is:
 
 This keeps real browser identities usable across many tasks without letting multiple tasks silently fight over the same logged-in state.
 
-When `app.concurrency_mode=mirror_isolated`, the same lifecycle still applies, but the claimed session may run from an extracted runtime clone rather than from the live profile root. In that mode:
+When `app.concurrency_mode=per_profile_live`, the same lifecycle still applies, but ownership is enforced at the profile-root level:
 
-- live-root ownership is still exclusive
-- keepalive and mirror refresh remain exclusive
-- same-profile parallelism is implemented by independent snapshot clones, not by sharing one on-disk profile directory across runtimes
+- one profile root has one owner at a time
+- different profile roots can run concurrently
+- keepalive and mirror refresh no longer imply whole-root runtime cloning
+- a running keepalive task should only block the matching profile root, not every profile globally
+
+For manual GUI launches, the intended profile lifecycle is:
+
+1. click `Launch` to open a visible Chromium window for one profile
+2. detect that profile's matching Chromium process set
+3. show `Close` while those matching processes still exist
+4. if the user closes the window manually, keep probing until the matching process set is gone
+5. switch the button back to `Launch` once the profile fully exits
+
+This model intentionally tracks real Chromium processes, not only whether a window is visible.
 
 For multi-tab tasks, the intended page lifecycle inside one session is:
 

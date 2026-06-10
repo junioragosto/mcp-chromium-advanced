@@ -47,6 +47,41 @@ PROFILE_MARKER_URL = "https://www.google.com/generate_204"
 LEGACY_CHATGPT_PROMPT = "Reply with one word: alive"
 SYSTEM_NAME = platform.system()
 KEEPALIVE_SITE_ORDER = ("chatgpt", "gmail", "google", "github")
+SPLIT_USER_DATA_ROOT_EXCLUDE_DIRS = {
+    "BrowserMetrics",
+    "Crashpad",
+    "DeferredBrowserMetrics",
+    "GraphiteDawnCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "component_crx_cache",
+    "mirror_disk",
+}
+SPLIT_USER_DATA_ROOT_EXCLUDE_FILES = {
+    "lockfile",
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    ".profile_runtime.lock",
+}
+SPLIT_PROFILE_CACHE_DIRS = {
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "GrShaderCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+}
+SPLIT_PROFILE_EXCLUDE_FILES = {
+    "LOCK",
+    "LOG",
+    "LOG.old",
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    ".profile_runtime.lock",
+}
+PROFILE_RUNTIME_LOCK_FILENAME = ".profile_runtime.lock"
 BUILTIN_KEEPALIVE_SITE_METADATA = {
     "chatgpt": {
         "site_id": "chatgpt",
@@ -242,6 +277,23 @@ def get_default_mirror_user_data_root(user_data_root: str = "") -> str:
     return os.path.join(get_default_workspace_root(), "temp_user_data")
 
 
+def get_default_split_user_data_profiles_root(user_data_root: str = "") -> str:
+    user_data_root_text = str(user_data_root or "").strip()
+    if user_data_root_text:
+        expanded_user_data_root = os.path.abspath(os.path.expanduser(user_data_root_text))
+        return os.path.join(os.path.dirname(expanded_user_data_root), "UserDataSplited")
+    return os.path.join(get_default_workspace_root(), "UserDataSplited")
+
+
+def profile_name_to_user_data_dir_name(profile_name: str) -> str:
+    profile_name = str(profile_name or "").strip()
+    match = re.match(r"^Profile\s+(\d+)$", profile_name)
+    if match:
+        return f"UserDataProfile{match.group(1)}"
+    slug = re.sub(r"[^a-zA-Z0-9]+", "", profile_name)
+    return f"UserData{slug or 'Profile'}"
+
+
 def is_legacy_default_mirror_root(mirror_user_data_root: str) -> bool:
     mirror_root_text = str(mirror_user_data_root or "").strip()
     if not mirror_root_text:
@@ -268,6 +320,7 @@ def get_default_path_config() -> Dict[str, str]:
         "chromium_dir": chromium_hint,
         "chromedriver_path": os.path.join(workspace_root, "drivers", driver_name),
         "user_data_root": os.path.join(workspace_root, "user-data"),
+        "user_data_profiles_root": get_default_split_user_data_profiles_root(os.path.join(workspace_root, "user-data")),
         "mirror_user_data_root": get_default_mirror_user_data_root(os.path.join(workspace_root, "user-data")),
         "bookmarks_template_path": bookmarks_template_path,
         "fingerprint_zip_path": os.path.join(workspace_root, "extensions", "fingerprint-extension.zip"),
@@ -306,7 +359,7 @@ def build_default_config() -> Dict:
             "minimize_to_tray_on_close": True,
             "language": detect_default_language(),
             "browser_engine": DEFAULT_BROWSER_ENGINE,
-            "concurrency_mode": "block",
+            "concurrency_mode": "per_profile_live",
             "window_bounds": {
                 "x": -1,
                 "y": -1,
@@ -1075,6 +1128,7 @@ def format_keepalive_site_status(
 def normalize_profile_entry(entry: Dict, legacy_keepalive_sites: Optional[Dict] = None) -> Dict:
     normalized = dict(entry) if isinstance(entry, dict) else {}
     normalized["profile_name"] = str(normalized.get("profile_name", "")).strip()
+    normalized["user_data_dir_name"] = str(normalized.get("user_data_dir_name", "")).strip()
     normalized["account"] = str(normalized.get("account", "")).strip()
     normalized["notes"] = str(normalized.get("notes", "")).strip()
     normalized["keepalive_enabled"] = bool(normalized.get("keepalive_enabled", False))
@@ -1166,6 +1220,8 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     loaded = dict(config) if isinstance(config, dict) else {}
 
     loaded_paths = loaded.get("paths", {})
+    loaded_has_user_data_profiles_root = isinstance(loaded_paths, dict) and "user_data_profiles_root" in loaded_paths
+    loaded_has_mirror_user_data_root = isinstance(loaded_paths, dict) and "mirror_user_data_root" in loaded_paths
     if isinstance(loaded_paths, dict):
         allowed_path_keys = set(normalized["paths"].keys())
         normalized["paths"].update(
@@ -1302,9 +1358,11 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     normalized["app"]["browser_engine"] = normalize_browser_engine_name(
         normalized["app"].get("browser_engine", DEFAULT_BROWSER_ENGINE)
     )
-    concurrency_mode = str(normalized["app"].get("concurrency_mode", "block")).strip().lower()
-    if concurrency_mode not in {"block", "mirror_isolated"}:
-        concurrency_mode = "block"
+    concurrency_mode = str(normalized["app"].get("concurrency_mode", "per_profile_live")).strip().lower()
+    if concurrency_mode == "mirror_isolated":
+        concurrency_mode = "per_profile_live"
+    if concurrency_mode not in {"block", "per_profile_live"}:
+        concurrency_mode = "per_profile_live"
     normalized["app"]["concurrency_mode"] = concurrency_mode
     normalized["mcp"]["enabled"] = bool(normalized["mcp"].get("enabled", False))
     normalized["mcp"]["headless"] = bool(normalized["mcp"].get("headless", False))
@@ -1343,9 +1401,17 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     normalized["mirror"]["last_run_message"] = str(normalized["mirror"].get("last_run_message", "")).strip()
     normalized["mirror"]["last_run_profile_count"] = max(0, int(normalized["mirror"].get("last_run_profile_count", 0)))
     user_data_root = str(normalized["paths"].get("user_data_root", "")).strip()
+    user_data_profiles_root = str(normalized["paths"].get("user_data_profiles_root", "")).strip()
     mirror_user_data_root = str(normalized["paths"].get("mirror_user_data_root", "")).strip()
+    expected_split_root = get_default_split_user_data_profiles_root(user_data_root)
     expected_mirror_root = get_default_mirror_user_data_root(user_data_root)
-    if not mirror_user_data_root or is_legacy_default_mirror_root(mirror_user_data_root):
+    if not loaded_has_user_data_profiles_root or not user_data_profiles_root:
+        normalized["paths"]["user_data_profiles_root"] = expected_split_root
+    if (
+        not loaded_has_mirror_user_data_root
+        or not mirror_user_data_root
+        or is_legacy_default_mirror_root(mirror_user_data_root)
+    ):
         normalized["paths"]["mirror_user_data_root"] = expected_mirror_root
     return normalized
 
@@ -1399,24 +1465,136 @@ def discover_profile_directories(user_data_root: str) -> List[str]:
     return profiles
 
 
+def get_user_data_profiles_root(config: Dict) -> str:
+    normalized = normalize_config(config)
+    paths = normalized.get("paths", {})
+    root = str(paths.get("user_data_profiles_root", "") or "").strip()
+    if root:
+        return os.path.abspath(os.path.expanduser(root))
+    legacy_root = str(paths.get("user_data_root", "") or "").strip()
+    if legacy_root:
+        return os.path.abspath(os.path.expanduser(legacy_root))
+    return ""
+
+
+def get_profile_record(config: Dict, profile_name: str) -> Dict:
+    normalized = normalize_config(config)
+    profile_name = str(profile_name or "").strip()
+    for item in normalized.get("profiles", []):
+        if item.get("profile_name") == profile_name:
+            return item
+    return {}
+
+
+def get_profile_user_data_dir_name(config: Dict, profile_name: str) -> str:
+    record = get_profile_record(config, profile_name)
+    configured = str(record.get("user_data_dir_name", "") or "").strip()
+    if configured:
+        return configured
+    return profile_name_to_user_data_dir_name(profile_name)
+
+
+def get_profile_user_data_root(config: Dict, profile_name: str) -> str:
+    normalized = normalize_config(config)
+    split_root = get_user_data_profiles_root(normalized)
+    user_data_dir_name = get_profile_user_data_dir_name(normalized, profile_name)
+    split_candidate = os.path.join(split_root, user_data_dir_name) if split_root else ""
+    if split_candidate and os.path.isdir(split_candidate):
+        return split_candidate
+
+    legacy_root = str(normalized.get("paths", {}).get("user_data_root", "") or "").strip()
+    if legacy_root:
+        legacy_root = os.path.abspath(os.path.expanduser(legacy_root))
+        legacy_profile_dir = os.path.join(legacy_root, str(profile_name or "").strip())
+        if os.path.isdir(legacy_profile_dir):
+            return legacy_root
+
+    if split_candidate and os.path.isdir(split_root):
+        return split_candidate
+
+    if split_candidate:
+        return split_candidate
+    return legacy_root if legacy_root else ""
+
+
+def get_profile_directory_path(config: Dict, profile_name: str) -> str:
+    profile_root = get_profile_user_data_root(config, profile_name)
+    if not profile_root:
+        return ""
+    return os.path.join(profile_root, str(profile_name or "").strip())
+
+
+def discover_profiles_from_split_roots(user_data_profiles_root: str) -> List[Dict]:
+    root = os.path.abspath(os.path.expanduser(str(user_data_profiles_root or "").strip()))
+    if not root or not os.path.isdir(root):
+        return []
+    results: List[Dict] = []
+    for entry_name in sorted(os.listdir(root)):
+        full_path = os.path.join(root, entry_name)
+        if not os.path.isdir(full_path):
+            continue
+        if entry_name == "mirror_disk":
+            continue
+        profile_names = discover_profile_directories(full_path)
+        if len(profile_names) != 1:
+            continue
+        profile_name = profile_names[0]
+        results.append(
+            {
+                "profile_name": profile_name,
+                "user_data_dir_name": entry_name,
+                "user_data_root": full_path,
+                "profile_dir": os.path.join(full_path, profile_name),
+            }
+        )
+    results.sort(key=lambda item: profile_sort_key(item.get("profile_name", "")))
+    return results
+
+
 def sync_profiles_with_user_data(config: Dict) -> Dict:
     normalized = normalize_config(config)
-    user_data_root = normalized["paths"].get("user_data_root", "")
-    discovered = discover_profile_directories(user_data_root)
+    user_data_profiles_root = get_user_data_profiles_root(normalized)
+    split_profiles = discover_profiles_from_split_roots(user_data_profiles_root)
     existing = {item["profile_name"]: item for item in normalized["profiles"]}
 
-    for profile_name in discovered:
-        if profile_name not in existing:
-            normalized["profiles"].append(
-                normalize_profile_entry(
-                    {
-                        "profile_name": profile_name,
-                        "account": "",
-                        "keepalive_enabled": False,
-                        "keepalive_sites": {},
-                    }
+    if split_profiles:
+        for discovered_profile in split_profiles:
+            profile_name = str(discovered_profile.get("profile_name", "")).strip()
+            if not profile_name:
+                continue
+            if profile_name not in existing:
+                normalized["profiles"].append(
+                    normalize_profile_entry(
+                        {
+                            "profile_name": profile_name,
+                            "user_data_dir_name": discovered_profile.get("user_data_dir_name", ""),
+                            "account": "",
+                            "keepalive_enabled": False,
+                            "keepalive_sites": {},
+                        }
+                    )
                 )
+                continue
+            existing[profile_name]["user_data_dir_name"] = (
+                str(discovered_profile.get("user_data_dir_name", "")).strip()
+                or existing[profile_name].get("user_data_dir_name", "")
             )
+    else:
+        user_data_root = normalized["paths"].get("user_data_root", "")
+        discovered = discover_profile_directories(user_data_root)
+        for profile_name in discovered:
+            if profile_name not in existing:
+                normalized["profiles"].append(
+                    normalize_profile_entry(
+                        {
+                            "profile_name": profile_name,
+                            "user_data_dir_name": profile_name_to_user_data_dir_name(profile_name),
+                            "account": "",
+                            "keepalive_enabled": False,
+                            "keepalive_sites": {},
+                        }
+                    )
+                )
 
     normalized["profiles"] = sort_profiles(normalized["profiles"])
     return normalized
@@ -1424,13 +1602,14 @@ def sync_profiles_with_user_data(config: Dict) -> Dict:
 
 def next_profile_name(config: Dict) -> str:
     highest = 0
-    for item in normalize_config(config).get("profiles", []):
+    normalized = normalize_config(config)
+    for item in normalized.get("profiles", []):
         match = re.match(r"^Profile\s+(\d+)$", item.get("profile_name", ""))
         if match:
             highest = max(highest, int(match.group(1)))
 
-    user_data_root = normalize_config(config)["paths"].get("user_data_root", "")
-    for profile_name in discover_profile_directories(user_data_root):
+    for discovered in discover_profiles_from_split_roots(get_user_data_profiles_root(normalized)):
+        profile_name = str(discovered.get("profile_name", "")).strip()
         match = re.match(r"^Profile\s+(\d+)$", profile_name)
         if match:
             highest = max(highest, int(match.group(1)))
@@ -1438,12 +1617,177 @@ def next_profile_name(config: Dict) -> str:
     return f"Profile {highest + 1}"
 
 
-def ensure_profile_directory(user_data_root: str, profile_name: str) -> str:
-    if not user_data_root:
-        raise ValueError("UserData root is empty.")
-    target = os.path.join(user_data_root, profile_name)
+def ensure_profile_root_directory(profile_root: str) -> str:
+    normalized = os.path.abspath(os.path.expanduser(str(profile_root or "").strip()))
+    if not normalized:
+        raise ValueError("Profile UserData root is empty.")
+    os.makedirs(normalized, exist_ok=True)
+    return normalized
+
+
+def ensure_profile_directory(config_or_root, profile_name: str, user_data_dir_name: str = "") -> str:
+    profile_name = str(profile_name or "").strip()
+    if not profile_name:
+        raise ValueError("profile_name is required")
+
+    if isinstance(config_or_root, dict):
+        normalized = normalize_config(config_or_root)
+        profile_root = get_profile_user_data_root(normalized, profile_name)
+    else:
+        base_root = str(config_or_root or "").strip()
+        if not base_root:
+            raise ValueError("UserData root is empty.")
+        if user_data_dir_name:
+            profile_root = os.path.join(base_root, str(user_data_dir_name).strip())
+        else:
+            profile_root = base_root
+
+    profile_root = ensure_profile_root_directory(profile_root)
+    target = os.path.join(profile_root, profile_name)
     os.makedirs(target, exist_ok=True)
     return target
+
+
+def get_profile_runtime_lock_path(config: Dict, profile_name: str) -> str:
+    profile_root = get_profile_user_data_root(config, profile_name)
+    if not profile_root:
+        return ""
+    return os.path.join(profile_root, PROFILE_RUNTIME_LOCK_FILENAME)
+
+
+def _should_skip_profile_root_dir(name: str) -> bool:
+    return name in SPLIT_USER_DATA_ROOT_EXCLUDE_DIRS or bool(re.match(r"^Profile\s+\d+$", str(name or "").strip()))
+
+
+def _copy_file(src_path: str, dst_path: str) -> None:
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    shutil.copy2(src_path, dst_path)
+
+
+def _copy_root_state_into_profile_root(shared_root: str, target_profile_root: str) -> None:
+    shared_root = os.path.abspath(os.path.expanduser(str(shared_root or "").strip()))
+    target_profile_root = ensure_profile_root_directory(target_profile_root)
+    if not os.path.isdir(shared_root):
+        raise FileNotFoundError(f"shared UserData root not found: {shared_root}")
+
+    for item_name in sorted(os.listdir(shared_root)):
+        source_path = os.path.join(shared_root, item_name)
+        if item_name in SPLIT_USER_DATA_ROOT_EXCLUDE_FILES or _should_skip_profile_root_dir(item_name):
+            continue
+        destination_path = os.path.join(target_profile_root, item_name)
+        if os.path.isfile(source_path):
+            _copy_file(source_path, destination_path)
+            continue
+        if not os.path.isdir(source_path):
+            continue
+        for dirpath, dirnames, filenames in os.walk(source_path):
+            dirnames[:] = [name for name in dirnames if name not in SPLIT_USER_DATA_ROOT_EXCLUDE_DIRS]
+            rel_dir = os.path.relpath(dirpath, shared_root)
+            current_target_dir = os.path.join(target_profile_root, rel_dir)
+            os.makedirs(current_target_dir, exist_ok=True)
+            for filename in filenames:
+                if filename in SPLIT_USER_DATA_ROOT_EXCLUDE_FILES:
+                    continue
+                _copy_file(os.path.join(dirpath, filename), os.path.join(current_target_dir, filename))
+
+
+def cleanup_profile_user_data_root(profile_root: str) -> Dict[str, int]:
+    profile_root = os.path.abspath(os.path.expanduser(str(profile_root or "").strip()))
+    removed_dirs = 0
+    removed_files = 0
+    if not os.path.isdir(profile_root):
+        return {"removed_dirs": 0, "removed_files": 0}
+
+    for dirpath, dirnames, filenames in os.walk(profile_root, topdown=True):
+        retained = []
+        for dirname in list(dirnames):
+            full_path = os.path.join(dirpath, dirname)
+            if dirname in SPLIT_PROFILE_CACHE_DIRS or dirname in SPLIT_USER_DATA_ROOT_EXCLUDE_DIRS:
+                shutil.rmtree(full_path, ignore_errors=True)
+                removed_dirs += 1
+                continue
+            retained.append(dirname)
+        dirnames[:] = retained
+
+        for filename in filenames:
+            if filename not in SPLIT_PROFILE_EXCLUDE_FILES and filename not in SPLIT_USER_DATA_ROOT_EXCLUDE_FILES:
+                continue
+            try:
+                os.remove(os.path.join(dirpath, filename))
+                removed_files += 1
+            except OSError:
+                pass
+
+    return {"removed_dirs": removed_dirs, "removed_files": removed_files}
+
+
+def migrate_shared_user_data_to_split_roots(
+    config: Dict,
+    target_root: str = "",
+    logger: Optional[Callable[[str], None]] = None,
+) -> Dict:
+    normalized = normalize_config(config)
+    shared_root = os.path.abspath(os.path.expanduser(str(normalized.get("paths", {}).get("user_data_root", "") or "").strip()))
+    if not shared_root or not os.path.isdir(shared_root):
+        raise FileNotFoundError(f"shared UserData root not found: {shared_root}")
+
+    split_root = os.path.abspath(
+        os.path.expanduser(
+            str(target_root or normalized.get("paths", {}).get("user_data_profiles_root", "") or "").strip()
+        )
+    )
+    if not split_root:
+        raise ValueError("target split UserData root is required")
+    os.makedirs(split_root, exist_ok=True)
+    os.makedirs(os.path.join(split_root, "mirror_disk"), exist_ok=True)
+
+    discovered_profiles = discover_profile_directories(shared_root)
+    migrated_profiles = []
+    migrated_config = copy.deepcopy(normalized)
+    existing_by_name = {item.get("profile_name", ""): item for item in migrated_config.get("profiles", []) if item.get("profile_name")}
+
+    for profile_name in discovered_profiles:
+        user_data_dir_name = (
+            str(existing_by_name.get(profile_name, {}).get("user_data_dir_name", "")).strip()
+            or profile_name_to_user_data_dir_name(profile_name)
+        )
+        target_profile_root = os.path.join(split_root, user_data_dir_name)
+        target_profile_dir = os.path.join(target_profile_root, profile_name)
+        if logger:
+            logger(f"migrating {profile_name} -> {target_profile_root}")
+        if os.path.exists(target_profile_root):
+            shutil.rmtree(target_profile_root, ignore_errors=True)
+        ensure_profile_root_directory(target_profile_root)
+        _copy_root_state_into_profile_root(shared_root, target_profile_root)
+        shutil.copytree(os.path.join(shared_root, profile_name), target_profile_dir, dirs_exist_ok=True)
+        cleanup_profile_user_data_root(target_profile_root)
+
+        record = existing_by_name.get(profile_name)
+        if record is None:
+            record = normalize_profile_entry({"profile_name": profile_name})
+            migrated_config.setdefault("profiles", []).append(record)
+            existing_by_name[profile_name] = record
+        record["user_data_dir_name"] = user_data_dir_name
+        migrated_profiles.append(
+            {
+                "profile_name": profile_name,
+                "user_data_dir_name": user_data_dir_name,
+                "profile_root": target_profile_root,
+                "profile_dir": target_profile_dir,
+            }
+        )
+
+    migrated_config.setdefault("paths", {})
+    migrated_config["paths"]["user_data_profiles_root"] = split_root
+    migrated_config.setdefault("app", {})
+    migrated_config["app"]["concurrency_mode"] = "per_profile_live"
+    migrated_config["profiles"] = sort_profiles(migrated_config.get("profiles", []))
+    return {
+        "config": migrated_config,
+        "shared_root": shared_root,
+        "split_root": split_root,
+        "profiles": migrated_profiles,
+    }
 
 
 def profile_name_to_marker_name(profile_name: str) -> str:
@@ -1594,12 +1938,10 @@ def iter_bookmark_nodes(nodes: Sequence[Dict]):
 
 def ensure_profile_bookmark_marker(config: Dict, profile_name: str) -> bool:
     normalized = normalize_config(config)
-    paths = normalized.get("paths", {})
-    user_data_root = paths.get("user_data_root", "")
-    if not user_data_root:
+    if not get_profile_user_data_root(normalized, profile_name):
         return False
 
-    profile_dir = ensure_profile_directory(user_data_root, profile_name)
+    profile_dir = ensure_profile_directory(normalized, profile_name)
     bookmarks_path = os.path.join(profile_dir, "Bookmarks")
     if not os.path.exists(bookmarks_path):
         return False
@@ -1698,12 +2040,11 @@ def ensure_profile_bookmark_marker(config: Dict, profile_name: str) -> bool:
 def ensure_profile_bookmarks_initialized(config: Dict, profile_name: str, overwrite: bool = False) -> bool:
     normalized = normalize_config(config)
     paths = normalized.get("paths", {})
-    user_data_root = paths.get("user_data_root", "")
     template_path = paths.get("bookmarks_template_path", "")
-    if not user_data_root or not template_path:
+    if not get_profile_user_data_root(normalized, profile_name) or not template_path:
         return False
 
-    profile_dir = ensure_profile_directory(user_data_root, profile_name)
+    profile_dir = ensure_profile_directory(normalized, profile_name)
     bookmarks_path = os.path.join(profile_dir, "Bookmarks")
     changed = False
     if os.path.exists(bookmarks_path) and not overwrite:
@@ -1860,6 +2201,30 @@ def normalize_fs_path(path_value: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(path_value))))
 
 
+def _extract_switch_value(cmdline: Sequence[str], prefix: str) -> str:
+    prefix = str(prefix or "").strip().lower()
+    if not prefix:
+        return ""
+    for item in cmdline or []:
+        text = str(item or "").strip()
+        lower = text.lower()
+        if lower.startswith(prefix):
+            return text[len(prefix):]
+    return ""
+
+
+def _profile_root_map(config: Dict) -> Dict[str, str]:
+    normalized = normalize_config(config)
+    mapping: Dict[str, str] = {}
+    for item in normalized.get("profiles", []):
+        profile_name = str(item.get("profile_name", "")).strip()
+        profile_root = get_profile_user_data_root(normalized, profile_name)
+        if not profile_name or not profile_root:
+            continue
+        mapping[normalize_fs_path(profile_root)] = profile_name
+    return mapping
+
+
 def find_running_chromium_processes(config: Dict) -> List[Dict]:
     paths = normalize_config(config).get("paths", {})
     chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
@@ -1868,6 +2233,7 @@ def find_running_chromium_processes(config: Dict) -> List[Dict]:
     chromium_root = os.path.dirname(chromium_binary)
     binary_norm = normalize_fs_path(chromium_binary)
     root_norm = normalize_fs_path(chromium_root)
+    profile_root_map = _profile_root_map(config)
 
     matches: List[Dict] = []
     for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
@@ -1906,6 +2272,11 @@ def find_running_chromium_processes(config: Dict) -> List[Dict]:
                     "pid": proc.info.get("pid"),
                     "name": proc.info.get("name", ""),
                     "path": matched_path,
+                    "cmdline": cmdline,
+                    "profile_name": profile_root_map.get(
+                        normalize_fs_path(_extract_switch_value(cmdline, "--user-data-dir="))
+                    )
+                    or "",
                 }
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -1979,14 +2350,17 @@ def get_chromium_processes_for_profile(config: Dict, profile_name: str) -> List[
     normalized = normalize_config(config)
     paths = normalized.get("paths", {})
     chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
-    user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
-    if not chromium_binary or not user_data_root or not profile_name:
+    profile_root = get_profile_user_data_root(normalized, profile_name)
+    if not chromium_binary or not profile_root or not profile_name:
         return []
 
     chromium_root = os.path.dirname(chromium_binary)
     binary_norm = normalize_fs_path(chromium_binary)
     root_norm = normalize_fs_path(chromium_root)
-    user_data_norm = normalize_fs_path(user_data_root)
+    allowed_user_data_roots = {normalize_fs_path(profile_root)}
+    legacy_root = str(paths.get("user_data_root", "") or "").strip()
+    if legacy_root:
+        allowed_user_data_roots.add(normalize_fs_path(legacy_root))
     profile_arg = f"--profile-directory={profile_name}".lower()
 
     matches: List[Dict] = []
@@ -2024,7 +2398,11 @@ def get_chromium_processes_for_profile(config: Dict, profile_name: str) -> List[
             joined = " ".join(cmdline)
             joined_norm = joined.replace("/", os.sep).replace("\\", os.sep).lower()
             joined_lower = joined.lower()
-            if user_data_norm.lower() not in joined_norm:
+            extracted_user_data = _extract_switch_value(cmdline, "--user-data-dir=")
+            if extracted_user_data:
+                if normalize_fs_path(extracted_user_data) not in allowed_user_data_roots:
+                    continue
+            elif not any(candidate.lower() in joined_norm for candidate in allowed_user_data_roots):
                 continue
             if profile_arg not in joined_lower and profile_name.lower() not in joined_lower:
                 continue
@@ -2114,6 +2492,9 @@ class SingleRunLock:
         self.acquired = False
 
     def try_acquire(self) -> bool:
+        lock_dir = os.path.dirname(self.lock_path)
+        if lock_dir:
+            os.makedirs(lock_dir, exist_ok=True)
         if os.path.exists(self.lock_path):
             try:
                 age = time.time() - os.path.getmtime(self.lock_path)
@@ -2382,11 +2763,11 @@ def build_direct_launch_command(profile_name: str, config: Dict, site: str = "")
     paths = normalized["paths"]
     launch_settings = normalized.get("launch", {})
     chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
-    user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
+    user_data_root = get_profile_user_data_root(normalized, profile_name)
     if not chromium_binary or not os.path.exists(chromium_binary):
         raise FileNotFoundError(f"chromium browser not found: {chromium_binary or paths.get('chromium_dir', '')}")
     if not user_data_root:
-        raise ValueError("user_data_root is required")
+        raise ValueError(f"profile UserData root is required for {profile_name}")
 
     command = [
         chromium_binary,
@@ -3149,14 +3530,14 @@ def create_driver_for_profile(config: Dict, profile_name: str):
     paths = config["paths"]
     chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
     chromedriver_binary = resolve_chromedriver_path(paths.get("chromedriver_path", ""))
-    user_data_root = os.path.abspath(os.path.expanduser(paths.get("user_data_root", "")))
+    user_data_root = get_profile_user_data_root(config, profile_name)
 
     if not chromium_binary or not os.path.exists(chromium_binary):
         raise FileNotFoundError(f"chromium browser not found: {chromium_binary or paths.get('chromium_dir', '')}")
     if not chromedriver_binary or not os.path.exists(chromedriver_binary):
         raise FileNotFoundError(f"chromedriver not found: {chromedriver_binary or paths.get('chromedriver_path', '')}")
     if not os.path.isdir(user_data_root):
-        raise FileNotFoundError(f"UserData root not found: {user_data_root}")
+        raise FileNotFoundError(f"Profile UserData root not found: {user_data_root}")
 
     options = uc.ChromeOptions()
     options.binary_location = chromium_binary
@@ -3227,6 +3608,7 @@ def run_profile_keepalive(
     failed_sites = []
     disabled_sites = []
     soft_sites = []
+    profile_lock = SingleRunLock(get_profile_runtime_lock_path(config, profile_name))
     before_pids = [
         int(item.get("pid") or 0)
         for item in get_chromium_processes_for_profile(config, profile_name)
@@ -3234,6 +3616,22 @@ def run_profile_keepalive(
     ]
 
     try:
+        if before_pids:
+            return {
+                "profile_name": profile_name,
+                "status": "skipped",
+                "message": f"{profile_name} chromium already running",
+                "details": {},
+                "disabled_sites": [],
+            }
+        if not profile_lock.try_acquire():
+            return {
+                "profile_name": profile_name,
+                "status": "skipped",
+                "message": f"{profile_name} runtime lock is already held",
+                "details": {},
+                "disabled_sites": [],
+            }
         if stop_controller:
             stop_controller.check_or_raise()
         driver = create_driver_for_profile(config, profile_name)
@@ -3334,6 +3732,11 @@ def run_profile_keepalive(
             except Exception:
                 pass
         cleanup_keepalive_profile_processes(config, profile_name, before_pids=before_pids, logger=logger)
+        try:
+            cleanup_profile_user_data_root(get_profile_user_data_root(config, profile_name))
+        except Exception:
+            pass
+        profile_lock.release()
 
 
 def run_keepalive_job(
@@ -3373,52 +3776,7 @@ def run_keepalive_job(
         keepalive["last_run_source"] = source
         save_app_config(config, path)
 
-        running_processes = find_running_chromium_processes(config)
         selected_set = {item for item in (selected_profiles or []) if item}
-        manual_single_profile = source.startswith("manual:profile:") and len(selected_set) == 1
-        if running_processes and not manual_single_profile:
-            finished_at = now_text()
-            pid_text = ", ".join(str(item.get("pid")) for item in running_processes[:6])
-            message = f"chromium already running, skip keepalive (pid: {pid_text})"
-            keepalive["last_run_finished_at"] = finished_at
-            keepalive["last_run_status"] = "skipped"
-            keepalive["last_run_message"] = message
-            keepalive["last_run_profile_count"] = 0
-            keepalive["last_run_details"] = []
-            save_app_config(config, path)
-            log_message(logger, message)
-            return {
-                "status": "skipped",
-                "message": message,
-                "profile_results": [],
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "source": source,
-            }
-
-        if manual_single_profile:
-            target_profile_name = next(iter(selected_set))
-            target_profile_processes = get_chromium_processes_for_profile(config, target_profile_name)
-            if target_profile_processes:
-                finished_at = now_text()
-                pid_text = ", ".join(str(item.get("pid")) for item in target_profile_processes[:6])
-                message = f"{target_profile_name} chromium already running, skip keepalive (pid: {pid_text})"
-                keepalive["last_run_finished_at"] = finished_at
-                keepalive["last_run_status"] = "skipped"
-                keepalive["last_run_message"] = message
-                keepalive["last_run_profile_count"] = 0
-                keepalive["last_run_details"] = []
-                save_app_config(config, path)
-                log_message(logger, message)
-                return {
-                    "status": "skipped",
-                    "message": message,
-                    "profile_results": [],
-                    "started_at": started_at,
-                    "finished_at": finished_at,
-                    "source": source,
-                }
-
         target_profiles = []
         for item in config["profiles"]:
             profile_name = item.get("profile_name", "")
@@ -3558,7 +3916,10 @@ def run_keepalive_job(
             final_message = "at least one profile partially failed"
         elif profile_results and all(item.get("status") == "skipped" for item in profile_results):
             final_status = "skipped"
-            final_message = "all selected profiles were skipped"
+            if len(profile_results) == 1 and profile_results[0].get("message"):
+                final_message = str(profile_results[0].get("message"))
+            else:
+                final_message = "all selected profiles were skipped"
         elif any_skipped:
             final_status = "partial"
             final_message = "at least one profile was skipped"
@@ -3587,7 +3948,10 @@ def run_keepalive_job(
                 pass
             try:
                 mirror_manager = MirrorManager(config)
-                mirror_summary = mirror_manager.refresh_snapshots(logger=logger)
+                mirror_summary = mirror_manager.refresh_snapshots(
+                    profile_names=[item.get("profile_name", "") for item in target_profiles if item.get("profile_name")],
+                    logger=logger,
+                )
                 config = load_app_config(path)
                 config["mirror"]["last_run_finished_at"] = mirror_summary.get("finished_at", now_text())
                 config["mirror"]["last_run_status"] = mirror_summary.get("status", "success")
