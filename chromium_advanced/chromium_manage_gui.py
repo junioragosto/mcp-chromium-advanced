@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -20,7 +21,7 @@ from typing import Dict, List, Optional
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from PyQt5.QtCore import QLockFile, QProcess, QThread, QTimer, Qt, QTime, pyqtSignal
+from PyQt5.QtCore import QLockFile, QProcess, QThread, QTimer, Qt, QTime, QSize, pyqtSignal
 from PyQt5.QtGui import QColor, QGuiApplication, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
@@ -55,17 +56,25 @@ from PyQt5.QtWidgets import (
 
 from chromium_advanced.chromium_profile_lib import (
     APP_NAME,
-    KEEPALIVE_SITE_ORDER,
     LEGACY_CHATGPT_PROMPT,
     KeepAliveStopController,
+    build_keepalive_plugin_template,
     build_profile_detail_text,
+    delete_keepalive_plugin_source,
     format_keepalive_site_status,
+    get_keepalive_plugin_records,
+    get_keepalive_plugin_root,
+    get_keepalive_plugin_source_text,
+    normalize_keepalive_site_result_for_display,
     detect_default_language,
     ensure_profile_directory,
     ensure_profile_bookmarks_initialized,
     get_default_config_path,
     get_default_mirror_user_data_root,
     get_hidden_subprocess_kwargs,
+    get_keepalive_site_icon_path,
+    get_keepalive_site_ids,
+    get_keepalive_site_label,
     is_legacy_default_mirror_root,
     find_running_chromium_processes,
     get_project_root,
@@ -78,8 +87,11 @@ from chromium_advanced.chromium_profile_lib import (
     normalize_language_code,
     profile_sort_key,
     save_app_config,
+    save_keepalive_plugin_source,
+    migrate_keepalive_site_id_references,
     sync_profiles_with_user_data,
     update_profile_launch_time,
+    warm_keepalive_site_icon_cache,
     run_keepalive_job,
 )
 from chromium_advanced.browser_engines.constants import BROWSER_ENGINE_OPTIONS, DEFAULT_BROWSER_ENGINE
@@ -365,11 +377,12 @@ def set_system_auto_start_enabled(enabled: bool) -> None:
 
 
 class ProfileEditDialog(QDialog):
-    def __init__(self, profile: Dict, parent=None, translator=None):
+    def __init__(self, profile: Dict, config: Optional[Dict] = None, parent=None, translator=None):
         super().__init__(parent)
         self.translate = translator or (lambda key, fallback="": fallback or key)
+        self.config = config or {}
         self.setWindowTitle(self.translate("profile_dialog_title"))
-        self.resize(500, 220)
+        self.resize(560, 320)
         layout = QFormLayout(self)
 
         self.profile_name_edit = QLineEdit(profile.get("profile_name", ""))
@@ -377,14 +390,33 @@ class ProfileEditDialog(QDialog):
         self.account_edit = QLineEdit(profile.get("account", ""))
         self.keepalive_enabled = QCheckBox(self.translate("profile_dialog_keepalive"))
         self.keepalive_enabled.setChecked(profile.get("keepalive_enabled", False))
+        self.site_flags = dict(profile.get("keepalive_sites", {}) or {})
         self.notes_edit = QTextEdit(profile.get("notes", ""))
         self.notes_edit.setAcceptRichText(False)
         self.notes_edit.setPlaceholderText(self.translate("profile_dialog_notes_placeholder"))
         self.notes_edit.setMaximumHeight(90)
+        self.site_box = QWidget()
+        self.site_box_layout = QHBoxLayout(self.site_box)
+        self.site_box_layout.setContentsMargins(0, 0, 0, 0)
+        self.site_box_layout.setSpacing(8)
+        self.site_checkboxes = {}
+
+        for site_name in get_keepalive_site_ids(self.config):
+            label = self.translate(f"site_name_{site_name}", get_keepalive_site_label(site_name, self.config))
+            checkbox = QCheckBox(label)
+            icon_path = get_keepalive_site_icon_path(site_name, self.config, fetch=False)
+            if icon_path:
+                checkbox.setIcon(QIcon(icon_path))
+                checkbox.setIconSize(QSize(16, 16))
+            checkbox.setChecked(bool(self.site_flags.get(site_name, False)))
+            self.site_checkboxes[site_name] = checkbox
+            self.site_box_layout.addWidget(checkbox)
+        self.site_box_layout.addStretch()
 
         layout.addRow("Profile", self.profile_name_edit)
         layout.addRow("Account", self.account_edit)
         layout.addRow("", self.keepalive_enabled)
+        layout.addRow(self.translate("profile_dialog_sites"), self.site_box)
         layout.addRow(self.translate("profile_dialog_notes"), self.notes_edit)
 
         button_row = QHBoxLayout()
@@ -402,7 +434,45 @@ class ProfileEditDialog(QDialog):
             "profile_name": self.profile_name_edit.text().strip(),
             "account": self.account_edit.text().strip(),
             "keepalive_enabled": self.keepalive_enabled.isChecked(),
+            "keepalive_sites": {site_name: checkbox.isChecked() for site_name, checkbox in self.site_checkboxes.items()},
             "notes": self.notes_edit.toPlainText().strip(),
+        }
+
+
+class KeepalivePluginCreateDialog(QDialog):
+    def __init__(self, parent=None, translator=None):
+        super().__init__(parent)
+        self.translate = translator or (lambda key, fallback="": fallback or key)
+        self.setWindowTitle(self.translate("plugin_dialog_title"))
+        self.resize(420, 180)
+        layout = QFormLayout(self)
+
+        self.site_id_edit = QLineEdit()
+        self.display_name_edit = QLineEdit()
+        self.home_url_edit = QLineEdit()
+        self.site_id_edit.setPlaceholderText(self.translate("plugin_dialog_site_id_placeholder"))
+        self.display_name_edit.setPlaceholderText(self.translate("plugin_dialog_display_name_placeholder"))
+        self.home_url_edit.setPlaceholderText(self.translate("plugin_dialog_home_url_placeholder"))
+
+        layout.addRow(self.translate("plugin_table_site_id"), self.site_id_edit)
+        layout.addRow(self.translate("plugin_table_display_name"), self.display_name_edit)
+        layout.addRow(self.translate("plugin_detail_home_url"), self.home_url_edit)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        save_button = QPushButton(self.translate("common_save"))
+        cancel_button = QPushButton(self.translate("common_cancel"))
+        save_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(save_button)
+        button_row.addWidget(cancel_button)
+        layout.addRow(button_row)
+
+    def get_data(self) -> Dict:
+        return {
+            "site_id": self.site_id_edit.text().strip(),
+            "display_name": self.display_name_edit.text().strip(),
+            "home_url": self.home_url_edit.text().strip(),
         }
 
 
@@ -493,6 +563,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
         self.refresh_all()
+        self.warm_keepalive_icon_cache_async()
         QTimer.singleShot(0, self.apply_initial_mcp_state)
 
         self.scheduler_timer = QTimer(self)
@@ -684,6 +755,12 @@ class ChromiumManagerWindow(QMainWindow):
         self.keepalive_tab.setWidget(self.keepalive_content)
         self.tabs.addTab(self.keepalive_tab, "")
 
+        self.plugin_tab = QWidget()
+        self.plugin_layout = QVBoxLayout(self.plugin_tab)
+        self.plugin_layout.setContentsMargins(12, 12, 12, 12)
+        self.plugin_layout.setSpacing(10)
+        self.tabs.addTab(self.plugin_tab, "")
+
         self.log_tab = QWidget()
         self.log_layout = QVBoxLayout(self.log_tab)
         self.log_layout.setContentsMargins(12, 12, 12, 12)
@@ -707,6 +784,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.tabs.addTab(self.config_tab, "")
 
         self.build_keepalive_tab()
+        self.build_plugin_tab()
         self.build_log_tab()
         self.build_mcp_log_tab()
         self.build_config_tab()
@@ -754,6 +832,15 @@ class ChromiumManagerWindow(QMainWindow):
         self.chatgpt_prompt = QLineEdit()
         self.chatgpt_conversation_hint = QLineEdit()
         self.google_query = QLineEdit()
+        self.keepalive_plugin_dirs = QLineEdit()
+        self.keepalive_plugin_dirs.setPlaceholderText(self.tr("keepalive_plugin_dirs_placeholder"))
+        self.keepalive_plugin_dirs_browse = QPushButton()
+        self.keepalive_plugin_dirs_browse.clicked.connect(self.pick_keepalive_plugin_dir)
+        self.keepalive_plugin_dirs_row = QWidget()
+        keepalive_plugin_dirs_layout = QHBoxLayout(self.keepalive_plugin_dirs_row)
+        keepalive_plugin_dirs_layout.setContentsMargins(0, 0, 0, 0)
+        keepalive_plugin_dirs_layout.addWidget(self.keepalive_plugin_dirs)
+        keepalive_plugin_dirs_layout.addWidget(self.keepalive_plugin_dirs_browse)
         self.schedule_time = FocusWheelTimeEdit()
         self.schedule_time.setDisplayFormat("HH:mm")
         self.schedule_time.setToolTip(self.tr("schedule_time_tooltip"))
@@ -768,6 +855,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.settings_layout.addRow(self.tr("chatgpt_prompt"), self.chatgpt_prompt)
         self.settings_layout.addRow(self.tr("chatgpt_hint"), self.chatgpt_conversation_hint)
         self.settings_layout.addRow(self.tr("google_query"), self.google_query)
+        self.settings_layout.addRow(self.tr("keepalive_plugin_dirs"), self.keepalive_plugin_dirs_row)
         self.settings_layout.addRow(self.tr("schedule_time"), self.schedule_time)
 
         keepalive_button_row = QHBoxLayout()
@@ -803,6 +891,93 @@ class ChromiumManagerWindow(QMainWindow):
         self.summary_layout.addRow(self.tr("next_run"), self.global_task_next_run)
         self.summary_layout.addRow(self.tr("today_result"), self.global_task_last_result)
         self.keepalive_layout.addWidget(self.summary_group)
+
+    def build_plugin_tab(self):
+        toolbar = QHBoxLayout()
+        self.btn_plugin_reload = QPushButton()
+        self.btn_plugin_new = QPushButton()
+        self.btn_plugin_save = QPushButton()
+        self.btn_plugin_delete = QPushButton()
+        self.btn_plugin_open_dir = QPushButton()
+        self.btn_plugin_reload.clicked.connect(self.refresh_keepalive_plugin_table)
+        self.btn_plugin_new.clicked.connect(self.create_keepalive_plugin)
+        self.btn_plugin_save.clicked.connect(self.save_current_keepalive_plugin)
+        self.btn_plugin_delete.clicked.connect(self.delete_current_keepalive_plugin)
+        self.btn_plugin_open_dir.clicked.connect(self.open_keepalive_plugin_dir)
+        toolbar.addWidget(self.btn_plugin_reload)
+        toolbar.addWidget(self.btn_plugin_new)
+        toolbar.addWidget(self.btn_plugin_save)
+        toolbar.addWidget(self.btn_plugin_delete)
+        toolbar.addWidget(self.btn_plugin_open_dir)
+        toolbar.addStretch()
+        self.plugin_layout.addLayout(toolbar)
+
+        self.plugin_splitter = QSplitter(Qt.Horizontal)
+        self.plugin_table = QTableWidget(0, 4)
+        self.plugin_table.setHorizontalHeaderLabels(
+            [
+                self.tr("plugin_table_site_id"),
+                self.tr("plugin_table_display_name"),
+                self.tr("plugin_table_type"),
+                self.tr("plugin_table_source"),
+            ]
+        )
+        self.plugin_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.plugin_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.plugin_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.plugin_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.plugin_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.plugin_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.plugin_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.plugin_table.itemSelectionChanged.connect(self.on_keepalive_plugin_selection_changed)
+        self.plugin_splitter.addWidget(self.plugin_table)
+
+        editor_panel = QWidget()
+        editor_layout = QVBoxLayout(editor_panel)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(8)
+
+        self.plugin_detail_group = QGroupBox()
+        self.plugin_detail_layout = QFormLayout(self.plugin_detail_group)
+        self.plugin_detail_site_id = QLabel("-")
+        self.plugin_detail_display_name = QLabel("-")
+        self.plugin_detail_type = QLabel("-")
+        self.plugin_detail_source = QLabel("-")
+        self.plugin_detail_source.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.plugin_detail_home_url = QLabel("-")
+        self.plugin_detail_home_url.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.plugin_detail_icon_url = QLabel("-")
+        self.plugin_detail_icon_url.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.plugin_detail_layout.addRow(self.tr("plugin_table_site_id"), self.plugin_detail_site_id)
+        self.plugin_detail_layout.addRow(self.tr("plugin_table_display_name"), self.plugin_detail_display_name)
+        self.plugin_detail_layout.addRow(self.tr("plugin_table_type"), self.plugin_detail_type)
+        self.plugin_detail_layout.addRow(self.tr("plugin_table_source"), self.plugin_detail_source)
+        self.plugin_detail_layout.addRow(self.tr("plugin_detail_home_url"), self.plugin_detail_home_url)
+        self.plugin_detail_layout.addRow(self.tr("plugin_detail_icon_url"), self.plugin_detail_icon_url)
+        editor_layout.addWidget(self.plugin_detail_group)
+
+        self.plugin_source_hint = QLabel()
+        self.plugin_source_hint.setWordWrap(True)
+        editor_layout.addWidget(self.plugin_source_hint)
+
+        self.plugin_source_editor = QPlainTextEdit()
+        self.plugin_source_editor.setPlaceholderText(self.tr("plugin_editor_placeholder"))
+        editor_layout.addWidget(self.plugin_source_editor, 1)
+
+        self.plugin_source_status = QLabel("-")
+        self.plugin_source_status.setWordWrap(True)
+        editor_layout.addWidget(self.plugin_source_status)
+
+        self.plugin_splitter.addWidget(editor_panel)
+        self.plugin_splitter.setSizes([360, 720])
+        self.plugin_layout.addWidget(self.plugin_splitter, 1)
+
+        self.keepalive_plugin_records = []
+        self.selected_plugin_site_id = ""
+        self.btn_plugin_save.setEnabled(False)
+        self.btn_plugin_delete.setEnabled(False)
+        self.plugin_source_editor.setReadOnly(True)
+        self.refresh_keepalive_plugin_table()
 
     def build_log_tab(self):
         log_toolbar = QHBoxLayout()
@@ -1056,6 +1231,12 @@ class ChromiumManagerWindow(QMainWindow):
                 self.trf("log_keepalive_finished", status=payload.get("status"), message=payload.get("message")),
                 prefix=self.keepalive_log_prefix or self.tr("keepalive_source_default"),
             )
+            if str((payload or {}).get("source", "")).startswith("internal-schedule") and str(
+                (payload or {}).get("status", "")
+            ) not in {"skipped", "stopped"}:
+                self.config = load_app_config(self.config_path)
+                self.config["keepalive"]["last_scheduled_run_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
+                self.config = save_app_config(self.config, self.config_path)
             self.keepalive_worker = None
             self.keepalive_target_profiles = []
             self.keepalive_running_profile_name = ""
@@ -1079,10 +1260,23 @@ class ChromiumManagerWindow(QMainWindow):
             self.reload_config_from_disk()
 
     def set_keepalive_buttons_enabled(self, enabled: bool):
+        self.btn_add.setEnabled(enabled)
+        self.btn_edit.setEnabled(enabled)
+        self.btn_remove.setEnabled(enabled)
+        self.btn_remove_with_dir.setEnabled(enabled)
         self.btn_keepalive_selected.setEnabled(enabled)
         self.btn_keepalive_all.setEnabled(enabled)
         self.btn_save_keepalive.setEnabled(enabled)
         self.btn_refresh_task.setEnabled(enabled)
+        self.btn_plugin_reload.setEnabled(enabled)
+        self.btn_plugin_new.setEnabled(enabled)
+        self.btn_plugin_open_dir.setEnabled(enabled)
+        record = self.get_selected_keepalive_plugin_record() if hasattr(self, "plugin_table") else None
+        editable_plugin_selected = bool(record) and not bool((record or {}).get("builtin"))
+        self.btn_plugin_save.setEnabled(enabled and editable_plugin_selected)
+        self.btn_plugin_delete.setEnabled(enabled and editable_plugin_selected)
+        if hasattr(self, "plugin_source_editor"):
+            self.plugin_source_editor.setReadOnly((not enabled) or (not editable_plugin_selected))
         self.refresh_table()
 
     def refresh_all(self):
@@ -1092,6 +1286,7 @@ class ChromiumManagerWindow(QMainWindow):
         )
         self.load_app_settings_to_ui()
         self.retranslate_ui()
+        self.refresh_keepalive_plugin_table()
         self.refresh_table()
         self.load_keepalive_settings_to_ui()
         self.load_path_settings_to_ui()
@@ -1173,9 +1368,20 @@ class ChromiumManagerWindow(QMainWindow):
         layout.setSpacing(6)
         site_flags = profile.get("keepalive_sites", {}) or {}
         last_details = profile.get("last_keepalive_details", {}) or {}
-        for site_name in KEEPALIVE_SITE_ORDER:
-            base_label = self.tr(f"site_name_{site_name}")
-            info = last_details.get(site_name, {}) if isinstance(last_details, dict) else {}
+        enabled_site_names = [
+            site_name for site_name in get_keepalive_site_ids(self.config) if bool(site_flags.get(site_name, False))
+        ]
+        if not enabled_site_names:
+            empty_label = QLabel("-")
+            empty_label.setStyleSheet("color: #757575;")
+            layout.addWidget(empty_label)
+            layout.addStretch()
+            return wrapper
+
+        for site_name in enabled_site_names:
+            base_label = self.tr(f"site_name_{site_name}", get_keepalive_site_label(site_name, self.config))
+            raw_info = last_details.get(site_name, {}) if isinstance(last_details, dict) else {}
+            info = normalize_keepalive_site_result_for_display(raw_info)
             site_status = str((info or {}).get("status", "") or "").strip().lower()
             suffix_map = {
                 "signed_out": self.tr("keepalive_site_badge_signed_out"),
@@ -1183,23 +1389,28 @@ class ChromiumManagerWindow(QMainWindow):
                 "failed": self.tr("keepalive_site_badge_failed"),
                 "success": self.tr("keepalive_site_badge_success"),
             }
-            checkbox_text = base_label
-            if site_status in suffix_map:
-                checkbox_text = f"{base_label} {suffix_map[site_status]}"
+            icon_path = get_keepalive_site_icon_path(site_name, self.config, fetch=False)
+            checkbox_text = ""
+            if not icon_path:
+                checkbox_text = base_label
+                if site_status in suffix_map:
+                    checkbox_text = f"{base_label} {suffix_map[site_status]}"
             checkbox = QCheckBox(checkbox_text)
+            if icon_path:
+                checkbox.setIcon(QIcon(icon_path))
+                checkbox.setIconSize(QSize(16, 16))
             checkbox.setChecked(bool(site_flags.get(site_name, False)))
             checkbox.setEnabled(self.keepalive_worker is None)
             checkbox.setToolTip(
                 format_keepalive_site_status(site_name, info, self.tr) if info else self.tr("site_checkbox_tooltip")
             )
-            if site_status == "signed_out":
-                checkbox.setStyleSheet("color: #c62828;")
-            elif site_status == "attention":
-                checkbox.setStyleSheet("color: #b26a00;")
-            elif site_status == "failed":
-                checkbox.setStyleSheet("color: #8e0000;")
-            elif site_status == "success":
-                checkbox.setStyleSheet("color: #1e7d34;")
+            style_map = {
+                "signed_out": "QCheckBox { border: 1px solid #c62828; background: #fdecea; border-radius: 4px; padding: 2px 4px; }",
+                "attention": "QCheckBox { border: 1px solid #b26a00; background: #fff4db; border-radius: 4px; padding: 2px 4px; }",
+                "failed": "QCheckBox { border: 1px solid #8e0000; background: #fbe9e7; border-radius: 4px; padding: 2px 4px; }",
+                "success": "QCheckBox { border: 1px solid #1e7d34; background: #e9f6ec; border-radius: 4px; padding: 2px 4px; }",
+            }
+            checkbox.setStyleSheet(style_map.get(site_status, "QCheckBox { border: 1px solid #d0d0d0; border-radius: 4px; padding: 2px 4px; }"))
             checkbox.stateChanged.connect(
                 lambda state, name=profile.get("profile_name", ""), site=site_name: self.set_profile_keepalive_site_enabled(
                     name, site, state == Qt.Checked
@@ -1208,6 +1419,183 @@ class ChromiumManagerWindow(QMainWindow):
             layout.addWidget(checkbox)
         layout.addStretch()
         return wrapper
+
+    def warm_keepalive_icon_cache_async(self):
+        try:
+            config_snapshot = json.loads(json.dumps(self.config, ensure_ascii=False))
+        except Exception:
+            config_snapshot = {}
+
+        def _worker():
+            warm_keepalive_site_icon_cache(config_snapshot)
+
+        threading.Thread(target=_worker, name="keepalive-icon-cache", daemon=True).start()
+        QTimer.singleShot(4000, self.refresh_table)
+
+    def refresh_keepalive_plugin_table(self):
+        self.keepalive_plugin_records = get_keepalive_plugin_records(self.config)
+        self.plugin_table.blockSignals(True)
+        self.plugin_table.setRowCount(len(self.keepalive_plugin_records))
+        for row, record in enumerate(self.keepalive_plugin_records):
+            source_text = record.get("source") or self.tr("plugin_type_system")
+            values = [
+                record.get("site_id", ""),
+                record.get("display_name", ""),
+                self.tr("plugin_type_system") if record.get("builtin") else self.tr("plugin_type_external"),
+                source_text,
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                if column != 1:
+                    item.setTextAlignment(Qt.AlignCenter if column == 2 else Qt.AlignLeft | Qt.AlignVCenter)
+                self.plugin_table.setItem(row, column, item)
+        self.plugin_table.blockSignals(False)
+
+        if self.keepalive_plugin_records:
+            selected_row = 0
+            if self.selected_plugin_site_id:
+                for index, record in enumerate(self.keepalive_plugin_records):
+                    if record.get("site_id") == self.selected_plugin_site_id:
+                        selected_row = index
+                        break
+            self.plugin_table.selectRow(selected_row)
+            self.on_keepalive_plugin_selection_changed()
+        else:
+            self.selected_plugin_site_id = ""
+            self.plugin_source_editor.setPlainText("")
+            self.plugin_source_editor.setReadOnly(True)
+            self.btn_plugin_save.setEnabled(False)
+            self.btn_plugin_delete.setEnabled(False)
+            self.plugin_detail_site_id.setText("-")
+            self.plugin_detail_display_name.setText("-")
+            self.plugin_detail_type.setText("-")
+            self.plugin_detail_source.setText("-")
+            self.plugin_detail_home_url.setText("-")
+            self.plugin_detail_icon_url.setText("-")
+            self.plugin_source_status.setText(self.tr("plugin_status_empty"))
+
+    def get_selected_keepalive_plugin_record(self) -> Optional[Dict]:
+        selected_items = self.plugin_table.selectedItems()
+        if not selected_items:
+            return None
+        row = selected_items[0].row()
+        if row < 0 or row >= len(self.keepalive_plugin_records):
+            return None
+        return self.keepalive_plugin_records[row]
+
+    def on_keepalive_plugin_selection_changed(self):
+        record = self.get_selected_keepalive_plugin_record()
+        if not record:
+            return
+        self.selected_plugin_site_id = str(record.get("site_id", "") or "").strip()
+        self.plugin_detail_site_id.setText(self.selected_plugin_site_id or "-")
+        self.plugin_detail_display_name.setText(str(record.get("display_name", "") or "-"))
+        self.plugin_detail_type.setText(self.tr("plugin_type_system") if record.get("builtin") else self.tr("plugin_type_external"))
+        self.plugin_detail_source.setText(str(record.get("source", "") or self.tr("plugin_type_system")))
+        self.plugin_detail_home_url.setText(str(record.get("home_url", "") or "-"))
+        self.plugin_detail_icon_url.setText(str(record.get("icon_url", "") or "-"))
+        editable = not bool(record.get("builtin"))
+        allow_edit = editable and self.keepalive_worker is None
+        self.plugin_source_editor.setReadOnly(not allow_edit)
+        self.btn_plugin_save.setEnabled(allow_edit)
+        self.btn_plugin_delete.setEnabled(allow_edit)
+        self.plugin_source_status.setText(self.tr("plugin_status_loading"))
+        try:
+            source_text = get_keepalive_plugin_source_text(self.selected_plugin_site_id, self.config)
+            self.plugin_source_editor.setPlainText(source_text)
+            base_status = self.tr("plugin_status_readonly") if not editable else self.tr("plugin_status_editable")
+            load_error = str(record.get("load_error", "") or "").strip()
+            self.plugin_source_status.setText(
+                self.trf("plugin_status_loaded_with_error", status=base_status, error=load_error)
+                if load_error
+                else base_status
+            )
+        except Exception as exc:
+            self.plugin_source_editor.setPlainText("")
+            self.plugin_source_status.setText(self.trf("plugin_status_load_failed", error=exc))
+
+    def create_keepalive_plugin(self):
+        dialog = KeepalivePluginCreateDialog(self, self.tr)
+        if self.exec_modal_dialog(dialog) != QDialog.Accepted:
+            return
+        payload = dialog.get_data()
+        site_id = payload.get("site_id", "")
+        if not site_id:
+            QMessageBox.warning(self, self.tr("error_generic_title"), self.tr("plugin_error_site_id_required"))
+            return
+        try:
+            source_text = build_keepalive_plugin_template(
+                site_id,
+                display_name=payload.get("display_name", ""),
+                home_url=payload.get("home_url", ""),
+            )
+            save_result = save_keepalive_plugin_source(site_id, source_text, self.config)
+        except Exception as exc:
+            QMessageBox.critical(self, self.tr("error_generic_title"), self.trf("plugin_error_create_failed", error=exc))
+            return
+        self.selected_plugin_site_id = str(save_result.get("site_id", "") or site_id)
+        self.refresh_keepalive_plugin_table()
+        self.warm_keepalive_icon_cache_async()
+        self.refresh_table()
+        self.append_log(
+            self.trf(
+                "plugin_log_created",
+                site_id=str(save_result.get("site_id", "") or site_id),
+                path=save_result.get("path", ""),
+            )
+        )
+
+    def save_current_keepalive_plugin(self):
+        record = self.get_selected_keepalive_plugin_record()
+        if not record or record.get("builtin"):
+            return
+        try:
+            save_result = save_keepalive_plugin_source(record.get("site_id", ""), self.plugin_source_editor.toPlainText(), self.config)
+        except Exception as exc:
+            QMessageBox.critical(self, self.tr("error_generic_title"), self.trf("plugin_error_save_failed", error=exc))
+            return
+        previous_site_id = str(save_result.get("previous_site_id", "") or record.get("site_id", "") or "")
+        current_site_id = str(save_result.get("site_id", "") or previous_site_id)
+        if previous_site_id and current_site_id and previous_site_id != current_site_id:
+            self.config, _ = migrate_keepalive_site_id_references(self.config, previous_site_id, current_site_id)
+            self.config = save_app_config(self.config, self.config_path)
+        self.append_log(self.trf("plugin_log_saved", site_id=current_site_id, path=save_result.get("path", "")))
+        self.selected_plugin_site_id = current_site_id
+        self.refresh_keepalive_plugin_table()
+        self.warm_keepalive_icon_cache_async()
+        self.refresh_table()
+
+    def delete_current_keepalive_plugin(self):
+        record = self.get_selected_keepalive_plugin_record()
+        if not record or record.get("builtin"):
+            return
+        site_id = str(record.get("site_id", "") or "")
+        answer = QMessageBox.question(
+            self,
+            self.tr("plugin_delete_title"),
+            self.trf("plugin_delete_message", site_id=site_id),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            path = delete_keepalive_plugin_source(site_id, self.config)
+        except Exception as exc:
+            QMessageBox.critical(self, self.tr("error_generic_title"), self.trf("plugin_error_delete_failed", error=exc))
+            return
+        self.selected_plugin_site_id = ""
+        self.refresh_keepalive_plugin_table()
+        self.warm_keepalive_icon_cache_async()
+        self.refresh_table()
+        self.append_log(self.trf("plugin_log_deleted", site_id=site_id, path=path))
+
+    def open_keepalive_plugin_dir(self):
+        plugin_root = get_keepalive_plugin_root()
+        try:
+            os.startfile(plugin_root)
+        except Exception as exc:
+            QMessageBox.critical(self, self.tr("error_open_failed_title"), self.trf("plugin_error_open_dir", error=exc))
 
     def refresh_table(self):
         profiles = sorted(self.config.get("profiles", []), key=lambda item: profile_sort_key(item.get("profile_name", "")))
@@ -1293,7 +1681,7 @@ class ChromiumManagerWindow(QMainWindow):
             "keepalive_sites": {},
             "notes": "",
         }
-        dialog = ProfileEditDialog(new_profile, self, self.tr)
+        dialog = ProfileEditDialog(new_profile, self.config, self, self.tr)
         if self.exec_modal_dialog(dialog) != QDialog.Accepted:
             return
 
@@ -1322,7 +1710,7 @@ class ChromiumManagerWindow(QMainWindow):
             QMessageBox.information(self, self.tr("info_title"), self.tr("info_select_profile_first"))
             return
 
-        dialog = ProfileEditDialog(profile, self, self.tr)
+        dialog = ProfileEditDialog(profile, self.config, self, self.tr)
         if self.exec_modal_dialog(dialog) != QDialog.Accepted:
             return
 
@@ -1507,8 +1895,12 @@ class ChromiumManagerWindow(QMainWindow):
         keepalive["chatgpt_prompt"] = self.chatgpt_prompt.text().strip()
         keepalive["chatgpt_conversation_hint"] = self.chatgpt_conversation_hint.text().strip()
         keepalive["google_query"] = self.google_query.text().strip()
+        keepalive["plugin_dirs"] = [item.strip() for item in self.keepalive_plugin_dirs.text().split(";") if item.strip()]
         keepalive["schedule_time"] = qtime_to_string(self.schedule_time.time())
         self.config = save_app_config(self.config, self.config_path)
+        self.warm_keepalive_icon_cache_async()
+        self.refresh_keepalive_plugin_table()
+        self.refresh_table()
         self.append_log(self.tr("log_keepalive_settings_saved"))
         self.refresh_scheduler_status()
 
@@ -1546,7 +1938,10 @@ class ChromiumManagerWindow(QMainWindow):
             site_flags = dict(item.get("keepalive_sites", {}) or {})
             if bool(site_flags.get(site_name, False)) == bool(enabled):
                 return
-            site_flags[site_name] = bool(enabled)
+            if enabled:
+                site_flags[site_name] = True
+            else:
+                site_flags.pop(site_name, None)
             item["keepalive_sites"] = site_flags
             changed = True
             break
@@ -1580,6 +1975,11 @@ class ChromiumManagerWindow(QMainWindow):
         self.chatgpt_prompt.setText(chatgpt_prompt)
         self.chatgpt_conversation_hint.setText(str(keepalive.get("chatgpt_conversation_hint", "")))
         self.google_query.setText(str(keepalive.get("google_query", "")))
+        plugin_dirs = keepalive.get("plugin_dirs", [])
+        if isinstance(plugin_dirs, list):
+            self.keepalive_plugin_dirs.setText("; ".join(str(item) for item in plugin_dirs if str(item or "").strip()))
+        else:
+            self.keepalive_plugin_dirs.setText("")
         self.schedule_time.setTime(parse_schedule_time(str(keepalive.get("schedule_time", "09:00"))))
 
         self.global_last_run.setText(keepalive.get("last_run_at", "") or "-")
@@ -1689,6 +2089,7 @@ class ChromiumManagerWindow(QMainWindow):
             ]
         )
         self.tabs.setTabText(self.tabs.indexOf(self.keepalive_tab), self.tr("tab_keepalive"))
+        self.tabs.setTabText(self.tabs.indexOf(self.plugin_tab), self.tr("tab_plugins"))
         self.tabs.setTabText(self.tabs.indexOf(self.log_tab), self.tr("tab_logs"))
         self.tabs.setTabText(self.tabs.indexOf(self.mcp_log_tab), self.tr("tab_mcp_logs"))
         self.tabs.setTabText(self.tabs.indexOf(self.config_tab), self.tr("tab_config"))
@@ -1703,6 +2104,11 @@ class ChromiumManagerWindow(QMainWindow):
 
         self.btn_save_keepalive.setText(self.tr("save_keepalive"))
         self.btn_refresh_task.setText(self.tr("refresh_status"))
+        self.btn_plugin_reload.setText(self.tr("plugin_action_reload"))
+        self.btn_plugin_new.setText(self.tr("plugin_action_new"))
+        self.btn_plugin_save.setText(self.tr("plugin_action_save"))
+        self.btn_plugin_delete.setText(self.tr("plugin_action_delete"))
+        self.btn_plugin_open_dir.setText(self.tr("plugin_action_open_dir"))
         self.btn_clear_logs.setText(self.tr("clear_logs"))
         self.btn_clear_mcp_logs.setText(self.tr("clear_mcp_logs"))
         self.btn_save_paths.setText(self.tr("save_paths"))
@@ -1713,6 +2119,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_detail_label.setText(self.tr("mcp_detail_idle"))
         self.site_scope_hint.setText(self.tr("site_scope_hint"))
         self.chatgpt_conversation_hint.setPlaceholderText(self.tr("chatgpt_hint_placeholder"))
+        self.keepalive_plugin_dirs.setPlaceholderText(self.tr("keepalive_plugin_dirs_placeholder"))
+        self.keepalive_plugin_dirs_browse.setText(self.tr("browse"))
         self.schedule_time.setToolTip(self.tr("schedule_time_tooltip"))
         self.keepalive_timeout.setSuffix(self.tr("unit_seconds"))
         self.keepalive_between_profiles.setSuffix(self.tr("unit_seconds"))
@@ -1743,7 +2151,25 @@ class ChromiumManagerWindow(QMainWindow):
         self.settings_layout.labelForField(self.chatgpt_prompt).setText(self.tr("chatgpt_prompt"))
         self.settings_layout.labelForField(self.chatgpt_conversation_hint).setText(self.tr("chatgpt_hint"))
         self.settings_layout.labelForField(self.google_query).setText(self.tr("google_query"))
+        self.settings_layout.labelForField(self.keepalive_plugin_dirs_row).setText(self.tr("keepalive_plugin_dirs"))
         self.settings_layout.labelForField(self.schedule_time).setText(self.tr("schedule_time"))
+        self.plugin_detail_group.setTitle(self.tr("plugin_group_detail"))
+        self.plugin_source_hint.setText(self.tr("plugin_source_hint"))
+        self.plugin_source_editor.setPlaceholderText(self.tr("plugin_editor_placeholder"))
+        self.plugin_detail_layout.labelForField(self.plugin_detail_site_id).setText(self.tr("plugin_table_site_id"))
+        self.plugin_detail_layout.labelForField(self.plugin_detail_display_name).setText(self.tr("plugin_table_display_name"))
+        self.plugin_detail_layout.labelForField(self.plugin_detail_type).setText(self.tr("plugin_table_type"))
+        self.plugin_detail_layout.labelForField(self.plugin_detail_source).setText(self.tr("plugin_table_source"))
+        self.plugin_detail_layout.labelForField(self.plugin_detail_home_url).setText(self.tr("plugin_detail_home_url"))
+        self.plugin_detail_layout.labelForField(self.plugin_detail_icon_url).setText(self.tr("plugin_detail_icon_url"))
+        self.plugin_table.setHorizontalHeaderLabels(
+            [
+                self.tr("plugin_table_site_id"),
+                self.tr("plugin_table_display_name"),
+                self.tr("plugin_table_type"),
+                self.tr("plugin_table_source"),
+            ]
+        )
 
         self.summary_layout.labelForField(self.global_last_run).setText(self.tr("last_run"))
         self.summary_layout.labelForField(self.global_last_status).setText(self.tr("last_status"))
@@ -1838,6 +2264,18 @@ class ChromiumManagerWindow(QMainWindow):
             selected, _ = QFileDialog.getOpenFileName(self, self.tr("file_dialog_select_file"), current or os.path.expanduser("~"))
         if selected:
             self.path_editors[key].setText(selected)
+
+    def pick_keepalive_plugin_dir(self):
+        current_text = self.keepalive_plugin_dirs.text().strip()
+        existing = [item.strip() for item in current_text.split(";") if item.strip()]
+        start_dir = existing[-1] if existing and os.path.isdir(existing[-1]) else os.path.expanduser("~")
+        selected = QFileDialog.getExistingDirectory(self, self.tr("file_dialog_select_dir"), start_dir)
+        if not selected:
+            return
+        normalized_existing = {os.path.normcase(os.path.abspath(item)) for item in existing}
+        if os.path.normcase(os.path.abspath(selected)) not in normalized_existing:
+            existing.append(selected)
+        self.keepalive_plugin_dirs.setText("; ".join(existing))
 
     def open_config_dir(self):
         config_dir = get_state_storage_dir()
@@ -2422,9 +2860,6 @@ class ChromiumManagerWindow(QMainWindow):
                 self.scheduler_notice_key = notice_key
             return
 
-        self.scheduler_notice_key = ""
-        keepalive["last_scheduled_run_date"] = today_text
-        self.config = save_app_config(self.config, self.config_path)
         self.start_keepalive_worker([], "internal-schedule", persist_ui_settings=False)
 
     def run_keepalive_for_selected(self):

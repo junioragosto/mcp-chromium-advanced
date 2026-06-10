@@ -351,6 +351,12 @@ The repository includes reusable agent skill templates in:
 
 These files are examples for Codex or other AI workflows that need to consume this MCP service consistently. They are templates, not an auto-loaded runtime directory.
 
+## Keepalive Plugins
+
+Keepalive sites use a plugin-style runtime. Built-in site logic exists for `chatgpt`, `google`, `gmail`, and `github`; custom Python plugins can add new site IDs such as `youtube` or `youtube_studio` without rebuilding the app. The desktop GUI now includes a dedicated Keepalive Plugins tab for browsing built-in plugin source, creating external plugins, and editing trusted local plugin code. Additional trusted plugin directories can still be configured in the GUI keepalive settings or in `keepalive.plugin_dirs`.
+
+- [Keepalive Plugin Guide](./docs/KEEPALIVE_PLUGIN_GUIDE.md)
+
 Typical usage:
 
 1. Copy the appropriate `.SKILL.md` file into your global or project-specific skill directory

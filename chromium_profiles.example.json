@@ -86,6 +86,7 @@
     "chatgpt_prompt": "",
     "chatgpt_conversation_hint": "",
     "google_query": "profile keepalive",
+    "plugin_dirs": [],
     "last_run_at": "",
     "last_run_finished_at": "",
     "last_run_status": "never",
