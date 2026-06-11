@@ -57,6 +57,23 @@ class McpServerTraceTests(unittest.TestCase):
             )
             self.assertEqual(values, actual, tool_name)
 
+    def test_trace_captures_close_session_before_after_snapshots(self):
+        mcp_server._mcp_tool_traces.clear()
+
+        def _call():
+            return {
+                "closed": True,
+                "active_session_ids_before": ["session-1"],
+                "active_session_ids_after": [],
+            }
+
+        result = mcp_server._trace_mcp_tool("close_profile_session", _call, session_id="session-1")
+        self.assertTrue(result["closed"])
+        self.assertGreater(len(mcp_server._mcp_tool_traces), 0)
+        trace = mcp_server._mcp_tool_traces[-1]
+        self.assertEqual(trace["active_session_ids_before"], ["session-1"])
+        self.assertEqual(trace["active_session_ids_after"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

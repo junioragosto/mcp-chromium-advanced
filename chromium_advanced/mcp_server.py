@@ -85,6 +85,13 @@ def _trace_mcp_tool(tool_name: str, func: Callable[[], dict], *, session_id: str
     try:
         result = func()
         trace["result_size"] = _safe_len(result)
+        if isinstance(result, dict):
+            before_ids = result.get("active_session_ids_before")
+            after_ids = result.get("active_session_ids_after")
+            if isinstance(before_ids, list):
+                trace["active_session_ids_before"] = [str(item) for item in before_ids]
+            if isinstance(after_ids, list):
+                trace["active_session_ids_after"] = [str(item) for item in after_ids]
         return result
     except Exception as exc:
         trace["ok"] = False
@@ -246,6 +253,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         """Close an active browser session."""
         def _call() -> dict:
             result = session_manager.close_session(session_id)
+            post_status = session_manager.get_server_status()
             print(
                 (
                     f"[{now_text()}] [MCP-WORKER] session "
@@ -256,7 +264,10 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
                 ),
                 flush=True,
             )
-            return result
+            return {
+                **result,
+                "server_status_after_close": post_status,
+            }
 
         return _trace_mcp_tool("close_profile_session", _call, session_id=session_id)
 

@@ -133,3 +133,28 @@ class SessionManagerPerProfileTests(unittest.TestCase):
         self.assertEqual(browser_session.close_count, 1)
         lock.release.assert_called_once()
         self.assertNotIn(record.session_id, manager._sessions_by_id)
+
+    def test_close_session_returns_before_after_session_snapshots(self):
+        manager = SessionManager()
+        browser_session = FakeBrowserSession()
+        record = SessionRecord(
+            session_id="session-1",
+            profile_name="Profile 4",
+            engine_name="playwright_cli",
+            created_at=1.0,
+            last_used_at=1.0,
+            browser_session=browser_session,
+            runtime_mode="live_root",
+            runtime_root="",
+            mirror_generated_at="",
+            cleanup_runtime_on_close=True,
+            profile_lock=mock.Mock(),
+        )
+        manager._sessions_by_id[record.session_id] = record
+        manager._session_ids_by_profile.setdefault(record.profile_name, []).append(record.session_id)
+
+        result = manager.close_session("session-1")
+
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["active_session_ids_before"], ["session-1"])
+        self.assertEqual(result["active_session_ids_after"], [])
