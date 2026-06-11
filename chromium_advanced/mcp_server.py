@@ -206,6 +206,16 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         """List active profile-backed browser sessions."""
         return {"sessions": session_manager.list_sessions()}
 
+    @server.tool(annotations=local_read_annotations)
+    def list_profile_occupancy_events(limit: int = 100) -> dict:
+        """List recent shared profile occupancy events."""
+        return {"events": session_manager.list_recent_occupancy_events(limit=limit)}
+
+    @server.tool(annotations=local_lifecycle_annotations)
+    def reclaim_profile(profile_name: str, reason: str = "mcp_reclaim") -> dict:
+        """Force-clear a stale profile occupancy/lock state when recovery is required."""
+        return session_manager.reclaim_profile(profile_name, reason=reason)
+
     @server.tool(annotations=session_start_annotations)
     def start_profile_session(profile_name: str, reuse_existing: bool = False, engine: str = "") -> dict:
         """Start or reuse a real logged-in browser session for the specified profile."""

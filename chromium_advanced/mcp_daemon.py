@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from typing import Dict, Optional
-from urllib.parse import urlunsplit
+from urllib.parse import unquote, urlunsplit
 
 import httpx
 import psutil
@@ -29,6 +29,7 @@ from chromium_advanced.chromium_profile_lib import (
     get_runtime_launch_cwd,
     now_text,
 )
+from chromium_advanced.session_manager import SessionManager
 
 
 HEALTHCHECK_TIMEOUT_SECONDS = 0.5
@@ -62,6 +63,32 @@ def safe_print(text: str) -> None:
         print(message, flush=True)
     except Exception:
         pass
+
+
+def _as_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, HTTPException):
+        return exc
+    message = str(exc or "").strip() or type(exc).__name__
+    lowered = message.lower()
+    if "not found" in lowered or "missing" in lowered:
+        return HTTPException(status_code=404, detail=message)
+    if (
+        "already held" in lowered
+        or "already running" in lowered
+        or "start blocked" in lowered
+        or "already in use" in lowered
+        or "occupied" in lowered
+        or "reusable session" in lowered
+        or "no longer alive" in lowered
+    ):
+        return HTTPException(status_code=409, detail=message)
+    if "required" in lowered or "invalid" in lowered or "unsupported" in lowered:
+        return HTTPException(status_code=400, detail=message)
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=message)
+    if "not found" in lowered:
+        return HTTPException(status_code=404, detail=message)
+    return HTTPException(status_code=500, detail=message)
 
 
 def normalize_path(path: str) -> str:
@@ -165,6 +192,7 @@ def build_worker_command(
 class WorkerManager:
     def __init__(
         self,
+        session_manager: SessionManager,
         config_path: str,
         transport: str,
         public_host: str,
@@ -175,6 +203,7 @@ class WorkerManager:
         log_level: str,
         idle_timeout_seconds: int,
     ):
+        self.session_manager = session_manager
         self.config_path = config_path
         self.transport = transport
         self.public_host = public_host
@@ -339,6 +368,14 @@ class WorkerManager:
             idle_seconds = 0
             if self._last_activity_at > 0:
                 idle_seconds = max(0, int(now_ts - self._last_activity_at))
+            daemon_sessions = self.session_manager.list_sessions()
+            daemon_session_ids = sorted(
+                str(item.get("session_id", "") or "").strip()
+                for item in daemon_sessions
+                if str(item.get("session_id", "") or "").strip()
+            )
+            worker_session_ids = sorted(self._active_browser_session_ids)
+            combined_session_ids = sorted(set(worker_session_ids + daemon_session_ids))
             return {
                 "daemon_state": "running",
                 "public_endpoint": public_endpoint,
@@ -349,8 +386,12 @@ class WorkerManager:
                 "worker_listening": worker_listening,
                 "worker_port": self.worker_port,
                 "active_proxy_requests": self._active_proxy_requests,
-                "active_browser_session_count": len(self._active_browser_session_ids),
-                "active_browser_session_ids": sorted(self._active_browser_session_ids),
+                "active_browser_session_count": len(combined_session_ids),
+                "active_browser_session_ids": combined_session_ids,
+                "worker_browser_session_count": len(worker_session_ids),
+                "worker_browser_session_ids": worker_session_ids,
+                "daemon_browser_session_count": len(daemon_session_ids),
+                "daemon_browser_session_ids": daemon_session_ids,
                 "idle_timeout_seconds": self.idle_timeout_seconds,
                 "idle_seconds": idle_seconds,
                 "last_request_at": self._last_request_at,
@@ -473,7 +514,9 @@ def create_daemon_app(
     idle_timeout_seconds: int,
 ) -> FastAPI:
     public_path = normalize_path(path)
+    session_manager = SessionManager(config_path=config_path)
     worker_manager = WorkerManager(
+        session_manager=session_manager,
         config_path=config_path,
         transport=transport,
         public_host=host,
@@ -537,7 +580,266 @@ def create_daemon_app(
 
     @app.get("/_daemon/status")
     def daemon_status() -> Dict:
-        return worker_manager.get_status()
+        try:
+            session_manager.reap_expired_profile_occupancy()
+            return worker_manager.get_status()
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.get("/_daemon/profiles")
+    def daemon_profiles() -> Dict:
+        try:
+            session_manager.reap_expired_profile_occupancy()
+            return {
+                "profiles": session_manager.list_profiles(),
+                "events": session_manager.list_recent_occupancy_events(limit=50),
+            }
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.get("/_daemon/profiles/{profile_name}")
+    def daemon_profile_status(profile_name: str) -> Dict:
+        session_manager.reap_expired_profile_occupancy()
+        try:
+            return session_manager.get_profile_status(unquote(profile_name))
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_daemon/profiles/{profile_name}/reclaim")
+    async def daemon_profile_reclaim(profile_name: str, request: Request) -> Dict:
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        reason = str((body or {}).get("reason", "") or "daemon_api_reclaim")
+        try:
+            decoded_profile_name = unquote(profile_name)
+            session_manager.get_profile_status(decoded_profile_name)
+            return session_manager.reclaim_profile(decoded_profile_name, reason=reason)
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_daemon/reap-expired")
+    def daemon_reap_expired() -> Dict:
+        try:
+            results = session_manager.reap_expired_profile_occupancy()
+            return {"reclaimed": results, "count": len(results)}
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_daemon/automation/acquire")
+    async def daemon_automation_acquire(request: Request) -> Dict:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        profile_name = str((body or {}).get("profile_name", "") or "").strip()
+        engine_name = str((body or {}).get("engine", "") or "").strip()
+        owner_label = str((body or {}).get("owner_label", "") or "automation").strip() or "automation"
+        runtime_options = dict((body or {}).get("runtime_options") or {})
+        heartbeat_timeout_seconds = int((body or {}).get("heartbeat_timeout_seconds", 180) or 180)
+        runtime_options.setdefault("heartbeat_timeout_seconds", heartbeat_timeout_seconds)
+        try:
+            result = session_manager.start_session(
+                profile_name=profile_name,
+                engine_name=engine_name,
+                scene_type="automation",
+                owner_label=owner_label,
+                runtime_options=runtime_options,
+            )
+            session_manager.refresh_profile_lease(
+                profile_name,
+                scene_type="automation",
+                owner_label=owner_label,
+                engine_name=result.get("engine_name", ""),
+                session_id=result.get("session_id", ""),
+                owner_pid=os.getpid(),
+                heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+                details={"source": "daemon_automation_acquire", "runtime_options": runtime_options},
+                reclaimable=True,
+            )
+            return result
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_daemon/automation/heartbeat")
+    async def daemon_automation_heartbeat(request: Request) -> Dict:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        profile_name = str((body or {}).get("profile_name", "") or "").strip()
+        owner_label = str((body or {}).get("owner_label", "") or "").strip()
+        engine_name = str((body or {}).get("engine_name", "") or "").strip()
+        session_id = str((body or {}).get("session_id", "") or "").strip()
+        heartbeat_timeout_seconds = int((body or {}).get("heartbeat_timeout_seconds", 180) or 180)
+        details = dict((body or {}).get("details") or {})
+        try:
+            return session_manager.refresh_profile_lease(
+                profile_name,
+                scene_type="automation",
+                owner_label=owner_label,
+                engine_name=engine_name,
+                session_id=session_id,
+                owner_pid=int((body or {}).get("owner_pid", 0) or 0),
+                heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+                details=details,
+                reclaimable=True,
+            )
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_daemon/automation/release")
+    async def daemon_automation_release(request: Request) -> Dict:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        session_id = str((body or {}).get("session_id", "") or "").strip()
+        profile_name = str((body or {}).get("profile_name", "") or "").strip()
+        try:
+            if session_id:
+                result = session_manager.close_session(session_id)
+                if result.get("closed"):
+                    return result
+            if profile_name:
+                return session_manager.reclaim_profile(profile_name, reason="daemon_api_automation_release")
+            raise HTTPException(status_code=400, detail="session_id or profile_name is required")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_daemon/automation/action")
+    async def daemon_automation_action(request: Request) -> Dict:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        session_id = str((body or {}).get("session_id", "") or "").strip()
+        action = str((body or {}).get("action", "") or "").strip()
+        owner_label = str((body or {}).get("owner_label", "") or "automation").strip() or "automation"
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required")
+        if not action:
+            raise HTTPException(status_code=400, detail="action is required")
+        args = dict((body or {}).get("args") or {})
+        try:
+            browser_session = session_manager.resolve_session(
+                session_id,
+                scene_type="automation",
+                owner_label=owner_label,
+                refresh_lease=True,
+            )
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+        try:
+            if action == "navigate":
+                result = browser_session.navigate(
+                    str(args.get("url", "") or ""),
+                    bool(args.get("wait_for_ready", True)),
+                    int(args.get("timeout_seconds", 20) or 20),
+                    tab_id=str(args.get("tab_id", "") or ""),
+                )
+            elif action == "get_page_text":
+                result = browser_session.get_page_text(tab_id=str(args.get("tab_id", "") or ""))
+            elif action == "get_current_url":
+                result = browser_session.get_current_url(tab_id=str(args.get("tab_id", "") or ""))
+            elif action == "get_page_html":
+                result = browser_session.get_page_html(tab_id=str(args.get("tab_id", "") or ""))
+            elif action == "list_tabs":
+                result = browser_session.list_tabs()
+            elif action == "open_tab":
+                result = browser_session.open_tab(
+                    url=str(args.get("url", "") or ""),
+                    activate=bool(args.get("activate", True)),
+                    wait_for_ready=bool(args.get("wait_for_ready", True)),
+                    timeout_seconds=int(args.get("timeout_seconds", 20) or 20),
+                )
+            elif action == "activate_tab":
+                result = browser_session.activate_tab(
+                    tab_id=str(args.get("tab_id", "") or ""),
+                    index=int(args.get("index", -1) or -1),
+                    title_contains=str(args.get("title_contains", "") or ""),
+                    url_contains=str(args.get("url_contains", "") or ""),
+                )
+            elif action == "close_tab":
+                result = browser_session.close_tab(
+                    tab_id=str(args.get("tab_id", "") or ""),
+                    index=int(args.get("index", -1) or -1),
+                )
+            elif action == "click":
+                result = browser_session.click(
+                    str(args.get("selector", "") or ""),
+                    str(args.get("by", "css") or "css"),
+                    int(args.get("timeout_seconds", 20) or 20),
+                )
+            elif action == "type_text":
+                result = browser_session.type_text(
+                    str(args.get("selector", "") or ""),
+                    str(args.get("text", "") or ""),
+                    str(args.get("by", "css") or "css"),
+                    bool(args.get("clear_first", True)),
+                    bool(args.get("submit", False)),
+                    int(args.get("timeout_seconds", 20) or 20),
+                )
+            elif action == "press_key":
+                result = browser_session.press_key(
+                    str(args.get("key", "") or ""),
+                    int(args.get("count", 1) or 1),
+                    str(args.get("selector", "") or ""),
+                    str(args.get("by", "css") or "css"),
+                    int(args.get("timeout_seconds", 20) or 20),
+                )
+            elif action == "run_script":
+                result = browser_session.run_script(
+                    str(args.get("script", "") or ""),
+                    tab_id=str(args.get("tab_id", "") or ""),
+                )
+            elif action == "get_console_messages":
+                result = browser_session.get_console_messages(
+                    tab_id=str(args.get("tab_id", "") or ""),
+                    limit=int(args.get("limit", 100) or 100),
+                    level=str(args.get("level", "") or ""),
+                )
+            elif action == "get_network_requests":
+                result = browser_session.get_network_requests(
+                    tab_id=str(args.get("tab_id", "") or ""),
+                    limit=int(args.get("limit", 100) or 100),
+                    failed_only=bool(args.get("failed_only", False)),
+                )
+            elif action == "screenshot":
+                result = browser_session.screenshot(
+                    str(args.get("filename", "") or ""),
+                    tab_id=str(args.get("tab_id", "") or ""),
+                )
+            elif action == "get_summary":
+                result = browser_session.get_summary()
+            elif action == "get_capabilities":
+                result = browser_session.get_capabilities()
+            elif action == "snapshot":
+                result = browser_session.snapshot(
+                    target=str(args.get("target", "") or ""),
+                    by=str(args.get("by", "css") or "css"),
+                    depth=(int(args.get("depth", 0) or 0) or None),
+                    boxes=bool(args.get("boxes", False)),
+                    filename=str(args.get("filename", "") or ""),
+                    tab_id=str(args.get("tab_id", "") or ""),
+                )
+            else:
+                raise HTTPException(status_code=400, detail=f"unsupported automation action: {action}")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "action": action,
+            "result": result if isinstance(result, dict) else {"value": result},
+        }
 
     @app.post("/_daemon/worker/start")
     def daemon_worker_start() -> Dict:
@@ -548,7 +850,10 @@ def create_daemon_app(
 
     @app.post("/_daemon/worker/stop")
     def daemon_worker_stop() -> Dict:
-        return worker_manager.stop_worker("api_stop")
+        try:
+            return worker_manager.stop_worker("api_stop")
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
 
     async def proxy_to_worker(request: Request, tail: str = ""):
         method_upper = request.method.upper()

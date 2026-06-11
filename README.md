@@ -55,7 +55,9 @@ If you use a fingerprint plugin, the project can also load `my-fingerprint`:
 On top of that browser layer, the MCP service adds:
 
 - profile/session occupancy checks
+- shared profile occupancy registry and event stream
 - session start and release APIs
+- profile reclaim and recovery primitives for stale locks or expired script leases
 - a stable daemon endpoint with a lazy-start worker
 - GUI-based lifecycle control and logs
 
@@ -100,6 +102,96 @@ Important switching rule:
 - Existing sessions keep the engine they were started with.
 - `reuse_existing=true` only reuses a compatible session for the same profile and the same engine.
 - Starting a new session with a different engine never hot-switches an existing session in place. Existing sessions keep their original engine.
+
+## Managed automation scripts
+
+The project now has a second formal consumer path besides MCP: managed local scripts.
+
+The intended model is:
+
+```text
+fixed script -> AutomationRunner -> SessionManager -> BrowserEngine -> real Chromium profile
+```
+
+This matters because fixed Python automation should not bypass profile governance by launching its own browser directly against a real `user-data-dir`.
+
+Use `AutomationRunner` when you want a reusable local script that:
+
+- claims a profile through the same central lock and occupancy rules as MCP
+- records `automation` occupancy in the shared registry
+- is blocked if the same profile is already occupied by MCP, GUI manual launch, or keepalive
+- releases the profile through the same centralized close path
+
+Reference example:
+
+- `demo/managed_uc_gmail_titles_demo.py`
+
+That demo proves a fixed `selenium_uc` script can:
+
+- acquire `Profile 1` through the manager
+- open Gmail with real login state
+- extract the first three visible mail titles
+- block a second same-profile process while the run is still active
+
+Production direction now implemented in the codebase:
+
+- shared occupancy entries can carry `owner_pid`, lease expiry, heartbeat metadata, and reclaimability
+- stale non-MCP occupancies can be reaped automatically when the owning process disappears or a lease expires
+- the daemon exposes profile status, recent occupancy events, and explicit reclaim endpoints
+- the GUI shows profile occupancy state and provides manual reclaim for recovery workflows
+- managed automation session acquisition can override runtime launch behavior such as `headless`, `start_minimized`, `mute_audio`, `window_size`, and `extra_args` through a temporary runtime config layer
+
+The daemon now also exposes a managed automation HTTP flow for fixed scripts that should use the same governance model without speaking MCP directly:
+
+```text
+fixed script -> daemon HTTP API -> SessionManager -> BrowserEngine -> real Chromium profile
+```
+
+Current daemon automation endpoints:
+
+- `POST /_daemon/automation/acquire`
+- `POST /_daemon/automation/action`
+- `POST /_daemon/automation/heartbeat`
+- `POST /_daemon/automation/release`
+
+Intended usage:
+
+1. Acquire one profile session with runtime options.
+2. Execute bounded actions through `automation/action`.
+3. Refresh the lease if the script is long-running.
+4. Release the session explicitly on normal completion.
+
+Reference scripts:
+
+- `demo/managed_daemon_smoke.py`
+  Minimal daemon-side lifecycle smoke using `navigate`, `get_current_url`, and `get_page_text`.
+- `demo/managed_daemon_gmail_titles_demo.py`
+  Example of a site-task script driven through the daemon HTTP automation API.
+- `demo/validate_daemon_automation.py`
+  Full isolated validation harness that starts a temporary daemon, runs the smoke flow, and shuts it down again.
+- `demo/validate_daemon_automation_failures.py`
+  Isolated failure-semantics validation for token auth, bad payloads, conflict acquisition, stale session actions, and missing-profile reclaim.
+- `docs/DAEMON_AUTOMATION_INTEGRATION.md`
+  Dedicated integration guide for fixed scripts that use the daemon automation API directly.
+
+Latest verified result:
+
+- `demo/output/managed_daemon_smoke_20260611_224625.json`
+- `demo/output/managed_daemon_smoke_20260611_225059.json`
+- `demo/output/managed_daemon_smoke_20260611_230345.json`
+- `demo/output/managed_daemon_failures_20260611_230315.json`
+
+Validation note:
+
+- `validate_daemon_automation.py` and `validate_daemon_automation_failures.py` both use the same isolated validation profile by default: `Profile 101`.
+- Do not run those two validation scripts in parallel unless you override one of them to use a different validation profile and split user-data root.
+
+Current boundary:
+
+- the managed automation HTTP surface is now functional and validated for acquisition, action execution, heartbeat, and release
+- this surface is intended for fixed-script execution, not arbitrary remote code upload
+- profile busy-state is now evaluated per profile rather than copying one global daemon state onto every profile row
+- orphan Chromium subprocess cleanup is better than earlier mirror-era behavior, but long-running real desktop environments still need continued hardening around residual utility processes
 
 ## Requirements
 

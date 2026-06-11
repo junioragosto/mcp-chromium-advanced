@@ -58,6 +58,7 @@ from chromium_advanced.chromium_profile_lib import (
     APP_NAME,
     LEGACY_CHATGPT_PROMPT,
     KeepAliveStopController,
+    clear_profile_occupancy,
     build_keepalive_plugin_template,
     build_profile_detail_text,
     delete_keepalive_plugin_source,
@@ -76,9 +77,14 @@ from chromium_advanced.chromium_profile_lib import (
     get_keepalive_site_icon_path,
     get_keepalive_site_ids,
     get_keepalive_site_label,
+    get_occupancy_events_path,
     get_profile_directory_path,
     get_profile_user_data_root,
+    occupancy_entry_is_expired,
+    read_recent_jsonl_events,
     is_legacy_default_mirror_root,
+    list_profile_occupancy_entries,
+    load_json_file,
     find_running_chromium_processes,
     get_project_root,
     get_runtime_launch_cwd,
@@ -97,6 +103,8 @@ from chromium_advanced.chromium_profile_lib import (
     terminate_chromium_processes,
     update_profile_launch_time,
     warm_keepalive_site_icon_cache,
+    write_profile_occupancy,
+    write_json_atomic,
     run_keepalive_job,
 )
 from chromium_advanced.browser_engines.constants import BROWSER_ENGINE_OPTIONS, DEFAULT_BROWSER_ENGINE
@@ -119,6 +127,7 @@ MCP_STATUS_QUERY_TIMEOUT_SECONDS = 0.6
 MCP_STATUS_CACHE_TTL_SECONDS = 1.0
 MCP_RECENT_HEALTH_GRACE_SECONDS = 30.0
 MCP_WATCHDOG_RESTART_FAILURES = 6
+OCCUPANCY_EVENTS_POLL_MS = 2000
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
 CONCURRENCY_MODE_OPTIONS = ["per_profile_live", "block"]
@@ -129,6 +138,28 @@ ERROR_ALREADY_EXISTS = 183
 SINGLE_INSTANCE_MUTEX_NAME = "Local\\ChromiumProfileManagerGuiSingleton"
 MCP_DAEMON_EXE_NAME = "ChromiumMcpDaemon.exe"
 MCP_WORKER_EXE_NAME = "ChromiumMcpWorker.exe"
+
+
+def _write_gui_profile_occupancy(profile_name: str, scene_type: str, state: str, owner_label: str = "", engine_name: str = "", session_id: str = "") -> None:
+    write_profile_occupancy(
+        profile_name,
+        scene_type=scene_type,
+        state=state,
+        owner_label=owner_label,
+        engine_name=engine_name,
+        session_id=session_id,
+        details={"source": "gui"},
+        event_source="gui",
+    )
+
+
+def _clear_gui_profile_occupancy(profile_name: str) -> None:
+    clear_profile_occupancy(
+        profile_name,
+        event_state="released",
+        details={"source": "gui", "cleared": True},
+        event_source="gui",
+    )
 
 
 class FocusWheelSpinBox(QSpinBox):
@@ -540,6 +571,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.keepalive_stop_requested = False
         self.external_profile_process_signature = ""
         self.external_profile_process_map: Dict[str, List[int]] = {}
+        self.profile_occupancy_cache: Dict[str, Dict] = {}
         self.force_exit_requested = False
         self.tray_message_shown = False
         self.scheduler_notice_key = ""
@@ -559,6 +591,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_last_ok_at = 0.0
         self.mcp_status_consecutive_failures = 0
         self.window_state_dirty = False
+        self.occupancy_event_file_offset = 0
 
         self.ensure_mcp_api_token_persisted()
         self.setWindowTitle(self.tr("window_title"))
@@ -574,6 +607,12 @@ class ChromiumManagerWindow(QMainWindow):
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
         self.refresh_all()
+        occupancy_events_path = get_occupancy_events_path()
+        if os.path.exists(occupancy_events_path):
+            try:
+                self.occupancy_event_file_offset = os.path.getsize(occupancy_events_path)
+            except OSError:
+                self.occupancy_event_file_offset = 0
         self.warm_keepalive_icon_cache_async()
         QTimer.singleShot(0, self.apply_initial_mcp_state)
 
@@ -588,6 +627,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_watchdog_timer = QTimer(self)
         self.mcp_watchdog_timer.timeout.connect(self.on_mcp_watchdog_timer)
         self.mcp_watchdog_timer.start(MCP_WATCHDOG_INTERVAL_MS)
+
+        self.occupancy_events_timer = QTimer(self)
+        self.occupancy_events_timer.timeout.connect(self.on_occupancy_events_timer)
+        self.occupancy_events_timer.start(OCCUPANCY_EVENTS_POLL_MS)
 
         self.window_state_timer = QTimer(self)
         self.window_state_timer.setSingleShot(True)
@@ -708,6 +751,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_launch_selected.clicked.connect(self.launch_selected_profile)
         toolbar.addWidget(self.btn_launch_selected)
 
+        self.btn_reclaim_selected = QPushButton()
+        self.btn_reclaim_selected.clicked.connect(self.reclaim_selected_profile)
+        toolbar.addWidget(self.btn_reclaim_selected)
+
         self.btn_keepalive_selected = QPushButton()
         self.btn_keepalive_selected.clicked.connect(self.run_keepalive_for_selected)
         toolbar.addWidget(self.btn_keepalive_selected)
@@ -743,13 +790,14 @@ class ChromiumManagerWindow(QMainWindow):
         self.table = QTableWidget()
         self.table.setMinimumHeight(0)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Profile", "Account", "Logged In", "Keepalive", "Actions"])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["Profile", "Account", "Status", "Logged In", "Keepalive", "Actions"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.cellDoubleClicked.connect(self.on_table_double_clicked)
@@ -787,6 +835,12 @@ class ChromiumManagerWindow(QMainWindow):
         self.log_layout.setSpacing(10)
         self.tabs.addTab(self.log_tab, "")
 
+        self.occupancy_tab = QWidget()
+        self.occupancy_layout = QVBoxLayout(self.occupancy_tab)
+        self.occupancy_layout.setContentsMargins(12, 12, 12, 12)
+        self.occupancy_layout.setSpacing(10)
+        self.tabs.addTab(self.occupancy_tab, "")
+
         self.mcp_log_tab = QWidget()
         self.mcp_log_layout = QVBoxLayout(self.mcp_log_tab)
         self.mcp_log_layout.setContentsMargins(12, 12, 12, 12)
@@ -806,6 +860,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.build_keepalive_tab()
         self.build_plugin_tab()
         self.build_log_tab()
+        self.build_occupancy_tab()
         self.build_mcp_log_tab()
         self.build_config_tab()
         splitter.addWidget(lower_widget)
@@ -1012,6 +1067,26 @@ class ChromiumManagerWindow(QMainWindow):
         self.log_output.document().setMaximumBlockCount(LOG_MAX_BLOCKS)
         self.log_layout.addWidget(self.log_output, 1)
 
+    def build_occupancy_tab(self):
+        toolbar = QHBoxLayout()
+        self.btn_refresh_occupancy = QPushButton()
+        self.btn_refresh_occupancy.clicked.connect(self.refresh_occupancy_tab)
+        self.btn_clear_occupancy_view = QPushButton()
+        self.btn_clear_occupancy_view.clicked.connect(lambda: self.occupancy_output.clear())
+        toolbar.addWidget(self.btn_refresh_occupancy)
+        toolbar.addWidget(self.btn_clear_occupancy_view)
+        toolbar.addStretch()
+        self.occupancy_layout.addLayout(toolbar)
+
+        self.occupancy_summary = QLabel("-")
+        self.occupancy_summary.setWordWrap(True)
+        self.occupancy_layout.addWidget(self.occupancy_summary)
+
+        self.occupancy_output = QPlainTextEdit()
+        self.occupancy_output.setReadOnly(True)
+        self.occupancy_output.document().setMaximumBlockCount(LOG_MAX_BLOCKS)
+        self.occupancy_layout.addWidget(self.occupancy_output, 1)
+
     def build_mcp_log_tab(self):
         self.mcp_status_group = QGroupBox()
         self.mcp_status_layout = QFormLayout(self.mcp_status_group)
@@ -1212,7 +1287,7 @@ class ChromiumManagerWindow(QMainWindow):
     def refresh_bottom_stats(self):
         profile_count = len(self.config.get("profiles", []))
         mcp_state_text = self.tr("bottom_mcp_stopped")
-        active_session_count = 0
+        active_session_count = len([item for item in self.profile_occupancy_cache.values() if isinstance(item, dict) and item.get("state") not in {"released", "idle", "start_failed"}])
 
         if self.mcp_startup_in_progress:
             mcp_state_text = "starting"
@@ -1220,13 +1295,6 @@ class ChromiumManagerWindow(QMainWindow):
             mcp_state_text = "running"
 
         mcp_status_text = self.mcp_status_label.text() if hasattr(self, "mcp_status_label") else mcp_state_text
-        detail_text = self.mcp_status_detail_label.text() if hasattr(self, "mcp_status_detail_label") else ""
-
-        if "occupied" in detail_text.lower():
-            active_session_count = 1
-        elif "session" in detail_text.lower():
-            active_session_count = 1
-
         self.bottom_stats_label.setText(
             f"Profiles: {profile_count} | MCP: {mcp_status_text or mcp_state_text} | Sessions: {active_session_count}"
         )
@@ -1262,6 +1330,17 @@ class ChromiumManagerWindow(QMainWindow):
     def on_keepalive_worker_message(self, kind: str, payload: Dict):
         if kind == "__PROFILE_START__":
             self.keepalive_running_profile_name = str((payload or {}).get("profile_name", "")).strip()
+            if self.keepalive_running_profile_name:
+                _write_gui_profile_occupancy(
+                    self.keepalive_running_profile_name,
+                    scene_type="keepalive",
+                    state="active",
+                    owner_label=self.keepalive_log_prefix or "Keepalive",
+                    engine_name=normalize_browser_engine_name(
+                        self.config.get("app", {}).get("browser_engine", DEFAULT_BROWSER_ENGINE)
+                    ),
+                )
+                self.profile_occupancy_cache = self.load_profile_occupancy_cache()
             self.refresh_table()
             return
 
@@ -1277,11 +1356,14 @@ class ChromiumManagerWindow(QMainWindow):
                 self.config["keepalive"]["last_scheduled_run_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
                 self.config = save_app_config(self.config, self.config_path)
             self.keepalive_worker = None
+            if self.keepalive_running_profile_name:
+                _clear_gui_profile_occupancy(self.keepalive_running_profile_name)
             self.keepalive_target_profiles = []
             self.keepalive_running_profile_name = ""
             self.keepalive_log_prefix = ""
             self.keepalive_stop_requested = False
             self.set_keepalive_buttons_enabled(True)
+            self.profile_occupancy_cache = self.load_profile_occupancy_cache()
             self.reload_config_from_disk()
             return
 
@@ -1291,11 +1373,14 @@ class ChromiumManagerWindow(QMainWindow):
                 prefix=self.keepalive_log_prefix or self.tr("keepalive_source_default"),
             )
             self.keepalive_worker = None
+            if self.keepalive_running_profile_name:
+                _clear_gui_profile_occupancy(self.keepalive_running_profile_name)
             self.keepalive_target_profiles = []
             self.keepalive_running_profile_name = ""
             self.keepalive_log_prefix = ""
             self.keepalive_stop_requested = False
             self.set_keepalive_buttons_enabled(True)
+            self.profile_occupancy_cache = self.load_profile_occupancy_cache()
             self.reload_config_from_disk()
 
     def set_keepalive_buttons_enabled(self, enabled: bool):
@@ -1303,6 +1388,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_edit.setEnabled(enabled)
         self.btn_remove.setEnabled(enabled)
         self.btn_remove_with_dir.setEnabled(enabled)
+        self.btn_reclaim_selected.setEnabled(enabled)
         self.btn_keepalive_selected.setEnabled(enabled)
         self.btn_keepalive_all.setEnabled(enabled)
         self.btn_save_keepalive.setEnabled(enabled)
@@ -1346,12 +1432,14 @@ class ChromiumManagerWindow(QMainWindow):
         process_map = self.build_external_profile_process_map()
         signature = self.serialize_external_profile_process_map(process_map)
         if signature == self.external_profile_process_signature:
+            self.reconcile_manual_occupancy(process_map)
             return
         previous_map = dict(self.external_profile_process_map)
         self.external_profile_process_signature = signature
         self.external_profile_process_map = process_map
         if previous_map:
             self.log_external_profile_process_transitions(previous_map, process_map)
+        self.reconcile_manual_occupancy(process_map)
         self.refresh_table()
         self.update_selected_profile_status()
 
@@ -1391,6 +1479,14 @@ class ChromiumManagerWindow(QMainWindow):
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             return self.tr("runtime_state_unknown", "Unknown")
+        occupancy = self.profile_occupancy_cache.get(profile_name, {})
+        if occupancy:
+            scene_type = str(occupancy.get("scene_type", "") or "").strip()
+            owner_label = str(occupancy.get("owner_label", "") or "").strip()
+            state = str(occupancy.get("state", "") or "").strip() or "active"
+            if scene_type and state not in {"released", "start_failed"}:
+                suffix = f" · {owner_label}" if owner_label else ""
+                return f"{scene_type}:{state}{suffix}"
         if self.is_profile_keepalive_running(profile_name):
             return self.tr("runtime_state_keepalive", "Keepalive running")
         pids = self.external_profile_process_map.get(profile_name, [])
@@ -1419,22 +1515,202 @@ class ChromiumManagerWindow(QMainWindow):
         self.external_profile_process_signature = self.serialize_external_profile_process_map(
             self.external_profile_process_map
         )
+        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
         self.load_app_settings_to_ui()
         self.retranslate_ui()
         self.refresh_keepalive_plugin_table()
         self.refresh_table()
+        self.refresh_occupancy_tab()
         self.load_keepalive_settings_to_ui()
         self.load_path_settings_to_ui()
         self.load_mcp_settings_to_ui()
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
         self.refresh_scheduler_status()
+        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
         self.update_selected_profile_status()
         self.refresh_bottom_stats()
 
     def reload_config_from_disk(self):
         self.refresh_all()
         self.append_log(self.tr("log_config_reloaded"))
+
+    def load_profile_occupancy_cache(self) -> Dict[str, Dict]:
+        return list_profile_occupancy_entries()
+
+    def format_scene_type_label(self, scene_type: str) -> str:
+        scene_type = str(scene_type or "").strip().lower()
+        mapping = {
+            "mcp": self.tr("occupancy_scene_mcp", "MCP"),
+            "manual": self.tr("occupancy_scene_manual", "MANUAL"),
+            "keepalive": self.tr("occupancy_scene_keepalive", "KEEPALIVE"),
+            "automation": self.tr("occupancy_scene_automation", "SCRIPT"),
+            "in_use": self.tr("occupancy_scene_in_use", "IN USE"),
+            "unknown": self.tr("occupancy_scene_unknown", "IN USE"),
+        }
+        return mapping.get(scene_type, scene_type.upper() if scene_type else self.tr("occupancy_scene_unknown", "IN USE"))
+
+    def format_occupancy_entry_summary(self, profile_name: str, occupancy: Dict) -> str:
+        if not isinstance(occupancy, dict) or not occupancy:
+            return f"{profile_name}: {self.tr('runtime_state_idle', 'Idle')}"
+        scene_label = self.format_scene_type_label(occupancy.get("scene_type", ""))
+        state = str(occupancy.get("state", "") or "active")
+        owner_label = str(occupancy.get("owner_label", "") or "").strip()
+        owner_pid = int(occupancy.get("owner_pid", 0) or 0)
+        lease_expires_at = float(occupancy.get("lease_expires_at", 0.0) or 0.0)
+        expired = occupancy_entry_is_expired(occupancy)
+        lease_text = "-"
+        if lease_expires_at > 0:
+            lease_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lease_expires_at))
+        return (
+            f"{profile_name}: {scene_label}/{state}"
+            f" | owner={owner_label or '-'}"
+            f" | pid={owner_pid or '-'}"
+            f" | lease_until={lease_text}"
+            f" | expired={'yes' if expired else 'no'}"
+        )
+
+    def reconcile_manual_occupancy(self, process_map: Optional[Dict[str, List[int]]] = None) -> None:
+        process_map = process_map if isinstance(process_map, dict) else self.external_profile_process_map
+        changed = False
+        for profile_name, occupancy in list(self.profile_occupancy_cache.items()):
+            if not isinstance(occupancy, dict):
+                continue
+            scene_type = str(occupancy.get("scene_type", "") or "").strip()
+            state = str(occupancy.get("state", "") or "").strip()
+            if scene_type != "manual" or state in {"released", "start_failed"}:
+                continue
+            if process_map.get(profile_name):
+                continue
+            _clear_gui_profile_occupancy(profile_name)
+            changed = True
+            self.append_log(
+                self.tr(
+                    "log_profile_manual_occupancy_released",
+                    "{profile_name} manual occupancy was cleared because no matching Chromium process remained.",
+                ).format(profile_name=profile_name)
+            )
+        if changed:
+            self.profile_occupancy_cache = self.load_profile_occupancy_cache()
+
+    def format_occupancy_event_text(self, payload: Dict) -> str:
+        profile_name = str(payload.get("profile_name", "") or "-")
+        scene_type = str(payload.get("scene_type", "") or "unknown")
+        state = str(payload.get("state", "") or "active")
+        owner_label = str(payload.get("owner_label", "") or "").strip()
+        engine_name = str(payload.get("engine_name", "") or "").strip()
+        parts = [f"{profile_name} {scene_type}:{state}"]
+        if owner_label:
+            parts.append(owner_label)
+        if engine_name:
+            parts.append(f"engine={engine_name}")
+        return " | ".join(parts)
+
+    def on_occupancy_events_timer(self):
+        path = get_occupancy_events_path()
+        try:
+            if not os.path.exists(path):
+                self.occupancy_event_file_offset = 0
+                return
+            file_size = os.path.getsize(path)
+            if file_size < self.occupancy_event_file_offset:
+                self.occupancy_event_file_offset = 0
+            with open(path, "r", encoding="utf-8") as handle:
+                handle.seek(self.occupancy_event_file_offset)
+                lines = handle.readlines()
+                self.occupancy_event_file_offset = handle.tell()
+        except Exception:
+            return
+
+        if not lines:
+            return
+
+        emitted = False
+        for raw_line in lines[-20:]:
+            raw_line = str(raw_line or "").strip()
+            if not raw_line:
+                continue
+            try:
+                payload = json.loads(raw_line)
+            except Exception:
+                continue
+            self.append_log(self.format_occupancy_event_text(payload), prefix="OCC")
+            emitted = True
+        if emitted:
+            self.profile_occupancy_cache = self.load_profile_occupancy_cache()
+            self.refresh_table()
+            self.update_selected_profile_status()
+            self.refresh_bottom_stats()
+            self.refresh_occupancy_tab()
+
+    def refresh_occupancy_tab(self):
+        entries = self.load_profile_occupancy_cache()
+        recent_events = read_recent_jsonl_events(get_occupancy_events_path(), limit=80)
+        active_lines = []
+        for profile_name in sorted(entries.keys(), key=profile_sort_key):
+            active_lines.append(self.format_occupancy_entry_summary(profile_name, entries.get(profile_name, {})))
+        if not active_lines:
+            active_lines.append(self.tr("runtime_state_idle", "Idle"))
+        self.occupancy_summary.setText(
+            self.tr(
+                "occupancy_summary_template",
+                "Active occupancies: {active_count} | Recent events: {event_count}",
+            ).format(active_count=len(entries), event_count=len(recent_events))
+        )
+        event_lines = [self.format_occupancy_event_text(item) for item in recent_events[-40:]]
+        payload = ["[ACTIVE]", *active_lines, "", "[EVENTS]", *event_lines]
+        self.occupancy_output.setPlainText("\n".join(payload))
+
+    def reclaim_selected_profile(self):
+        profile = self.get_selected_profile()
+        if not profile:
+            QMessageBox.information(self, self.tr("info_title"), self.tr("info_select_profile_first"))
+            return
+        profile_name = str(profile.get("profile_name", "") or "").strip()
+        if not profile_name:
+            return
+        from chromium_advanced.session_manager import SessionManager
+
+        manager = SessionManager(config_path=self.config_path)
+        try:
+            result = manager.reclaim_profile(profile_name, reason="gui_manual_reclaim")
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("running_title"), str(exc))
+            return
+        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
+        self.refresh_external_profile_process_state()
+        self.refresh_occupancy_tab()
+        self.append_log(
+            self.tr(
+                "log_profile_reclaimed",
+                "{profile_name} reclaimed: terminated={terminated_process_count}",
+            ).format(
+                profile_name=profile_name,
+                terminated_process_count=result.get("terminated_process_count", 0),
+            )
+        )
+
+    def get_profile_status_display(self, profile_name: str) -> Dict[str, str]:
+        occupancy = self.profile_occupancy_cache.get(profile_name, {})
+        if occupancy:
+            scene_type = str(occupancy.get("scene_type", "") or "").strip() or "in_use"
+            state = str(occupancy.get("state", "") or "").strip() or "active"
+            owner_label = str(occupancy.get("owner_label", "") or "").strip()
+            label = self.format_scene_type_label(scene_type)
+            if state not in {"active", "running"}:
+                label = f"{label}/{state}"
+            tooltip = owner_label or f"{scene_type} ({state})"
+            if occupancy.get("engine_name"):
+                tooltip = f"{tooltip}\nengine={occupancy.get('engine_name')}"
+            if occupancy.get("session_id"):
+                tooltip = f"{tooltip}\nsession={occupancy.get('session_id')}"
+            return {"label": label, "tooltip": tooltip}
+        if self.is_profile_keepalive_running(profile_name):
+            return {"label": "KEEPALIVE", "tooltip": "keepalive running"}
+        pids = self.external_profile_process_map.get(profile_name, [])
+        if pids:
+            return {"label": "MANUAL", "tooltip": f"external chromium pid={', '.join(str(pid) for pid in pids)}"}
+        return {"label": self.tr("runtime_state_idle", "Idle"), "tooltip": self.tr("runtime_state_idle", "Idle")}
 
     def sync_profiles(self):
         self.config = sync_profiles_with_user_data(self.config)
@@ -1476,8 +1752,24 @@ class ChromiumManagerWindow(QMainWindow):
             return
         base_text = build_profile_detail_text(profile, self.tr)
         runtime_text = self.build_profile_runtime_state_text(profile.get("profile_name", ""))
+        occupancy = self.profile_occupancy_cache.get(profile.get("profile_name", ""), {})
+        occupancy_text = "-"
+        if occupancy:
+            owner_pid = int(occupancy.get("owner_pid", 0) or 0)
+            lease_expires_at = float(occupancy.get("lease_expires_at", 0.0) or 0.0)
+            lease_text = "-"
+            if lease_expires_at > 0:
+                lease_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lease_expires_at))
+            occupancy_text = (
+                f"{occupancy.get('scene_type', '-')}/{occupancy.get('state', '-')}"
+                f" ({occupancy.get('owner_label', '-')})"
+                f" pid={owner_pid or '-'}"
+                f" lease={lease_text}"
+            )
         self.selected_profile_status.setPlainText(
-            f"{base_text}\n{self.tr('detail_runtime_state', 'Runtime State')}: {runtime_text}"
+            f"{base_text}\n"
+            f"{self.tr('detail_runtime_state', 'Runtime State')}: {runtime_text}\n"
+            f"{self.tr('table_status', 'Status')}: {occupancy_text}"
         )
 
     def is_profile_keepalive_running(self, profile_name: str) -> bool:
@@ -1760,16 +2052,21 @@ class ChromiumManagerWindow(QMainWindow):
                 profile_item = QTableWidgetItem(profile.get("profile_name", ""))
                 account_text = profile.get("account", "") or "-"
                 account_item = QTableWidgetItem(account_text)
+                status_payload = self.get_profile_status_display(profile.get("profile_name", ""))
+                status_item = QTableWidgetItem(status_payload.get("label", ""))
                 color = self.status_color_for_profile(profile)
                 if color:
                     profile_item.setForeground(color)
                     account_item.setForeground(color)
+                    status_item.setForeground(color)
                 tooltip = profile.get("last_keepalive_message", "") or self.tr("status_keepalive_never")
                 profile_item.setToolTip(tooltip)
                 account_item.setToolTip(tooltip)
+                status_item.setToolTip(status_payload.get("tooltip", tooltip))
                 self.table.setItem(row, 0, profile_item)
                 self.table.setItem(row, 1, account_item)
-                self.table.setCellWidget(row, 2, self.create_profile_site_selector(profile))
+                self.table.setItem(row, 2, status_item)
+                self.table.setCellWidget(row, 3, self.create_profile_site_selector(profile))
 
                 keepalive_checkbox = QCheckBox()
                 profile_name = profile.get("profile_name", "")
@@ -1788,7 +2085,7 @@ class ChromiumManagerWindow(QMainWindow):
                 keepalive_layout.setContentsMargins(4, 2, 4, 2)
                 keepalive_layout.addWidget(keepalive_checkbox)
                 keepalive_layout.setAlignment(Qt.AlignCenter)
-                self.table.setCellWidget(row, 3, keepalive_wrapper)
+                self.table.setCellWidget(row, 4, keepalive_wrapper)
 
                 launch_button = QPushButton(self.tr("action_launch"))
                 external_running = bool(get_chromium_processes_for_profile(self.config, profile_name))
@@ -1817,7 +2114,7 @@ class ChromiumManagerWindow(QMainWindow):
                 button_layout.addWidget(launch_button)
                 button_layout.addWidget(keepalive_button)
                 button_layout.setAlignment(Qt.AlignCenter)
-                self.table.setCellWidget(row, 4, button_wrapper)
+                self.table.setCellWidget(row, 5, button_wrapper)
 
             if profiles:
                 row_to_select = 0
@@ -1999,9 +2296,18 @@ class ChromiumManagerWindow(QMainWindow):
             self.append_log(self.trf("log_profile_launch_failed", profile_name=profile_name, error=exc))
             return
 
+        _write_gui_profile_occupancy(
+            profile_name,
+            scene_type="manual",
+            state="active",
+            owner_label="GUI launch",
+            engine_name=engine_name,
+        )
+
         self.config = update_profile_launch_time(self.config, profile_name)
         self.config = save_app_config(self.config, self.config_path)
         self.selected_profile_name = profile_name
+        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
         self.refresh_table()
         self.update_selected_profile_status()
         stdout = (result.stdout or "").strip()
@@ -2022,6 +2328,8 @@ class ChromiumManagerWindow(QMainWindow):
             return
         terminated = terminate_chromium_processes(processes, logger=None)
         self.selected_profile_name = profile_name
+        _clear_gui_profile_occupancy(profile_name)
+        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
         self.refresh_external_profile_process_state()
         details = self.tr("profile_close_none", "no matching Chromium process found")
         if terminated:
@@ -2267,6 +2575,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_remove_with_dir.setText(self.tr("toolbar_remove_full"))
         self.btn_sync.setText(self.tr("toolbar_sync"))
         self.btn_launch_selected.setText(self.tr("toolbar_launch"))
+        self.btn_reclaim_selected.setText(self.tr("toolbar_reclaim"))
         self.btn_keepalive_selected.setText(self.tr("toolbar_keepalive_selected"))
         self.btn_keepalive_all.setText(self.tr("toolbar_keepalive_all"))
         self.btn_open_config_dir.setText(self.tr("toolbar_open_config"))
@@ -2277,6 +2586,7 @@ class ChromiumManagerWindow(QMainWindow):
             [
                 self.tr("table_profile"),
                 self.tr("table_account"),
+                self.tr("table_status", "Status"),
                 self.tr("table_logged_in"),
                 self.tr("table_keepalive"),
                 self.tr("table_actions"),
@@ -2285,6 +2595,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.tabs.setTabText(self.tabs.indexOf(self.keepalive_tab), self.tr("tab_keepalive"))
         self.tabs.setTabText(self.tabs.indexOf(self.plugin_tab), self.tr("tab_plugins"))
         self.tabs.setTabText(self.tabs.indexOf(self.log_tab), self.tr("tab_logs"))
+        self.tabs.setTabText(self.tabs.indexOf(self.occupancy_tab), self.tr("tab_occupancy"))
         self.tabs.setTabText(self.tabs.indexOf(self.mcp_log_tab), self.tr("tab_mcp_logs"))
         self.tabs.setTabText(self.tabs.indexOf(self.config_tab), self.tr("tab_config"))
         self.selected_group.setTitle(self.tr("group_selected"))
@@ -2298,6 +2609,8 @@ class ChromiumManagerWindow(QMainWindow):
 
         self.btn_save_keepalive.setText(self.tr("save_keepalive"))
         self.btn_refresh_task.setText(self.tr("refresh_status"))
+        self.btn_refresh_occupancy.setText(self.tr("refresh_status"))
+        self.btn_clear_occupancy_view.setText(self.tr("clear_logs"))
         self.btn_plugin_reload.setText(self.tr("plugin_action_reload"))
         self.btn_plugin_new.setText(self.tr("plugin_action_new"))
         self.btn_plugin_save.setText(self.tr("plugin_action_save"))
