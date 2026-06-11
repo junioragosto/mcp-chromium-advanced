@@ -89,6 +89,7 @@ from chromium_advanced.chromium_profile_lib import (
     now_text,
     normalize_language_code,
     profile_sort_key,
+    resolve_mcp_api_token,
     save_app_config,
     save_keepalive_plugin_source,
     migrate_keepalive_site_id_references,
@@ -315,8 +316,11 @@ def can_connect(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
-def fetch_json(url: str, timeout: float = 1.5) -> Dict:
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+def fetch_json(url: str, timeout: float = 1.5, headers: Optional[Dict[str, str]] = None) -> Dict:
+    request_headers = {"Accept": "application/json"}
+    if headers:
+        request_headers.update({str(k): str(v) for k, v in headers.items() if k and v is not None})
+    request = urllib.request.Request(url, headers=request_headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = response.read().decode("utf-8", errors="replace")
     data = json.loads(payload)
@@ -556,6 +560,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_consecutive_failures = 0
         self.window_state_dirty = False
 
+        self.ensure_mcp_api_token_persisted()
         self.setWindowTitle(self.tr("window_title"))
         bounds = self.config.get("app", {}).get("window_bounds", {})
         initial_width = max(720, int(bounds.get("width", 860) or 860))
@@ -587,6 +592,15 @@ class ChromiumManagerWindow(QMainWindow):
         self.window_state_timer = QTimer(self)
         self.window_state_timer.setSingleShot(True)
         self.window_state_timer.timeout.connect(self.persist_window_bounds)
+
+    def ensure_mcp_api_token_persisted(self):
+        self.config.setdefault("mcp", {})
+        token = str(self.config["mcp"].get("api_token", "")).strip()
+        if token:
+            return
+        token = resolve_mcp_api_token(self.config)
+        self.config["mcp"]["api_token"] = token
+        self.config = save_app_config(self.config, self.config_path)
 
     def _current_screen_available_geometry(self):
         screen = self.screen()
@@ -1115,6 +1129,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_transport_combo = QComboBox()
         self.mcp_transport_combo.addItems(MCP_TRANSPORT_OPTIONS)
         self.mcp_host_edit = QLineEdit()
+        self.mcp_host_edit.textChanged.connect(lambda: self._refresh_api_token_warning(self.mcp_api_token_edit.text().strip()))
         self.mcp_port_spin = FocusWheelSpinBox()
         self.mcp_port_spin.setRange(1, 65535)
         self.mcp_worker_port_spin = FocusWheelSpinBox()
@@ -1133,6 +1148,24 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_layout.addRow("Idle Timeout(s)", self.mcp_idle_timeout_spin)
         self.mcp_layout.addRow(self.tr("mcp_start_minimized"), self.mcp_start_minimized_checkbox)
         self.mcp_layout.addRow(self.tr("mcp_log_level"), self.mcp_log_level_combo)
+
+        self.mcp_api_token_label = QLabel()
+        self.mcp_api_token_edit = QLineEdit()
+        self.mcp_api_token_edit.setReadOnly(True)
+        self.mcp_api_token_edit.setEchoMode(QLineEdit.Normal)
+        # selectable-by-mouse is the default for read-only QLineEdit
+        self.mcp_api_token_edit.setToolTip(self.tr("mcp_api_token_tooltip"))
+        self.btn_regenerate_api_token = QPushButton()
+        self.btn_regenerate_api_token.clicked.connect(self.regenerate_api_token)
+        self.mcp_auth_warning_label = QLabel()
+        self.mcp_auth_warning_label.setStyleSheet("color: #e67e22; font-weight: bold;")
+        self.mcp_auth_warning_label.setWordWrap(True)
+        self.mcp_auth_warning_label.hide()
+        token_row = QHBoxLayout()
+        token_row.addWidget(self.mcp_api_token_edit, 1)
+        token_row.addWidget(self.btn_regenerate_api_token)
+        self.mcp_layout.addRow(self.mcp_api_token_label, token_row)
+        self.mcp_layout.addRow("", self.mcp_auth_warning_label)
         self.config_layout.addWidget(self.mcp_group)
 
         config_button_row = QHBoxLayout()
@@ -2346,6 +2379,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_layout.labelForField(self.mcp_trace_path_label).setText(self.tr("mcp_trace_path"))
         self.mcp_status_layout.labelForField(self.mcp_status_detail_label).setText(self.tr("mcp_detail"))
 
+        self.mcp_api_token_label.setText(self.tr("mcp_api_token"))
+        self.mcp_api_token_edit.setToolTip(self.tr("mcp_api_token_tooltip"))
+        self.btn_regenerate_api_token.setText(self.tr("mcp_regenerate_token"))
+        self._refresh_api_token_warning(self.mcp_api_token_edit.text().strip())
         self.mcp_start_minimized_checkbox.setText(self.tr("mcp_start_minimized_hint"))
         self.mcp_layout.labelForField(self.mcp_start_minimized_checkbox).setText(self.tr("mcp_start_minimized"))
         self.mcp_layout.labelForField(self.mcp_log_level_combo).setText(self.tr("mcp_log_level"))
@@ -2376,6 +2413,10 @@ class ChromiumManagerWindow(QMainWindow):
             log_level = "info"
         self.mcp_log_level_combo.setCurrentText(log_level)
         self.mcp_service_checkbox.blockSignals(True)
+
+        api_token = str(settings.get("api_token", ""))
+        self.mcp_api_token_edit.setText(api_token)
+        self._refresh_api_token_warning(api_token)
         self.mcp_service_checkbox.setChecked(bool(settings.get("enabled", False)))
         self.mcp_service_checkbox.blockSignals(False)
         self.refresh_mcp_status_ui()
@@ -2404,6 +2445,29 @@ class ChromiumManagerWindow(QMainWindow):
         self.config = save_app_config(self.config, self.config_path)
         self.refresh_table()
         self.append_log(self.tr("log_base_config_saved"))
+
+
+    def regenerate_api_token(self):
+        import secrets
+        new_token = secrets.token_hex(24)
+        self.config.setdefault("mcp", {})
+        self.config["mcp"]["api_token"] = new_token
+        self.config = save_app_config(self.config, self.config_path)
+        self.mcp_api_token_edit.setText(new_token)
+        self._refresh_api_token_warning(new_token)
+        self.append_log(self.tr("log_api_token_regenerated"))
+
+    def _refresh_api_token_warning(self, api_token=""):
+        host = (self.mcp_host_edit.text().strip() or "127.0.0.1").lower()
+        is_local = host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+        if not (api_token or "").strip():
+            self.mcp_auth_warning_label.setText(self.tr("mcp_auth_warning_no_token"))
+            self.mcp_auth_warning_label.show()
+        elif not is_local:
+            self.mcp_auth_warning_label.setText(self.tr("mcp_auth_warning_remote"))
+            self.mcp_auth_warning_label.show()
+        else:
+            self.mcp_auth_warning_label.hide()
 
     def save_mcp_settings(self):
         self.config.setdefault("mcp", {})
@@ -2482,6 +2546,13 @@ class ChromiumManagerWindow(QMainWindow):
         port = int(settings.get("port", 28888))
         return f"http://{host}:{port}/_daemon/status"
 
+    def get_mcp_auth_headers(self) -> Dict[str, str]:
+        settings = self.config.get("mcp", {}) if isinstance(self.config, dict) else {}
+        api_token = str(settings.get("api_token", "")).strip() if isinstance(settings, dict) else ""
+        if not api_token:
+            return {}
+        return {"Authorization": f"Bearer {api_token}"}
+
     def get_mcp_connect_host_port(self):
         settings = self.config.get("mcp", {})
         host = str(settings.get("host", "127.0.0.1")).strip() or "127.0.0.1"
@@ -2503,7 +2574,11 @@ class ChromiumManagerWindow(QMainWindow):
         ):
             return self.mcp_status_cache
         try:
-            status = fetch_json(self.get_mcp_status_url(), timeout=MCP_STATUS_QUERY_TIMEOUT_SECONDS)
+            status = fetch_json(
+                self.get_mcp_status_url(),
+                timeout=MCP_STATUS_QUERY_TIMEOUT_SECONDS,
+                headers=self.get_mcp_auth_headers(),
+            )
             self.mcp_status_last_query_at = now_ts
             if isinstance(status, dict) and status:
                 self.mcp_status_cache = status
@@ -2648,6 +2723,11 @@ class ChromiumManagerWindow(QMainWindow):
                 "--config-path",
                 self.config_path,
             ]
+
+            api_token = str(settings.get("api_token", "")).strip()
+            if api_token:
+                args.append("--api-token")
+                args.append(api_token)
             return args
 
         args = [
@@ -2670,6 +2750,11 @@ class ChromiumManagerWindow(QMainWindow):
             "--config-path",
             self.config_path,
         ]
+
+        api_token = str(settings.get("api_token", "")).strip()
+        if api_token:
+            args.append("--api-token")
+            args.append(api_token)
         return args
 
     def start_mcp_service(self):

@@ -17,6 +17,7 @@ import psutil
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
 from chromium_advanced.chromium_profile_lib import (
     detect_fingerprint_extension_dir,
+    get_chromium_restore_prompt_suppression_args,
     get_profile_directory_path,
     get_profile_user_data_root,
     get_hidden_subprocess_kwargs,
@@ -1593,6 +1594,7 @@ class PlaywrightCliEngine(BrowserEngine):
             "--no-default-browser-check",
             f"--profile-directory={profile_name}",
         ]
+        launch_args.extend(get_chromium_restore_prompt_suppression_args())
         if start_minimized:
             launch_args.append("--start-minimized")
         elif bool(launch_settings.get("start_maximized", True)):

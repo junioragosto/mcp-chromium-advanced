@@ -15,6 +15,7 @@ from chromium_advanced.browser_engines.playwright_cli_engine import (
     cleanup_stale_playwright_cli_temp_dirs,
     _normalize_playwright_cli_launch_args,
 )
+from chromium_advanced.chromium_profile_lib import get_chromium_restore_prompt_suppression_args
 
 
 class FakePlaywrightCliSession(PlaywrightCliBrowserSession):
@@ -179,6 +180,8 @@ class PlaywrightCliEngineTests(unittest.TestCase):
         args = cli_config["browser"]["launchOptions"]["args"]
         self.assertIn("--start-minimized", args)
         self.assertNotIn("--start-maximized", args)
+        for item in get_chromium_restore_prompt_suppression_args():
+            self.assertIn(item, args)
 
     def test_mcp_can_opt_out_of_minimized_window(self):
         _session, _command, cli_config = self._create_session_with_mocked_open(headless=False, start_minimized=False)

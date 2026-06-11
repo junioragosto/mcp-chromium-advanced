@@ -227,8 +227,11 @@ If `mirror_disk` is empty after a successful keepalive, inspect GUI logs and the
 First verify the daemon:
 
 ```powershell
-Invoke-RestMethod -Uri 'http://127.0.0.1:28888/_daemon/status' -TimeoutSec 5 | ConvertTo-Json -Depth 8
+$token = "<your-api-token>"
+Invoke-RestMethod -Uri 'http://127.0.0.1:28888/_daemon/status' -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 5 | ConvertTo-Json -Depth 8
 ```
+
+If `mcp.api_token` is configured, every daemon request must send that bearer token. There is no localhost exemption.
 
 Then use the MCP tools in this order:
 

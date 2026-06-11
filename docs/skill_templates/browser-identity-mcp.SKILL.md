@@ -21,6 +21,8 @@ For the Chromium Profile Manager service used on this machine:
   `browserIdentity`
 - MCP endpoint:
   `http://127.0.0.1:28888/mcp`
+- daemon auth:
+  if `mcp.api_token` is configured, every daemon request must send `Authorization: Bearer <token>` with no localhost bypass
 - daemon model:
   a stable daemon listens on `28888`
 - worker model:
@@ -47,6 +49,7 @@ For the Chromium Profile Manager service used on this machine:
 - If the same identity is already occupied, do not steal it unless the project explicitly supports safe reuse and the user intends that reuse.
 - When the task depends on a specific website login, verify that website's actual logged-in account inside the page before doing account-sensitive work.
 - Always close or release the session after the task completes unless the user explicitly asks to keep it open.
+- If direct daemon HTTP verification is needed, include the configured bearer token on every request instead of assuming localhost is trusted.
 
 ## Parameter Mapping
 

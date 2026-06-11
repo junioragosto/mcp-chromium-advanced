@@ -273,5 +273,11 @@
   "info_keepalive_already_running": "已有保活任务在执行，请稍后。",
   "log_keepalive_started": "开始保活任务",
   "process_exit_normal": "正常退出",
-  "process_exit_abnormal": "异常退出"
+  "process_exit_abnormal": "异常退出",
+  "mcp_api_token": "API Token",
+  "mcp_api_token_tooltip": "用于 Bearer Token 认证。只要配置了 Token，所有访问 daemon 的请求都必须携带它。需要将此 Token 复制到 MCP 客户端配置中。",
+  "mcp_regenerate_token": "重新生成",
+  "mcp_auth_warning_no_token": "警告：未设置 API Token。只要能访问到这个 daemon 的客户端，目前都可以直接控制浏览器。",
+  "mcp_auth_warning_remote": "已启用 API Token 认证。所有 daemon 请求都必须携带 Authorization: Bearer <token>，请妥善保管。",
+  "log_api_token_regenerated": "API Token 已重新生成，现有客户端需要更新配置。"
 }

@@ -12,9 +12,12 @@ from chromium_advanced.chromium_manage_gui import (
 )
 from chromium_advanced.chromium_profile_lib import (
     _google_results_ready,
+    build_direct_launch_command,
+    create_driver_for_profile,
     format_keepalive_site_status,
     get_keepalive_site_ids,
     get_keepalive_site_registry,
+    get_chromium_restore_prompt_suppression_args,
     migrate_keepalive_site_id_references,
     normalize_config,
     normalize_keepalive_site_result_for_display,
@@ -67,6 +70,48 @@ class ConfigPathMigrationTests(unittest.TestCase):
         window = ChromiumManagerWindow.__new__(ChromiumManagerWindow)
         with mock.patch.dict(os.environ, {"CHROMIUM_ADVANCED_MCP_TRACE_PATH": r"C:\Trace\mcp.jsonl"}):
             self.assertEqual(window.get_mcp_trace_path(), r"C:\Trace\mcp.jsonl")
+
+    def test_direct_launch_command_suppresses_restore_prompt(self):
+        config = normalize_config(
+            {
+                "paths": {
+                    "chromium_dir": r"C:\Chromium\chrome.exe",
+                    "user_data_profiles_root": r"C:\Chromium\UserDataSplited",
+                },
+                "profiles": [{"profile_name": "Profile 1"}],
+            }
+        )
+        with mock.patch("chromium_advanced.chromium_profile_lib.os.path.exists", return_value=True):
+            command = build_direct_launch_command("Profile 1", config)
+        for arg in get_chromium_restore_prompt_suppression_args():
+            self.assertIn(arg, command)
+
+    def test_selenium_driver_options_suppress_restore_prompt(self):
+        config = normalize_config(
+            {
+                "paths": {
+                    "chromium_dir": r"C:\Chromium\chrome.exe",
+                    "chromedriver_path": r"C:\Chromium\chromedriver.exe",
+                    "user_data_profiles_root": r"C:\Chromium\UserDataSplited",
+                },
+                "profiles": [{"profile_name": "Profile 1"}],
+            }
+        )
+
+        def fake_exists(path):
+            return path in {
+                r"C:\Chromium\chrome.exe",
+                r"C:\Chromium\chromedriver.exe",
+            }
+
+        with mock.patch("chromium_advanced.chromium_profile_lib.os.path.exists", side_effect=fake_exists):
+            with mock.patch("chromium_advanced.chromium_profile_lib.os.path.isdir", return_value=True):
+                with mock.patch("chromium_advanced.chromium_profile_lib.uc.Chrome", return_value=mock.Mock()) as chrome_mock:
+                    create_driver_for_profile(config, "Profile 1")
+        options = chrome_mock.call_args.kwargs["options"]
+        arguments = list(getattr(options, "arguments", []))
+        for arg in get_chromium_restore_prompt_suppression_args():
+            self.assertIn(arg, arguments)
 
 
 class FocusWheelInputTests(unittest.TestCase):
@@ -221,6 +266,33 @@ class KeepaliveGuiContractTests(unittest.TestCase):
         self.assertTrue(window.is_profile_keepalive_ui_locked("Profile 1"))
         self.assertTrue(window.is_profile_keepalive_ui_locked("Profile 3"))
         self.assertFalse(window.is_profile_keepalive_ui_locked("Profile 2"))
+
+    def test_get_mcp_auth_headers_uses_bearer_token(self):
+        window = self.make_window()
+        window.config = normalize_config({"mcp": {"api_token": "demo-token"}})
+        self.assertEqual(
+            window.get_mcp_auth_headers(),
+            {"Authorization": "Bearer demo-token"},
+        )
+
+    def test_query_mcp_status_passes_auth_headers(self):
+        window = self.make_window()
+        window.config = normalize_config({"mcp": {"api_token": "demo-token"}})
+        window.mcp_status_cache = {}
+        window.mcp_status_last_query_at = 0.0
+        window.mcp_status_last_ok_at = 0.0
+        window.mcp_status_consecutive_failures = 0
+        with mock.patch(
+            "chromium_advanced.chromium_manage_gui.fetch_json",
+            return_value={"ok": True},
+        ) as fetch_mock:
+            status = window.query_mcp_status(force=True)
+        self.assertEqual(status, {"ok": True})
+        fetch_mock.assert_called_once()
+        self.assertEqual(
+            fetch_mock.call_args.kwargs.get("headers"),
+            {"Authorization": "Bearer demo-token"},
+        )
 
     def test_unknown_false_site_is_not_exposed_in_registry(self):
         config = normalize_config(

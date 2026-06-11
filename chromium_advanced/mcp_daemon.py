@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import platform
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -108,6 +109,7 @@ def build_worker_command(
     log_level: str,
     config_path: str,
 ) -> list[str]:
+    worker_args: list[str]
     if getattr(sys, "frozen", False):
         extension = ".exe" if platform.system() == "Windows" else ""
         base_dir = os.path.dirname(os.path.abspath(sys.executable))
@@ -123,7 +125,7 @@ def build_worker_command(
             if os.path.exists(candidate):
                 worker_executable = candidate
                 break
-        return [
+        worker_args = [
             worker_executable,
             "--transport",
             transport,
@@ -138,8 +140,9 @@ def build_worker_command(
             "--config-path",
             config_path,
         ]
+        return worker_args
 
-    return [
+    worker_args = [
         sys.executable,
         "-m",
         "chromium_advanced.mcp_server",
@@ -156,6 +159,7 @@ def build_worker_command(
         "--config-path",
         config_path,
     ]
+    return worker_args
 
 
 class WorkerManager:
@@ -465,6 +469,7 @@ def create_daemon_app(
     transport: str,
     log_level: str,
     worker_port: int,
+    api_token: str,
     idle_timeout_seconds: int,
 ) -> FastAPI:
     public_path = normalize_path(path)
@@ -479,6 +484,34 @@ def create_daemon_app(
         log_level=log_level,
         idle_timeout_seconds=idle_timeout_seconds,
     )
+    # -- Auth middleware --------------------------------------------------------
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    _require_auth = bool(api_token)
+
+    class _AuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            if _require_auth:
+                auth_header = (request.headers.get("authorization") or "").strip()
+                if not auth_header:
+                    return JSONResponse(
+                        {"error": "Authentication required", "detail": "Missing Authorization header"},
+                        status_code=401,
+                    )
+                parts = auth_header.split()
+                if len(parts) != 2 or parts[0].lower() != "bearer":
+                    return JSONResponse(
+                        {"error": "Authentication required", "detail": "Authorization header must use Bearer scheme"},
+                        status_code=401,
+                    )
+                if not secrets.compare_digest(parts[1], api_token):
+                    return JSONResponse(
+                        {"error": "Authentication required", "detail": "Invalid API token"},
+                        status_code=401,
+                    )
+            return await call_next(request)
+
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -489,6 +522,7 @@ def create_daemon_app(
 
     app = FastAPI(title="Chromium Advanced MCP Daemon", lifespan=lifespan)
 
+    app.add_middleware(_AuthMiddleware)
     @app.get("/")
     def root() -> Dict:
         status = worker_manager.get_status()
@@ -646,12 +680,29 @@ def main() -> None:
     parser.add_argument("--log-level", default=os.environ.get("CHROMIUM_MCP_LOG_LEVEL", "info"))
     parser.add_argument("--worker-port", default=os.environ.get("CHROMIUM_MCP_WORKER_PORT", "28889"))
     parser.add_argument("--idle-timeout-seconds", default=os.environ.get("CHROMIUM_MCP_IDLE_TIMEOUT_SECONDS", "60"))
+    parser.add_argument("--api-token", default=os.environ.get("CHROMIUM_MCP_API_TOKEN", "").strip())
     parser.add_argument("--config-path", default=os.environ.get("CHROMIUM_MCP_CONFIG_PATH", "").strip())
     args = parser.parse_args()
 
     config_path = args.config_path or os.environ.get("CHROMIUM_MCP_CONFIG_PATH", "").strip() or get_default_config_path()
     if not config_path:
         raise SystemExit("config path is required")
+    from chromium_advanced.chromium_profile_lib import (
+        load_app_config,
+        normalize_config,
+        resolve_mcp_api_token,
+        save_app_config,
+    )
+    config = normalize_config(load_app_config(config_path))
+    if not args.api_token:
+        configured_token = str(config.get("mcp", {}).get("api_token", "")).strip()
+        if not configured_token:
+            configured_token = resolve_mcp_api_token(config)
+            config.setdefault("mcp", {})
+            config["mcp"]["api_token"] = configured_token
+            config = save_app_config(config, config_path)
+        args.api_token = configured_token
+    
     guard = acquire_single_instance_guard(f"Local\\ChromiumMcpDaemon-{int(args.port or 28888)}")
     if guard is None:
         raise SystemExit(f"MCP daemon already running on configured port {int(args.port or 28888)}")
@@ -666,6 +717,7 @@ def main() -> None:
             log_level=str(args.log_level or "info").strip() or "info",
             worker_port=int(args.worker_port or 28889),
             idle_timeout_seconds=int(args.idle_timeout_seconds or 60),
+            api_token=str(args.api_token or "").strip(),
         )
         uvicorn.run(
             app,

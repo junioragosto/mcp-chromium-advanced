@@ -9,6 +9,7 @@ from typing import Any, Dict
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
 from chromium_advanced.chromium_profile_lib import (
+    get_chromium_restore_prompt_suppression_args,
     get_profile_user_data_root,
     now_text,
     resolve_mcp_headless,
@@ -1681,7 +1682,7 @@ class PatchrightEngine(BrowserEngine):
         # Keep Patchright on the smallest validated argument set first.
         # Its Chromium startup behavior differs from Selenium/uc, so not every
         # shared launch flag should be forwarded blindly.
-        args = [f"--profile-directory={profile_name}"]
+        args = [f"--profile-directory={profile_name}", *get_chromium_restore_prompt_suppression_args()]
         if start_minimized:
             args.append("--start-minimized")
         elif launch_settings.get("start_maximized", True):
