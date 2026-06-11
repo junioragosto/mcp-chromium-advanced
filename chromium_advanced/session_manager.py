@@ -479,14 +479,20 @@ class SessionManager:
                     "session_id": str(session_id or "").strip(),
                     "closed": False,
                     "message": "session not found",
+                    "active_session_ids_before": list(self._sessions_by_id.keys()),
+                    "active_session_ids_after": list(self._sessions_by_id.keys()),
                 }
+            before_ids = list(self._sessions_by_id.keys())
             self._remove_session_locked(session.session_id, close_session=True)
+            after_ids = list(self._sessions_by_id.keys())
             return {
                 "session_id": session.session_id,
                 "profile_name": session.profile_name,
                 "engine_name": session.engine_name,
                 "runtime_mode": session.runtime_mode,
                 "closed": True,
+                "active_session_ids_before": before_ids,
+                "active_session_ids_after": after_ids,
             }
 
     def close_all(self) -> Dict:
