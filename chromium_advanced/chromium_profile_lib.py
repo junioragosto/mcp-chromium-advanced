@@ -11,6 +11,7 @@ import platform
 import random
 import re
 import shutil
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,10 @@ PROFILE_MARKER_URL = "https://www.google.com/generate_204"
 LEGACY_CHATGPT_PROMPT = "Reply with one word: alive"
 SYSTEM_NAME = platform.system()
 KEEPALIVE_SITE_ORDER = ("chatgpt", "gmail", "google", "github")
+CHROMIUM_SUPPRESS_RESTORE_PROMPT_ARGS = (
+    "--disable-session-crashed-bubble",
+    "--hide-crash-restore-bubble",
+)
 SPLIT_USER_DATA_ROOT_EXCLUDE_DIRS = {
     "BrowserMetrics",
     "Crashpad",
@@ -239,6 +244,10 @@ def get_hidden_subprocess_kwargs() -> Dict:
 
     return kwargs
 
+
+def get_chromium_restore_prompt_suppression_args() -> List[str]:
+    return list(CHROMIUM_SUPPRESS_RESTORE_PROMPT_ARGS)
+
 def get_user_home_dir() -> str:
     return os.path.expanduser("~")
 
@@ -378,6 +387,7 @@ def build_default_config() -> Dict:
             "idle_timeout_seconds": 60,
             "headless": False,
             "start_minimized": True,
+            "api_token": "",
         },
         "launch": {
             "new_window": True,
@@ -462,6 +472,36 @@ def resolve_mcp_start_minimized(config: Dict) -> bool:
     if env_value:
         return env_value in {"1", "true", "yes", "on"}
     return True
+
+def resolve_mcp_api_token(config: Dict) -> str:
+    """Return the configured API token, generating one when persistence needs to seed it."""
+    mcp = config.get("mcp", {}) if isinstance(config, dict) else {}
+    token = str(mcp.get("api_token", "")).strip() if isinstance(mcp, dict) else ""
+    if not token:
+        token = secrets.token_hex(24)
+    return token
+
+
+def is_mcp_localhost_listening(config: Dict) -> bool:
+    """Return True when the MCP host binding is local-only."""
+    mcp = config.get("mcp", {}) if isinstance(config, dict) else {}
+    host = str(mcp.get("host", "127.0.0.1")).strip().lower() if isinstance(mcp, dict) else "127.0.0.1"
+    return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+
+
+
+def mcp_auth_required(config: Dict) -> bool:
+    """Return True when API token authentication is required.
+
+    Auth is required whenever an API token is configured.
+    """
+    mcp = config.get("mcp", {}) if isinstance(config, dict) else {}
+    if not isinstance(mcp, dict):
+        return False
+    if not bool(mcp.get("enabled", False)):
+        return False
+    return bool(str(mcp.get("api_token", "")).strip())
+
 
 
 def unique_paths(paths: Sequence[str]) -> List[str]:
@@ -1258,6 +1298,8 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["mcp"]["headless"] = bool(loaded_mcp.get("headless"))
         if "start_minimized" in loaded_mcp:
             normalized["mcp"]["start_minimized"] = bool(loaded_mcp.get("start_minimized"))
+        if "api_token" in loaded_mcp and loaded_mcp.get("api_token") is not None:
+            normalized["mcp"]["api_token"] = str(loaded_mcp.get("api_token")).strip()
         if "port" in loaded_mcp:
             normalized["mcp"]["port"] = loaded_mcp.get("port")
         if "worker_port" in loaded_mcp:
@@ -1367,6 +1409,7 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     normalized["mcp"]["enabled"] = bool(normalized["mcp"].get("enabled", False))
     normalized["mcp"]["headless"] = bool(normalized["mcp"].get("headless", False))
     normalized["mcp"]["start_minimized"] = bool(normalized["mcp"].get("start_minimized", True))
+    normalized["mcp"]["api_token"] = str(normalized["mcp"].get("api_token", "")).strip()
     normalized["mcp"]["transport"] = str(normalized["mcp"].get("transport", "streamable-http")).strip() or "streamable-http"
     normalized["mcp"]["host"] = str(normalized["mcp"].get("host", "127.0.0.1")).strip() or "127.0.0.1"
     normalized["mcp"]["path"] = str(normalized["mcp"].get("path", "/mcp")).strip() or "/mcp"
@@ -2774,6 +2817,7 @@ def build_direct_launch_command(profile_name: str, config: Dict, site: str = "")
         f"--user-data-dir={user_data_root}",
         f"--profile-directory={profile_name}",
     ]
+    command.extend(get_chromium_restore_prompt_suppression_args())
 
     if launch_settings.get("new_window", True):
         command.append("--new-window")
@@ -3543,6 +3587,8 @@ def create_driver_for_profile(config: Dict, profile_name: str):
     options.binary_location = chromium_binary
     options.add_argument(f"--user-data-dir={user_data_root}")
     options.add_argument(f"--profile-directory={profile_name}")
+    for item in get_chromium_restore_prompt_suppression_args():
+        options.add_argument(item)
     options.add_argument("--disable-notifications")
     if resolve_mcp_start_minimized(config):
         options.add_argument("--start-minimized")

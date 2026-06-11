@@ -17,15 +17,20 @@ For the Chromium Profile Manager service on this machine:
   `browserIdentity`
 - default Windows endpoint:
   `http://127.0.0.1:28888/mcp`
+- daemon auth:
+  if `mcp.api_token` is configured, every daemon request must send `Authorization: Bearer <token>` with no localhost bypass
+- important configuration boundary:
+  this skill alone does not register an MCP server; the WSL-side Codex config must also define `mcp_servers.browserIdentity`
 
 ## Workflow
 
 1. Confirm that the browser MCP service is actually running on Windows.
 2. Determine the Windows-side host IP visible from WSL.
-3. Test connectivity from WSL to the Windows MCP endpoint.
-4. Use the reachable WSL-side URL for MCP calls.
-5. Before starting a browser session, still check occupancy and confirm the browser profile identity parameter with the user if it is not specified.
-6. For multi-tab or debug-heavy tasks, use the same explicit tab activation and structured debug tools as the normal browser identity MCP workflow.
+3. Confirm that the WSL-side Codex config actually registers `browserIdentity` as an MCP server. If not, you only have skill guidance, not a live MCP connection.
+4. Test connectivity from WSL to the Windows MCP endpoint.
+5. Use the reachable WSL-side URL for MCP calls.
+6. Before starting a browser session, still check occupancy and confirm the browser profile identity parameter with the user if it is not specified.
+7. For multi-tab or debug-heavy tasks, use the same explicit tab activation and structured debug tools as the normal browser identity MCP workflow.
 
 For the Chromium Profile Manager service on this machine, the supported engine values remain:
 
@@ -57,12 +62,33 @@ If the Windows MCP service listens on port `28888`, the effective WSL URL often 
 http://<windows-host-ip>:28888/mcp
 ```
 
+Typical WSL Codex config shape:
+
+```toml
+[mcp_servers.browserIdentity]
+url = "http://<windows-host-ip>:28888/mcp"
+
+[mcp_servers.browserIdentity.http_headers]
+Authorization = "Bearer <token>"
+```
+
+On Linux/WSL, this is typically stored in:
+
+```text
+~/.codex/config.toml
+```
+
+Do not assume the Windows-side `C:\Users\Administrator\.codex\config.toml` is automatically reused by a WSL Codex environment. Treat them as separate client configurations unless you have explicitly unified them.
+
 ## Connectivity Check
 
 From WSL, use a short timeout test before doing real MCP work:
 
 ```bash
-curl --max-time 5 -I http://<windows-host-ip>:28888/mcp -H 'Accept: application/json, text/event-stream'
+curl --max-time 5 -I \
+  http://<windows-host-ip>:28888/mcp \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Authorization: Bearer <token>'
 ```
 
 HTTP error responses such as `400` or `405` can still mean the service is reachable; the key distinction is whether the TCP connection succeeds.
@@ -70,8 +96,11 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 ## Required Behavior
 
 - Do not assume WSL `127.0.0.1` reaches the Windows service.
+- Do not assume installing this skill also creates the MCP server entry in WSL Codex.
+- If WSL Codex has no `mcp_servers.browserIdentity` entry, treat that environment as skill-only guidance, not a real MCP integration.
 - Verify that the Windows service is listening on a WSL-reachable host such as `0.0.0.0` or a specific LAN address.
 - If WSL cannot reach the service, check Windows firewall rules and listening host configuration before debugging MCP semantics.
+- If auth is enabled on Windows, include the bearer token on every WSL-side connectivity check and MCP request.
 - After connectivity is confirmed, follow the same identity confirmation and occupancy rules as the normal browser identity MCP workflow.
 - After connectivity is confirmed, do not infer a target website account from the GUI profile account label; verify the actual site login inside the target website when account correctness matters.
 - After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, `browser_diagnose_page`, `browser_get_action_trace`, and `get_mcp_tool_trace` over screenshot-only diagnosis.

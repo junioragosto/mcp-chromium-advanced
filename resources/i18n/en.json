@@ -273,5 +273,11 @@
   "info_keepalive_already_running": "A keepalive task is already running. Please wait.",
   "log_keepalive_started": "Started keepalive task",
   "process_exit_normal": "Normal Exit",
-  "process_exit_abnormal": "Abnormal Exit"
+  "process_exit_abnormal": "Abnormal Exit",
+  "mcp_api_token": "API Token",
+  "mcp_api_token_tooltip": "Used for Bearer token authentication. When a token is configured, every daemon request must send it. Copy this token to your MCP client configuration.",
+  "mcp_regenerate_token": "Regenerate",
+  "mcp_auth_warning_no_token": "Warning: No API token configured. Any client that can reach this daemon can control the browser until a token is set.",
+  "mcp_auth_warning_remote": "API token authentication is enabled. Every daemon request must send Authorization: Bearer <token>. Keep the token secret.",
+  "log_api_token_regenerated": "API token regenerated. Existing clients must update their configuration."
 }

@@ -233,6 +233,8 @@ The daemon stays available between tasks. The browser worker is started only whe
 
 Operational notes:
 
+- If `mcp.api_token` is configured, every daemon request must send `Authorization: Bearer <token>`. There is no localhost bypass.
+- GUI status polling also uses the same bearer token, so the GUI and external MCP clients follow one authentication rule.
 - The daemon is intended to stay stable while the worker is short-lived and lazily started.
 - A worker reclaimed because of `idle_timeout` is a normal managed lifecycle event, not a crash.
 - If the configured Chromium binary root already has live browser processes, session startup is intentionally blocked with states such as `external_chromium_running`.
@@ -254,6 +256,11 @@ Typical MCP flow:
 Engine-aware callers may also pass an explicit engine when starting a session. If omitted, the configured GUI default engine is used.
 
 For example:
+
+```powershell
+$token = "<your-api-token>"
+Invoke-RestMethod -Uri 'http://127.0.0.1:28888/_daemon/status' -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 5 | ConvertTo-Json -Depth 8
+```
 
 ```text
 can_start_profile_session(profile_name="Profile 4", engine="selenium_uc")
