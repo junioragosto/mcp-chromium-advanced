@@ -10,17 +10,28 @@ from typing import Dict, List, Optional
 from chromium_advanced.browser_session_kernel import ManagedBrowserSession
 from chromium_advanced.browser_engines.factory import create_browser_engine, resolve_browser_engine_name
 from chromium_advanced.chromium_profile_lib import (
+    build_runtime_config_overrides,
+    clear_profile_occupancy,
+    clear_stale_lockfile,
+    cleanup_keepalive_profile_processes,
     ensure_profile_bookmarks_initialized,
     find_running_chromium_processes,
     get_chromium_processes_for_profile,
     get_lock_path,
     get_mirror_lock_path,
+    get_occupancy_events_path,
     get_profile_runtime_lock_path,
+    is_process_alive,
+    list_profile_occupancy_entries,
     load_app_config,
+    load_profile_occupancy_registry,
     normalize_config,
     normalize_fs_path,
     now_text,
+    occupancy_entry_is_expired,
+    read_recent_jsonl_events,
     SingleRunLock,
+    write_profile_occupancy,
 )
 from chromium_advanced.mirror_manager import MirrorManager
 
@@ -38,6 +49,7 @@ class SessionRecord:
     mirror_generated_at: str
     cleanup_runtime_on_close: bool
     profile_lock: object = None
+    launch_pid: int = 0
 
     def to_summary(self) -> Dict:
         summary = self.browser_session.get_summary()
@@ -67,6 +79,167 @@ class SessionManager:
 
     def _load_config(self) -> Dict:
         return load_app_config(self.config_path)
+
+    def _load_occupancy_registry(self) -> Dict:
+        return load_profile_occupancy_registry()
+
+    def _register_profile_occupancy(
+        self,
+        profile_name: str,
+        *,
+        scene_type: str,
+        state: str,
+        owner_label: str = "",
+        engine_name: str = "",
+        session_id: str = "",
+        details: Optional[Dict] = None,
+        owner_pid: int = 0,
+        heartbeat_timeout_seconds: int = 0,
+        lease_expires_at: float = 0.0,
+        last_heartbeat_at: float = 0.0,
+        reclaimable: bool = False,
+    ) -> None:
+        write_profile_occupancy(
+            profile_name,
+            scene_type=scene_type,
+            state=state,
+            owner_label=owner_label,
+            engine_name=engine_name,
+            session_id=session_id,
+            details=details,
+            event_source="session_manager",
+            owner_pid=owner_pid,
+            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            lease_expires_at=lease_expires_at,
+            last_heartbeat_at=last_heartbeat_at,
+            reclaimable=reclaimable,
+        )
+
+    def _clear_profile_occupancy(self, profile_name: str, *, session_id: str = "", event_state: str = "released") -> None:
+        clear_profile_occupancy(
+            profile_name,
+            session_id=session_id,
+            event_state=event_state,
+            details={"cleared": True},
+            event_source="session_manager",
+        )
+
+    def get_profile_occupancy(self, profile_name: str) -> Dict:
+        profile_name = str(profile_name or "").strip()
+        registry = self._load_occupancy_registry()
+        profiles = registry.get("profiles", {})
+        if not isinstance(profiles, dict):
+            return {}
+        entry = profiles.get(profile_name, {})
+        return entry if isinstance(entry, dict) else {}
+
+    def list_profile_occupancy(self) -> Dict[str, Dict]:
+        return list_profile_occupancy_entries()
+
+    def list_recent_occupancy_events(self, limit: int = 100) -> List[Dict]:
+        return read_recent_jsonl_events(get_occupancy_events_path(), limit=limit)
+
+    def refresh_profile_lease(
+        self,
+        profile_name: str,
+        *,
+        scene_type: str = "",
+        owner_label: str = "",
+        engine_name: str = "",
+        session_id: str = "",
+        owner_pid: int = 0,
+        heartbeat_timeout_seconds: int = 0,
+        details: Optional[Dict] = None,
+        reclaimable: Optional[bool] = None,
+    ) -> Dict:
+        existing = self.get_profile_occupancy(profile_name)
+        if not existing:
+            raise ValueError(f"profile occupancy not found: {profile_name}")
+        current_details = dict(existing.get("details", {}) or {})
+        if isinstance(details, dict):
+            current_details.update(details)
+        timeout_seconds = int(
+            heartbeat_timeout_seconds
+            or existing.get("heartbeat_timeout_seconds", 0)
+            or current_details.get("heartbeat_timeout_seconds", 0)
+            or 0
+        )
+        owner_pid_value = int(owner_pid or existing.get("owner_pid", 0) or 0)
+        reclaimable_value = bool(existing.get("reclaimable", False) if reclaimable is None else reclaimable)
+        return write_profile_occupancy(
+            profile_name,
+            scene_type=scene_type or str(existing.get("scene_type", "") or "unknown"),
+            state="active",
+            owner_label=owner_label or str(existing.get("owner_label", "") or ""),
+            engine_name=engine_name or str(existing.get("engine_name", "") or ""),
+            session_id=session_id or str(existing.get("session_id", "") or ""),
+            details=current_details,
+            event_source="session_manager_heartbeat",
+            owner_pid=owner_pid_value,
+            heartbeat_timeout_seconds=timeout_seconds,
+            last_heartbeat_at=time.time(),
+            reclaimable=reclaimable_value,
+        )
+
+    def reclaim_profile(self, profile_name: str, reason: str = "manual_reclaim") -> Dict:
+        config = normalize_config(self._load_config())
+        profile_name = str(profile_name or "").strip()
+        if not profile_name:
+            raise ValueError("profile_name is required")
+        occupancy = self.get_profile_occupancy(profile_name)
+        profile_lock_path = get_profile_runtime_lock_path(config, profile_name)
+        external_processes = get_chromium_processes_for_profile(config, profile_name)
+        terminated_count = 0
+        if external_processes:
+            terminated_count = terminate_count = 0
+            try:
+                from chromium_advanced.chromium_profile_lib import terminate_chromium_processes
+                terminate_count = terminate_chromium_processes(external_processes, logger=None)
+            except Exception:
+                terminate_count = 0
+            terminated_count = int(terminate_count or 0)
+        if profile_lock_path:
+            clear_stale_lockfile(profile_lock_path, stale_seconds=1)
+            if os.path.exists(profile_lock_path):
+                try:
+                    os.remove(profile_lock_path)
+                except OSError:
+                    pass
+        cleared = {}
+        if occupancy:
+            cleared = clear_profile_occupancy(
+                profile_name,
+                session_id=str(occupancy.get("session_id", "") or ""),
+                event_state="reclaimed",
+                details={"reason": reason, "terminated_process_count": terminated_count},
+                event_source="session_manager_reclaim",
+            )
+        return {
+            "profile_name": profile_name,
+            "reason": reason,
+            "terminated_process_count": terminated_count,
+            "lock_path": profile_lock_path,
+            "cleared": bool(cleared),
+            "occupancy_before": occupancy,
+        }
+
+    def reap_expired_profile_occupancy(self) -> List[Dict]:
+        config = normalize_config(self._load_config())
+        now_ts = time.time()
+        results: List[Dict] = []
+        for profile_name, entry in self.list_profile_occupancy().items():
+            if not isinstance(entry, dict):
+                continue
+            if not occupancy_entry_is_expired(entry, now_ts=now_ts):
+                continue
+            scene_type = str(entry.get("scene_type", "") or "")
+            if scene_type == "mcp":
+                continue
+            profile_lock_path = get_profile_runtime_lock_path(config, profile_name)
+            if profile_lock_path:
+                clear_stale_lockfile(profile_lock_path, stale_seconds=1)
+            results.append(self.reclaim_profile(profile_name, reason="lease_expired"))
+        return results
 
     def _purge_dead_sessions_locked(self) -> None:
         dead_session_ids = [
@@ -146,8 +319,8 @@ class SessionManager:
 
     def list_profiles(self) -> List[Dict]:
         config = normalize_config(self._load_config())
-        busy_status = self.get_server_status()
         manager = self._mirror_manager(config)
+        occupancy_map = self.list_profile_occupancy()
         with self._lock:
             self._purge_dead_sessions_locked()
             profile_sessions = {
@@ -165,6 +338,20 @@ class SessionManager:
             live_session_count = sum(1 for session in sessions if session.runtime_mode == "live_root")
             isolated_session_count = 0
             mirror_validation = manager.validate_profile_snapshot(profile_name)
+            occupancy = occupancy_map.get(profile_name, {})
+            profile_lock_path = get_profile_runtime_lock_path(config, profile_name)
+            profile_lock_active = bool(profile_lock_path and os.path.exists(profile_lock_path))
+            profile_processes = get_chromium_processes_for_profile(config, profile_name)
+            if sessions:
+                busy_state = "active_sessions"
+            elif occupancy:
+                busy_state = str(occupancy.get("scene_type", "") or occupancy.get("state", "") or "occupied")
+            elif profile_lock_active:
+                busy_state = "profile_lock_active"
+            elif profile_processes:
+                busy_state = "external_chromium_running"
+            else:
+                busy_state = "idle"
             results.append(
                 {
                     "profile_name": profile_name,
@@ -186,8 +373,12 @@ class SessionManager:
                     "title": active_summary.get("title", ""),
                     "created_at": active_summary.get("created_at", 0),
                     "last_used_at": active_summary.get("last_used_at", 0),
-                    "busy_owner_profile_name": busy_status.get("owner_profile_name", ""),
-                    "busy_state": busy_status.get("state", "idle"),
+                    "busy_owner_profile_name": "",
+                    "busy_state": busy_state,
+                    "occupancy": occupancy,
+                    "occupancy_state": str(occupancy.get("state", "") or ""),
+                    "occupancy_scene_type": str(occupancy.get("scene_type", "") or ""),
+                    "occupancy_owner_label": str(occupancy.get("owner_label", "") or ""),
                     "mirror_available": bool(mirror_validation.get("available")),
                     "mirror_generated_at": mirror_validation.get("generated_at", ""),
                     "mirror_root_available": bool(mirror_validation.get("root_available")),
@@ -213,6 +404,7 @@ class SessionManager:
 
     def get_server_status(self) -> Dict:
         config = normalize_config(self._load_config())
+        self.reap_expired_profile_occupancy()
         concurrency_mode = str(config.get("app", {}).get("concurrency_mode", "per_profile_live") or "per_profile_live")
         default_engine_name = resolve_browser_engine_name(config)
         with self._lock:
@@ -314,6 +506,7 @@ class SessionManager:
             raise ValueError("profile_name is required")
 
         config = normalize_config(self._load_config())
+        self.reap_expired_profile_occupancy()
         resolved_engine_name = resolve_browser_engine_name(config, engine_name)
         if profile_name not in self._get_profile_names():
             raise ValueError(f"profile not found: {profile_name}")
@@ -363,7 +556,15 @@ class SessionManager:
             "mirror_generated_at": "",
         }
 
-    def start_session(self, profile_name: str, reuse_existing: bool = False, engine_name: str = "") -> Dict:
+    def start_session(
+        self,
+        profile_name: str,
+        reuse_existing: bool = False,
+        engine_name: str = "",
+        scene_type: str = "mcp",
+        owner_label: str = "",
+        runtime_options: Optional[Dict] = None,
+    ) -> Dict:
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             raise ValueError("profile_name is required")
@@ -390,6 +591,19 @@ class SessionManager:
                 raise RuntimeError(str(preflight.get("reason", "") or "browser session start blocked"))
             self._starting_profile_name = profile_name
             self._starting_started_at = time.time()
+            effective_scene_type = str(scene_type or "mcp").strip() or "mcp"
+            effective_owner_label = str(owner_label or "").strip()
+            self._register_profile_occupancy(
+                profile_name,
+                scene_type=effective_scene_type,
+                state="starting",
+                owner_label=effective_owner_label or f"{effective_scene_type} session starting",
+                engine_name=resolved_engine_name,
+                session_id="",
+                details={"source": "SessionManager.start_session"},
+                owner_pid=os.getpid(),
+                reclaimable=False,
+            )
 
         runtime_root = ""
         mirror_generated_at = ""
@@ -404,6 +618,16 @@ class SessionManager:
                 flush=True,
             )
             config_for_launch = copy.deepcopy(config)
+            if isinstance(runtime_options, dict) and runtime_options:
+                config_for_launch = build_runtime_config_overrides(
+                    config_for_launch,
+                    headless=runtime_options.get("headless"),
+                    start_minimized=runtime_options.get("start_minimized"),
+                    mute_audio=runtime_options.get("mute_audio"),
+                    window_size=str(runtime_options.get("window_size", "") or "").strip(),
+                    extra_args=runtime_options.get("extra_args") if isinstance(runtime_options.get("extra_args"), list) else [],
+                    engine_name=resolved_engine_name,
+                )
             ensure_profile_bookmarks_initialized(config_for_launch, profile_name)
             print(
                 f"[{now_text()}] [SESSION] bookmarks ready: profile={profile_name}",
@@ -434,10 +658,23 @@ class SessionManager:
                 mirror_generated_at=mirror_generated_at,
                 cleanup_runtime_on_close=cleanup_runtime_on_close,
                 profile_lock=profile_lock,
+                launch_pid=int(getattr(browser_session, "pid", 0) or 0),
             )
             with self._lock:
                 self._sessions_by_id[session_id] = session
                 self._session_ids_by_profile.setdefault(profile_name, []).append(session_id)
+            self._register_profile_occupancy(
+                profile_name,
+                scene_type=effective_scene_type,
+                state="active",
+                owner_label=effective_owner_label or f"{effective_scene_type} {session_id}",
+                engine_name=resolved_engine_name,
+                session_id=session_id,
+                details={"runtime_mode": runtime_mode},
+                owner_pid=os.getpid(),
+                reclaimable=False,
+                heartbeat_timeout_seconds=int((runtime_options or {}).get("heartbeat_timeout_seconds", 0) or 0),
+            )
             return {
                 "session_id": session_id,
                 "profile_name": profile_name,
@@ -449,6 +686,7 @@ class SessionManager:
             }
         except Exception:
             profile_lock.release()
+            self._clear_profile_occupancy(profile_name, event_state="start_failed")
             raise
         finally:
             with self._lock:
@@ -456,7 +694,13 @@ class SessionManager:
                     self._starting_profile_name = ""
                     self._starting_started_at = 0.0
 
-    def get_session(self, session_id: str) -> SessionRecord:
+    def get_session(
+        self,
+        session_id: str,
+        scene_type: str = "mcp",
+        owner_label: str = "",
+        refresh_lease: bool = True,
+    ) -> SessionRecord:
         session_id = str(session_id or "").strip()
         if not session_id:
             raise ValueError("session_id is required")
@@ -469,6 +713,22 @@ class SessionManager:
                 self._remove_session_locked(session_id, close_session=True)
                 raise RuntimeError(f"session is no longer alive: {session_id}")
             session.last_used_at = time.time()
+            if refresh_lease:
+                try:
+                    effective_scene_type = str(scene_type or "mcp").strip() or "mcp"
+                    effective_owner_label = str(owner_label or "").strip() or f"{effective_scene_type} {session.session_id}"
+                    self.refresh_profile_lease(
+                        session.profile_name,
+                        scene_type=effective_scene_type,
+                        owner_label=effective_owner_label,
+                        engine_name=session.engine_name,
+                        session_id=session.session_id,
+                        owner_pid=os.getpid(),
+                        details={"runtime_mode": session.runtime_mode, "last_used_at": session.last_used_at},
+                        reclaimable=(effective_scene_type != "mcp"),
+                    )
+                except Exception:
+                    pass
             return session
 
     def close_session(self, session_id: str) -> Dict:
@@ -501,8 +761,19 @@ class SessionManager:
         results = [self.close_session(session_id) for session_id in session_ids]
         return {"closed_count": sum(1 for item in results if item.get("closed")), "results": results}
 
-    def resolve_session(self, session_id: str):
-        return self.get_session(session_id).browser_session
+    def resolve_session(
+        self,
+        session_id: str,
+        scene_type: str = "mcp",
+        owner_label: str = "",
+        refresh_lease: bool = True,
+    ):
+        return self.get_session(
+            session_id,
+            scene_type=scene_type,
+            owner_label=owner_label,
+            refresh_lease=refresh_lease,
+        ).browser_session
 
     def _remove_session_locked(self, session_id: str, close_session: bool) -> None:
         session = self._sessions_by_id.pop(session_id, None)
@@ -518,6 +789,13 @@ class SessionManager:
                 session.browser_session.close()
             except Exception:
                 pass
+        try:
+            config = normalize_config(self._load_config())
+            before_pids = [int(session.launch_pid)] if int(session.launch_pid or 0) > 0 else []
+            cleanup_keepalive_profile_processes(config, session.profile_name, before_pids=before_pids, logger=None)
+        except Exception:
+            pass
+        self._clear_profile_occupancy(session.profile_name, session_id=session.session_id)
         if session.profile_lock is not None:
             try:
                 session.profile_lock.release()

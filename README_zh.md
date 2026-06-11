@@ -368,3 +368,10 @@ keepalive 站点现在走插件化运行时。内置站点包括 `chatgpt`、`go
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](./LICENSE).
+## Daemon 自动化接入
+
+如果调用方不是 MCP/Agent，而是固定的本地脚本或服务，现在推荐走 daemon 托管自动化接口，而不是直接自己占用浏览器 profile。
+
+专门接入文档见：
+
+- [docs/DAEMON_AUTOMATION_INTEGRATION.md](./docs/DAEMON_AUTOMATION_INTEGRATION.md)

@@ -473,6 +473,42 @@ def resolve_mcp_start_minimized(config: Dict) -> bool:
         return env_value in {"1", "true", "yes", "on"}
     return True
 
+
+def build_runtime_config_overrides(
+    config: Dict,
+    *,
+    headless: Optional[bool] = None,
+    start_minimized: Optional[bool] = None,
+    mute_audio: Optional[bool] = None,
+    window_size: str = "",
+    extra_args: Optional[Sequence[str]] = None,
+    engine_name: str = "",
+) -> Dict:
+    normalized = normalize_config(config)
+    runtime_config = copy.deepcopy(normalized)
+    runtime_config.setdefault("mcp", {})
+    runtime_config.setdefault("launch", {})
+    runtime_config.setdefault("app", {})
+    if headless is not None:
+        runtime_config["mcp"]["headless"] = bool(headless)
+    if start_minimized is not None:
+        runtime_config["mcp"]["start_minimized"] = bool(start_minimized)
+    if str(window_size or "").strip():
+        runtime_config["launch"]["window_size"] = str(window_size).strip()
+    merged_extra_args = [str(item).strip() for item in runtime_config["launch"].get("extra_args", []) if str(item).strip()]
+    if mute_audio:
+        if "--mute-audio" not in merged_extra_args:
+            merged_extra_args.append("--mute-audio")
+    if isinstance(extra_args, Sequence) and not isinstance(extra_args, (str, bytes)):
+        for item in extra_args:
+            text = str(item or "").strip()
+            if text and text not in merged_extra_args:
+                merged_extra_args.append(text)
+    runtime_config["launch"]["extra_args"] = merged_extra_args
+    if str(engine_name or "").strip():
+        runtime_config["app"]["browser_engine"] = normalize_browser_engine_name(str(engine_name).strip())
+    return runtime_config
+
 def resolve_mcp_api_token(config: Dict) -> str:
     """Return the configured API token, generating one when persistence needs to seed it."""
     mcp = config.get("mcp", {}) if isinstance(config, dict) else {}
@@ -556,6 +592,197 @@ def get_lock_path() -> str:
 
 def get_mirror_lock_path() -> str:
     return os.path.join(get_state_storage_dir(), MIRROR_LOCK_FILENAME)
+
+
+def get_occupancy_registry_path() -> str:
+    return os.path.join(get_state_storage_dir(), "profile_occupancy_registry.json")
+
+
+def get_occupancy_events_path() -> str:
+    return os.path.join(get_state_storage_dir(), "profile_occupancy_events.jsonl")
+
+
+def load_profile_occupancy_registry() -> Dict:
+    loaded = load_json_file(get_occupancy_registry_path(), default={})
+    if not isinstance(loaded, dict):
+        return {"profiles": {}, "updated_at": ""}
+    loaded.setdefault("profiles", {})
+    loaded.setdefault("updated_at", "")
+    return loaded
+
+
+def list_profile_occupancy_entries() -> Dict[str, Dict]:
+    payload = load_profile_occupancy_registry()
+    profiles = payload.get("profiles", {})
+    if not isinstance(profiles, dict):
+        return {}
+    return {str(name): dict(value) for name, value in profiles.items() if isinstance(value, dict)}
+
+
+def write_profile_occupancy(
+    profile_name: str,
+    *,
+    scene_type: str,
+    state: str,
+    owner_label: str = "",
+    engine_name: str = "",
+    session_id: str = "",
+    details: Optional[Dict] = None,
+    event_source: str = "",
+    owner_pid: int = 0,
+    heartbeat_timeout_seconds: int = 0,
+    lease_expires_at: float = 0.0,
+    last_heartbeat_at: float = 0.0,
+    reclaimable: bool = False,
+) -> Dict:
+    profile_name = str(profile_name or "").strip()
+    if not profile_name:
+        return {}
+    now_ts = time.time()
+    heartbeat_timeout_seconds = max(0, int(heartbeat_timeout_seconds or 0))
+    if heartbeat_timeout_seconds > 0 and float(lease_expires_at or 0) <= 0:
+        lease_expires_at = now_ts + heartbeat_timeout_seconds
+    if float(last_heartbeat_at or 0) <= 0:
+        last_heartbeat_at = now_ts
+    payload = load_profile_occupancy_registry()
+    profiles = payload.setdefault("profiles", {})
+    entry = {
+        "profile_name": profile_name,
+        "scene_type": str(scene_type or "").strip() or "unknown",
+        "state": str(state or "").strip() or "active",
+        "owner_label": str(owner_label or "").strip(),
+        "engine_name": str(engine_name or "").strip(),
+        "session_id": str(session_id or "").strip(),
+        "updated_at": now_text(),
+        "details": dict(details or {}),
+        "owner_pid": int(owner_pid or 0),
+        "heartbeat_timeout_seconds": heartbeat_timeout_seconds,
+        "lease_expires_at": float(lease_expires_at or 0.0),
+        "last_heartbeat_at": float(last_heartbeat_at or 0.0),
+        "reclaimable": bool(reclaimable),
+    }
+    profiles[profile_name] = entry
+    payload["updated_at"] = now_text()
+    write_json_atomic(get_occupancy_registry_path(), payload)
+    append_jsonl_event(
+        get_occupancy_events_path(),
+        {
+            "timestamp": round(now_ts, 3),
+            "profile_name": profile_name,
+            "scene_type": entry["scene_type"],
+            "state": entry["state"],
+            "owner_label": entry["owner_label"],
+            "engine_name": entry["engine_name"],
+            "session_id": entry["session_id"],
+            "event_source": str(event_source or "").strip(),
+            "details": entry["details"],
+            "owner_pid": entry["owner_pid"],
+            "heartbeat_timeout_seconds": entry["heartbeat_timeout_seconds"],
+            "lease_expires_at": entry["lease_expires_at"],
+            "last_heartbeat_at": entry["last_heartbeat_at"],
+            "reclaimable": entry["reclaimable"],
+        },
+    )
+    return entry
+
+
+def clear_profile_occupancy(
+    profile_name: str,
+    *,
+    session_id: str = "",
+    event_state: str = "released",
+    details: Optional[Dict] = None,
+    event_source: str = "",
+) -> Dict:
+    profile_name = str(profile_name or "").strip()
+    if not profile_name:
+        return {}
+    payload = load_profile_occupancy_registry()
+    profiles = payload.setdefault("profiles", {})
+    previous = profiles.pop(profile_name, None)
+    if not isinstance(previous, dict):
+        return {}
+    payload["updated_at"] = now_text()
+    write_json_atomic(get_occupancy_registry_path(), payload)
+    append_jsonl_event(
+        get_occupancy_events_path(),
+        {
+            "timestamp": round(time.time(), 3),
+            "profile_name": profile_name,
+            "scene_type": str((previous or {}).get("scene_type", "") or "unknown"),
+            "state": str(event_state or "").strip() or "released",
+            "owner_label": str((previous or {}).get("owner_label", "") or ""),
+            "engine_name": str((previous or {}).get("engine_name", "") or ""),
+            "session_id": str(session_id or (previous or {}).get("session_id", "") or ""),
+            "event_source": str(event_source or "").strip(),
+            "details": dict(details or {"cleared": True}),
+            "owner_pid": int((previous or {}).get("owner_pid", 0) or 0),
+            "heartbeat_timeout_seconds": int((previous or {}).get("heartbeat_timeout_seconds", 0) or 0),
+            "lease_expires_at": float((previous or {}).get("lease_expires_at", 0.0) or 0.0),
+            "last_heartbeat_at": float((previous or {}).get("last_heartbeat_at", 0.0) or 0.0),
+            "reclaimable": bool((previous or {}).get("reclaimable", False)),
+        },
+    )
+    return previous if isinstance(previous, dict) else {}
+
+
+def is_process_alive(pid: int) -> bool:
+    try:
+        pid = int(pid or 0)
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        return psutil.pid_exists(pid)
+    except Exception:
+        return False
+
+
+def occupancy_entry_is_expired(entry: Dict, now_ts: Optional[float] = None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    lease_expires_at = float(entry.get("lease_expires_at", 0.0) or 0.0)
+    if lease_expires_at > 0 and now_ts >= lease_expires_at:
+        return True
+    owner_pid = int(entry.get("owner_pid", 0) or 0)
+    if owner_pid > 0 and not is_process_alive(owner_pid):
+        return True
+    return False
+
+
+def read_lockfile_payload(lock_path: str) -> Dict:
+    normalized = os.path.abspath(os.path.expanduser(str(lock_path or "").strip()))
+    if not normalized or not os.path.exists(normalized):
+        return {}
+    try:
+        with open(normalized, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def clear_stale_lockfile(lock_path: str, stale_seconds: int = 12 * 60 * 60) -> bool:
+    normalized = os.path.abspath(os.path.expanduser(str(lock_path or "").strip()))
+    if not normalized or not os.path.exists(normalized):
+        return False
+    try:
+        payload = read_lockfile_payload(normalized)
+        pid = int(payload.get("pid", 0) or 0)
+        updated_at_ts = float(payload.get("updated_at_ts", 0.0) or 0.0)
+        mtime = os.path.getmtime(normalized)
+        age = time.time() - (updated_at_ts or mtime)
+        if pid > 0 and not is_process_alive(pid):
+            os.remove(normalized)
+            return True
+        if age > max(1, int(stale_seconds or 1)):
+            os.remove(normalized)
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def get_keepalive_plugin_root() -> str:
@@ -1466,6 +1693,49 @@ def write_json_atomic(path: str, data: Dict) -> None:
     with open(temp_path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
     os.replace(temp_path, path)
+
+
+def load_json_file(path: str, default=None):
+    normalized = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    if not normalized or not os.path.exists(normalized):
+        return {} if default is None else default
+    try:
+        with open(normalized, "r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+        return data if data is not None else ({} if default is None else default)
+    except Exception:
+        return {} if default is None else default
+
+
+def append_jsonl_event(path: str, payload: Dict) -> None:
+    normalized = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    os.makedirs(os.path.dirname(normalized), exist_ok=True)
+    with open(normalized, "a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def read_recent_jsonl_events(path: str, limit: int = 100) -> List[Dict]:
+    normalized = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    if not normalized or not os.path.exists(normalized):
+        return []
+    limit = max(1, int(limit or 1))
+    try:
+        with open(normalized, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except Exception:
+        return []
+    results: List[Dict] = []
+    for raw_line in lines[-limit:]:
+        raw_line = str(raw_line or "").strip()
+        if not raw_line:
+            continue
+        try:
+            payload = json.loads(raw_line)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            results.append(payload)
+    return results
 
 
 def load_app_config(config_path: Optional[str] = None) -> Dict:
@@ -2539,19 +2809,22 @@ class SingleRunLock:
         if lock_dir:
             os.makedirs(lock_dir, exist_ok=True)
         if os.path.exists(self.lock_path):
-            try:
-                age = time.time() - os.path.getmtime(self.lock_path)
-                if age > self.stale_seconds:
-                    os.remove(self.lock_path)
-            except OSError:
-                pass
+            clear_stale_lockfile(self.lock_path, stale_seconds=self.stale_seconds)
 
         try:
             fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             return False
 
-        payload = json.dumps({"pid": os.getpid(), "time": now_text()}, ensure_ascii=False)
+        now_ts = time.time()
+        payload = json.dumps(
+            {
+                "pid": os.getpid(),
+                "time": now_text(),
+                "updated_at_ts": now_ts,
+            },
+            ensure_ascii=False,
+        )
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(payload)
         self.acquired = True
