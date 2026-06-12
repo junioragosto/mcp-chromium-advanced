@@ -144,6 +144,13 @@ class SessionManagerPerProfileTests(unittest.TestCase):
         close_all = manager.close_all()
         self.assertEqual(close_all["closed_count"], 1)
 
+    def test_config_override_bypasses_disk_load(self):
+        config_override = normalize_config({"profiles": [{"profile_name": "Profile 4"}]})
+        manager = SessionManager(config_path="missing.json", config_override=config_override)
+        with mock.patch("chromium_advanced.session_manager.load_app_config", side_effect=AssertionError("should not read disk")):
+            loaded = manager._load_config()
+        self.assertEqual(loaded["profiles"][0]["profile_name"], "Profile 4")
+
     def test_mirror_mode_falls_back_to_live_root_when_snapshot_missing(self):
         engine = FakeEngine()
         manager = SessionManager()

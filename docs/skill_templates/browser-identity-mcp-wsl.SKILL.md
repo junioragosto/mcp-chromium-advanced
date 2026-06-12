@@ -21,6 +21,7 @@ For the Chromium Profile Manager service on this machine:
   if `mcp.api_token` is configured, every daemon request must send `Authorization: Bearer <token>` with no localhost bypass
 - daemon admin auth:
   management endpoints use `mcp.admin_token`, which may differ from the business token
+  if `mcp.admin_token` is absent, management endpoints stay disabled instead of falling back to `mcp.api_token`
 - important configuration boundary:
   this skill alone does not register an MCP server; the WSL-side Codex config must also define `mcp_servers.browserIdentity`
 
@@ -134,7 +135,8 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - After connectivity is confirmed, do not infer a target website account from the GUI profile account label; verify the actual site login inside the target website when account correctness matters.
 - After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, `browser_diagnose_page`, `browser_get_action_trace`, and `get_mcp_tool_trace` over screenshot-only diagnosis.
 - After connectivity is confirmed, prefer `session_health.recovery_actions`, `session_health.page_drift`, and `resolution_trace` over ad-hoc retries when a dynamic page fails under WSL.
-- The Windows MCP server publishes standard tool annotations, treating normal profile/session operations, navigation, tab operations, browser actions, screenshots, diagnostics, and cleanup as trusted low-risk. Arbitrary JavaScript remains non-read-only. Use those hints when the WSL-side client supports trusted/read-only execution, but do not bypass identity or occupancy checks.
+- The Windows MCP server publishes standard tool annotations, treating normal profile/session operations, navigation, tab operations, browser actions, screenshots, diagnostics, and cleanup as trusted low-risk.
+- `run_script` and `run_script_batch` remain high-trust, non-read-only surfaces because they execute arbitrary JavaScript inside a real logged-in browser context. Use those hints when the WSL-side client supports trusted/read-only execution, but do not bypass identity or occupancy checks.
 - Treat partial `playwright_cli` diagnostics with `diagnostic_errors` as useful signal. The runtime intentionally bounds heavy console/network calls, classifies common noise, and avoids long MCP worker stalls.
 - `playwright_cli` simple selector click/fill actions may use the fast DOM eval path before native CLI fallback. This is expected and should be treated as the high-performance path.
 - If the target page needs gesture/pattern unlock, drag, slider movement, or coordinate-level mouse fallback, do not assume the default engine is enough. Start the session with `engine="selenium_uc"` or `engine="patchright"` explicitly.

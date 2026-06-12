@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
-from chromium_advanced.chromium_profile_lib import write_profile_occupancy
+from chromium_advanced.occupancy_registry import write_profile_occupancy
 from chromium_advanced.session_manager import SessionManager
 
 DEFAULT_AUTOMATION_HEARTBEAT_TIMEOUT_SECONDS = 180

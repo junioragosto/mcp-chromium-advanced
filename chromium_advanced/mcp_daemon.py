@@ -26,12 +26,12 @@ from starlette.background import BackgroundTask
 from chromium_advanced.chromium_profile_lib import (
     get_default_config_path,
     get_hidden_subprocess_kwargs,
-    list_profile_occupancy_entries,
     get_project_root,
     get_runtime_launch_cwd,
     now_text,
-    resolve_mcp_admin_token,
 )
+from chromium_advanced.mcp_runtime_config import resolve_mcp_admin_token, resolve_mcp_api_token
+from chromium_advanced.occupancy_registry import list_profile_occupancy_entries
 from chromium_advanced.session_manager import SessionManager
 
 
@@ -1172,13 +1172,7 @@ def main() -> None:
     config_path = args.config_path or os.environ.get("CHROMIUM_MCP_CONFIG_PATH", "").strip() or get_default_config_path()
     if not config_path:
         raise SystemExit("config path is required")
-    from chromium_advanced.chromium_profile_lib import (
-        load_app_config,
-        normalize_config,
-        resolve_mcp_api_token,
-        resolve_mcp_admin_token,
-        save_app_config,
-    )
+    from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config, save_app_config
     config = normalize_config(load_app_config(config_path))
     if not args.api_token:
         configured_token = str(config.get("mcp", {}).get("api_token", "")).strip()

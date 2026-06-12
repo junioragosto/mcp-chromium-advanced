@@ -64,3 +64,22 @@ class ProfileOccupancyRegistryTests(unittest.TestCase):
         self.assertEqual(entries["Profile 3"]["owner_label"], "parallel-p3")
         self.assertEqual(entries["Profile 4"]["owner_label"], "parallel-p4")
         self.assertTrue(get_occupancy_registry_path().endswith("profile_occupancy_registry.json"))
+
+    def test_load_registry_can_tolerate_lock_timeout_for_read_only_callers(self):
+        write_profile_occupancy(
+            "Profile 1",
+            scene_type="automation",
+            state="active",
+            owner_label="reader-fallback",
+            session_id="session-profile-1",
+        )
+
+        with mock.patch(
+            "chromium_advanced.occupancy_registry._acquire_occupancy_registry_file_lock",
+            side_effect=TimeoutError("timed out acquiring occupancy registry lock"),
+        ):
+            payload = load_profile_occupancy_registry(tolerate_lock_timeout=True)
+            entries = list_profile_occupancy_entries(tolerate_lock_timeout=True)
+
+        self.assertIn("profiles", payload)
+        self.assertEqual(entries["Profile 1"]["owner_label"], "reader-fallback")

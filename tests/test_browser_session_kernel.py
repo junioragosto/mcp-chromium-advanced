@@ -37,6 +37,7 @@ class FakeRawSession:
             "supports_selector_actions": True,
             "supports_highlight": False,
             "supports_coordinates": self.engine_name != "playwright_cli",
+            "supports_gesture_actions": self.engine_name != "playwright_cli",
             "supports_post_action_context": self.engine_name == "patchright",
             "supports_tabs": True,
             "supports_console_messages": True,
@@ -387,6 +388,14 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertEqual(caps["capability_version"], 2)
         self.assertIn("capabilities", caps)
         self.assertTrue(caps["supports_post_action_context"])
+        self.assertFalse(caps["supports_gesture_actions"])
+
+    def test_capabilities_expose_gesture_support_for_compatible_runtime(self):
+        session = ManagedBrowserSession(FakeRawSession(engine_name="selenium_uc"))
+        caps = session.get_capabilities()
+        self.assertTrue(caps["supports_coordinates"])
+        self.assertTrue(caps["supports_gesture_actions"])
+        self.assertEqual(caps["capabilities"]["gesture_actions"]["actions"], ["mouse_move_xy", "mouse_click_xy", "mouse_drag_xy"])
 
     def test_list_candidates_falls_back_to_dom_script(self):
         session = ManagedBrowserSession(FakeRawSession(engine_name="selenium_uc"))
@@ -454,6 +463,17 @@ class ManagedBrowserSessionTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "runtime_action_failed")
         self.assertEqual(result["action_meta"]["engine_name"], "playwright_cli")
         self.assertEqual(result["post_action_context"]["action_name"], "click_failed")
+
+    def test_unsupported_gesture_action_returns_engine_suggestion(self):
+        class UnsupportedGestureSession(FakeRawSession):
+            def mouse_drag_xy(self, start_x, start_y, end_x, end_y):
+                raise NotImplementedError("mouse_drag_xy is not supported by playwright_cli")
+
+        session = ManagedBrowserSession(UnsupportedGestureSession(engine_name="playwright_cli"))
+        result = session.mouse_drag_xy(1, 2, 30, 40)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "action_not_supported_by_runtime")
+        self.assertEqual(result["engine_suggestions"], ["selenium_uc", "patchright"])
 
     def test_action_result_gets_managed_post_action_context(self):
         session = ManagedBrowserSession(FakeRawSession(engine_name="playwright_cli"))

@@ -4,6 +4,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from chromium_advanced import mcp_daemon
+from chromium_advanced.mcp_runtime_config import resolve_mcp_admin_token
 
 
 class _FakeWorkerManager:
@@ -130,6 +131,11 @@ class McpDaemonAuthTests(unittest.TestCase):
         response = client.post("/_daemon/worker/stop", headers={"Authorization": "Bearer secret-token"})
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["detail"], "Admin token is not configured for management endpoints")
+
+    def test_resolve_admin_token_does_not_fall_back_to_api_token(self):
+        token = resolve_mcp_admin_token({"mcp": {"api_token": "secret-token", "admin_token": ""}})
+        self.assertTrue(token)
+        self.assertNotEqual(token, "secret-token")
 
     def test_status_payload_includes_worker_policy(self):
         client = self.create_client("secret-token", admin_token="admin-token", worker_policy="always_on")

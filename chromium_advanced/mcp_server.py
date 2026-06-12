@@ -200,7 +200,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
 
     @server.tool(annotations=local_read_annotations)
     def get_server_status() -> dict:
-        """Return whether the browser service is idle, starting, or occupied."""
+        """Return the current service status snapshot and whether new profile sessions are still accepted."""
         return session_manager.get_server_status()
 
     @server.tool(annotations=local_read_annotations)
@@ -614,7 +614,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
 
     @server.tool(annotations=browser_script_annotations)
     def run_script(session_id: str, script: str, tab_id: str = "") -> dict:
-        """Run JavaScript in the current page and return a JSON-serializable result when possible."""
+        """Run arbitrary JavaScript in the current page. This is a high-trust action and is intentionally not read-only."""
         return _trace_mcp_tool(
             "run_script",
             lambda: {"session_id": session_id, **session_manager.resolve_session(session_id).run_script(script, tab_id=tab_id)},
@@ -628,7 +628,7 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         tab_id: str = "",
         stop_on_error: bool = True,
     ) -> dict:
-        """Run multiple JavaScript snippets in one logical call to reduce tool round-trips."""
+        """Run multiple arbitrary JavaScript snippets in one logical call. This remains a high-trust non-read-only surface."""
         if not isinstance(scripts, list) or not scripts:
             raise ValueError("scripts is required")
 

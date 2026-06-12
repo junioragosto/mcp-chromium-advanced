@@ -387,8 +387,9 @@ ChromeDriver mismatch:
 
 `keepalive_running` or `mirroring`:
 
-- Wait for keepalive/mirror refresh to finish.
-- Do not bypass this lock; it protects profile data integrity.
+- Treat these as background activity signals, not automatic full-service outages.
+- In the current per-profile model, keepalive locks only the profile it is actively working on.
+- Still rely on `can_start_profile_session(profile_name)` to decide whether the specific target profile can start now.
 
 Browser windows steal focus:
 

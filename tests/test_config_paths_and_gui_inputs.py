@@ -21,8 +21,8 @@ from chromium_advanced.chromium_profile_lib import (
     migrate_keepalive_site_id_references,
     normalize_config,
     normalize_keepalive_site_result_for_display,
-    resolve_mcp_start_minimized,
 )
+from chromium_advanced.mcp_runtime_config import resolve_mcp_start_minimized
 
 
 class ConfigPathMigrationTests(unittest.TestCase):
@@ -70,6 +70,28 @@ class ConfigPathMigrationTests(unittest.TestCase):
         window = ChromiumManagerWindow.__new__(ChromiumManagerWindow)
         with mock.patch.dict(os.environ, {"CHROMIUM_ADVANCED_MCP_TRACE_PATH": r"C:\Trace\mcp.jsonl"}):
             self.assertEqual(window.get_mcp_trace_path(), r"C:\Trace\mcp.jsonl")
+
+    def test_gui_profile_occupancy_cache_tolerates_registry_timeout(self):
+        window = ChromiumManagerWindow.__new__(ChromiumManagerWindow)
+        window.config_path = "dummy.json"
+        window.append_log = mock.Mock()
+        fake_manager = mock.Mock()
+        fake_manager.list_profile_occupancy.return_value = {"Profile 1": {"state": "active"}}
+        with mock.patch("chromium_advanced.session_manager.SessionManager", return_value=fake_manager):
+            payload = ChromiumManagerWindow.load_profile_occupancy_cache(window)
+        self.assertEqual(payload["Profile 1"]["state"], "active")
+        fake_manager.list_profile_occupancy.assert_called_once_with(tolerate_lock_timeout=True)
+
+    def test_gui_profile_occupancy_cache_tolerates_registry_permission_error(self):
+        window = ChromiumManagerWindow.__new__(ChromiumManagerWindow)
+        window.config_path = "dummy.json"
+        window.append_log = mock.Mock()
+        fake_manager = mock.Mock()
+        fake_manager.list_profile_occupancy.side_effect = PermissionError("access denied")
+        with mock.patch("chromium_advanced.session_manager.SessionManager", return_value=fake_manager):
+            payload = ChromiumManagerWindow.load_profile_occupancy_cache(window)
+        self.assertEqual(payload, {})
+        window.append_log.assert_called_once()
 
     def test_direct_launch_command_suppresses_restore_prompt(self):
         config = normalize_config(
