@@ -41,7 +41,12 @@ chromium_profiles.local.json
 
 tmp/
 tmp_*/
+tmp_*.py
+tmp_*.log
+tmp_*.out.log
+tmp_*.err.log
 
 demo/
 .playwright-cli/
 .vscode/
+review/

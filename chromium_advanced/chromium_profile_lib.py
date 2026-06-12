@@ -42,6 +42,8 @@ APP_NAME = "ChromiumProfileManager"
 CONFIG_FILENAME = "chromium_profiles.json"
 LOCK_FILENAME = "chromium_keepalive.lock"
 MIRROR_LOCK_FILENAME = "chromium_mirroring.lock"
+_JSON_ATOMIC_WRITE_LOCK = threading.RLock()
+_OCCUPANCY_REGISTRY_LOCK = threading.RLock()
 WINDOWS_TEXT_ENCODING = locale.getpreferredencoding(False) or "utf-8"
 BOOKMARK_BAR_FOLDER_NAMES = {"书签栏", "Bookmarks Bar", "Bookmarks bar", "Bookmarks Toolbar"}
 PROFILE_MARKER_URL = "https://www.google.com/generate_204"
@@ -385,9 +387,11 @@ def build_default_config() -> Dict:
             "path": "/mcp",
             "log_level": "info",
             "idle_timeout_seconds": 60,
+            "worker_policy": "sticky",
             "headless": False,
             "start_minimized": True,
             "api_token": "",
+            "admin_token": "",
         },
         "launch": {
             "new_window": True,
@@ -518,6 +522,17 @@ def resolve_mcp_api_token(config: Dict) -> str:
     return token
 
 
+def resolve_mcp_admin_token(config: Dict) -> str:
+    """Return the configured admin token, defaulting to the user token for upgrades."""
+    mcp = config.get("mcp", {}) if isinstance(config, dict) else {}
+    if not isinstance(mcp, dict):
+        return ""
+    admin_token = str(mcp.get("admin_token", "")).strip()
+    if admin_token:
+        return admin_token
+    return str(mcp.get("api_token", "")).strip()
+
+
 def is_mcp_localhost_listening(config: Dict) -> bool:
     """Return True when the MCP host binding is local-only."""
     mcp = config.get("mcp", {}) if isinstance(config, dict) else {}
@@ -576,6 +591,11 @@ def get_runtime_launch_cwd(executable_path: Optional[str] = None) -> str:
 
 
 def get_state_storage_dir() -> str:
+    override = str(os.environ.get("CHROMIUM_PROFILE_MANAGER_STATE_DIR", "") or "").strip()
+    if override:
+        path = os.path.abspath(os.path.expanduser(override))
+        os.makedirs(path, exist_ok=True)
+        return path
     base_dir = get_platform_config_root()
     path = os.path.join(base_dir, APP_NAME, "workstates")
     os.makedirs(path, exist_ok=True)
@@ -598,17 +618,41 @@ def get_occupancy_registry_path() -> str:
     return os.path.join(get_state_storage_dir(), "profile_occupancy_registry.json")
 
 
+def get_occupancy_registry_lock_path() -> str:
+    return os.path.join(get_state_storage_dir(), "profile_occupancy_registry.lock")
+
+
 def get_occupancy_events_path() -> str:
     return os.path.join(get_state_storage_dir(), "profile_occupancy_events.jsonl")
 
 
-def load_profile_occupancy_registry() -> Dict:
+def _load_profile_occupancy_registry_unlocked() -> Dict:
     loaded = load_json_file(get_occupancy_registry_path(), default={})
     if not isinstance(loaded, dict):
         return {"profiles": {}, "updated_at": ""}
     loaded.setdefault("profiles", {})
     loaded.setdefault("updated_at", "")
     return loaded
+
+
+def _acquire_occupancy_registry_file_lock(timeout_seconds: float = 5.0, poll_interval_seconds: float = 0.05):
+    lock = SingleRunLock(get_occupancy_registry_lock_path(), stale_seconds=60)
+    deadline = time.time() + max(0.1, float(timeout_seconds or 0.1))
+    while True:
+        if lock.try_acquire():
+            return lock
+        if time.time() >= deadline:
+            raise TimeoutError("timed out acquiring occupancy registry lock")
+        time.sleep(max(0.01, float(poll_interval_seconds or 0.01)))
+
+
+def load_profile_occupancy_registry() -> Dict:
+    with _OCCUPANCY_REGISTRY_LOCK:
+        registry_lock = _acquire_occupancy_registry_file_lock()
+        try:
+            return _load_profile_occupancy_registry_unlocked()
+        finally:
+            registry_lock.release()
 
 
 def list_profile_occupancy_entries() -> Dict[str, Dict]:
@@ -644,26 +688,31 @@ def write_profile_occupancy(
         lease_expires_at = now_ts + heartbeat_timeout_seconds
     if float(last_heartbeat_at or 0) <= 0:
         last_heartbeat_at = now_ts
-    payload = load_profile_occupancy_registry()
-    profiles = payload.setdefault("profiles", {})
-    entry = {
-        "profile_name": profile_name,
-        "scene_type": str(scene_type or "").strip() or "unknown",
-        "state": str(state or "").strip() or "active",
-        "owner_label": str(owner_label or "").strip(),
-        "engine_name": str(engine_name or "").strip(),
-        "session_id": str(session_id or "").strip(),
-        "updated_at": now_text(),
-        "details": dict(details or {}),
-        "owner_pid": int(owner_pid or 0),
-        "heartbeat_timeout_seconds": heartbeat_timeout_seconds,
-        "lease_expires_at": float(lease_expires_at or 0.0),
-        "last_heartbeat_at": float(last_heartbeat_at or 0.0),
-        "reclaimable": bool(reclaimable),
-    }
-    profiles[profile_name] = entry
-    payload["updated_at"] = now_text()
-    write_json_atomic(get_occupancy_registry_path(), payload)
+    with _OCCUPANCY_REGISTRY_LOCK:
+        registry_lock = _acquire_occupancy_registry_file_lock()
+        try:
+            payload = _load_profile_occupancy_registry_unlocked()
+            profiles = payload.setdefault("profiles", {})
+            entry = {
+                "profile_name": profile_name,
+                "scene_type": str(scene_type or "").strip() or "unknown",
+                "state": str(state or "").strip() or "active",
+                "owner_label": str(owner_label or "").strip(),
+                "engine_name": str(engine_name or "").strip(),
+                "session_id": str(session_id or "").strip(),
+                "updated_at": now_text(),
+                "details": dict(details or {}),
+                "owner_pid": int(owner_pid or 0),
+                "heartbeat_timeout_seconds": heartbeat_timeout_seconds,
+                "lease_expires_at": float(lease_expires_at or 0.0),
+                "last_heartbeat_at": float(last_heartbeat_at or 0.0),
+                "reclaimable": bool(reclaimable),
+            }
+            profiles[profile_name] = entry
+            payload["updated_at"] = now_text()
+            write_json_atomic(get_occupancy_registry_path(), payload)
+        finally:
+            registry_lock.release()
     append_jsonl_event(
         get_occupancy_events_path(),
         {
@@ -697,13 +746,20 @@ def clear_profile_occupancy(
     profile_name = str(profile_name or "").strip()
     if not profile_name:
         return {}
-    payload = load_profile_occupancy_registry()
-    profiles = payload.setdefault("profiles", {})
-    previous = profiles.pop(profile_name, None)
+    with _OCCUPANCY_REGISTRY_LOCK:
+        registry_lock = _acquire_occupancy_registry_file_lock()
+        try:
+            payload = _load_profile_occupancy_registry_unlocked()
+            profiles = payload.setdefault("profiles", {})
+            previous = profiles.pop(profile_name, None)
+            if not isinstance(previous, dict):
+                return {}
+            payload["updated_at"] = now_text()
+            write_json_atomic(get_occupancy_registry_path(), payload)
+        finally:
+            registry_lock.release()
     if not isinstance(previous, dict):
         return {}
-    payload["updated_at"] = now_text()
-    write_json_atomic(get_occupancy_registry_path(), payload)
     append_jsonl_event(
         get_occupancy_events_path(),
         {
@@ -745,9 +801,6 @@ def occupancy_entry_is_expired(entry: Dict, now_ts: Optional[float] = None) -> b
     now_ts = float(now_ts if now_ts is not None else time.time())
     lease_expires_at = float(entry.get("lease_expires_at", 0.0) or 0.0)
     if lease_expires_at > 0 and now_ts >= lease_expires_at:
-        return True
-    owner_pid = int(entry.get("owner_pid", 0) or 0)
-    if owner_pid > 0 and not is_process_alive(owner_pid):
         return True
     return False
 
@@ -1516,7 +1569,7 @@ def normalize_config(config: Optional[Dict]) -> Dict:
 
     loaded_mcp = loaded.get("mcp", {})
     if isinstance(loaded_mcp, dict):
-        for key in ("transport", "host", "path", "log_level"):
+        for key in ("transport", "host", "path", "log_level", "worker_policy"):
             if key in loaded_mcp and loaded_mcp.get(key) is not None:
                 normalized["mcp"][key] = str(loaded_mcp.get(key)).strip()
         if "enabled" in loaded_mcp:
@@ -1527,6 +1580,8 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["mcp"]["start_minimized"] = bool(loaded_mcp.get("start_minimized"))
         if "api_token" in loaded_mcp and loaded_mcp.get("api_token") is not None:
             normalized["mcp"]["api_token"] = str(loaded_mcp.get("api_token")).strip()
+        if "admin_token" in loaded_mcp and loaded_mcp.get("admin_token") is not None:
+            normalized["mcp"]["admin_token"] = str(loaded_mcp.get("admin_token")).strip()
         if "port" in loaded_mcp:
             normalized["mcp"]["port"] = loaded_mcp.get("port")
         if "worker_port" in loaded_mcp:
@@ -1637,12 +1692,17 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     normalized["mcp"]["headless"] = bool(normalized["mcp"].get("headless", False))
     normalized["mcp"]["start_minimized"] = bool(normalized["mcp"].get("start_minimized", True))
     normalized["mcp"]["api_token"] = str(normalized["mcp"].get("api_token", "")).strip()
+    normalized["mcp"]["admin_token"] = str(normalized["mcp"].get("admin_token", "")).strip()
     normalized["mcp"]["transport"] = str(normalized["mcp"].get("transport", "streamable-http")).strip() or "streamable-http"
     normalized["mcp"]["host"] = str(normalized["mcp"].get("host", "127.0.0.1")).strip() or "127.0.0.1"
     normalized["mcp"]["path"] = str(normalized["mcp"].get("path", "/mcp")).strip() or "/mcp"
     if not normalized["mcp"]["path"].startswith("/"):
         normalized["mcp"]["path"] = "/" + normalized["mcp"]["path"]
     normalized["mcp"]["log_level"] = str(normalized["mcp"].get("log_level", "info")).strip() or "info"
+    worker_policy = str(normalized["mcp"].get("worker_policy", "sticky")).strip().lower() or "sticky"
+    if worker_policy not in {"lazy", "sticky", "always_on"}:
+        worker_policy = "sticky"
+    normalized["mcp"]["worker_policy"] = worker_policy
     normalized["mcp"]["port"] = max(1, min(65535, int(normalized["mcp"].get("port", 28888))))
     normalized["mcp"]["worker_port"] = max(1, min(65535, int(normalized["mcp"].get("worker_port", 28889))))
     if normalized["mcp"]["worker_port"] == normalized["mcp"]["port"]:
@@ -1688,11 +1748,29 @@ def normalize_config(config: Optional[Dict]) -> Dict:
 
 def write_json_atomic(path: str, data: Dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    temp_path = f"{path}.tmp"
     text = json.dumps(data, indent=2, ensure_ascii=False)
-    with open(temp_path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
-    os.replace(temp_path, path)
+    with _JSON_ATOMIC_WRITE_LOCK:
+        temp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+            last_exc = None
+            for _ in range(8):
+                try:
+                    os.replace(temp_path, path)
+                    last_exc = None
+                    break
+                except PermissionError as exc:
+                    last_exc = exc
+                    time.sleep(0.05)
+            if last_exc is not None:
+                raise last_exc
+        finally:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
 
 
 def load_json_file(path: str, default=None):
@@ -2803,6 +2881,7 @@ class SingleRunLock:
         self.lock_path = lock_path
         self.stale_seconds = stale_seconds
         self.acquired = False
+        self.owner_pid = int(os.getpid() or 0)
 
     def try_acquire(self) -> bool:
         lock_dir = os.path.dirname(self.lock_path)
@@ -2819,7 +2898,7 @@ class SingleRunLock:
         now_ts = time.time()
         payload = json.dumps(
             {
-                "pid": os.getpid(),
+                "pid": self.owner_pid,
                 "time": now_text(),
                 "updated_at_ts": now_ts,
             },
@@ -2829,6 +2908,25 @@ class SingleRunLock:
             handle.write(payload)
         self.acquired = True
         return True
+
+    def touch(self) -> bool:
+        if not self.acquired:
+            return False
+        now_ts = time.time()
+        payload = json.dumps(
+            {
+                "pid": self.owner_pid,
+                "time": now_text(),
+                "updated_at_ts": now_ts,
+            },
+            ensure_ascii=False,
+        )
+        try:
+            with open(self.lock_path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(payload)
+            return True
+        except OSError:
+            return False
 
     def release(self) -> None:
         if not self.acquired:
@@ -3910,6 +4008,7 @@ def run_profile_keepalive(
     profile_name: str,
     logger: Optional[Callable[[str], None]] = None,
     stop_controller: Optional[KeepAliveStopController] = None,
+    progress_callback: Optional[Callable[[str, Dict], None]] = None,
 ) -> Dict:
     settings = config["keepalive"]
     profile_entry = next(
@@ -3953,6 +4052,8 @@ def run_profile_keepalive(
             }
         if stop_controller:
             stop_controller.check_or_raise()
+        if progress_callback:
+            progress_callback("profile_start", {"profile_name": profile_name, "lock_acquired": True})
         driver = create_driver_for_profile(config, profile_name)
         if stop_controller:
             stop_controller.bind_driver(driver)
@@ -4067,9 +4168,11 @@ def run_keepalive_job(
     progress_callback: Optional[Callable[[str, Dict], None]] = None,
 ) -> Dict:
     from chromium_advanced.mirror_manager import MirrorManager
+    from chromium_advanced.session_manager import SessionManager
 
     path = config_path or get_default_config_path()
     config = load_app_config(path)
+    session_manager = SessionManager(config_path=path)
     lock = SingleRunLock(get_lock_path())
     mirror_lock_path = get_mirror_lock_path()
 
@@ -4138,8 +4241,33 @@ def run_keepalive_job(
 
                 profile_name = item["profile_name"]
                 log_message(logger, f"keepalive start: {profile_name}")
-                if progress_callback:
-                    progress_callback("profile_start", {"profile_name": profile_name, "index": index})
+                preflight = session_manager.can_start_session(
+                    profile_name,
+                    engine_name=str(config.get("app", {}).get("browser_engine", "") or ""),
+                )
+                if not bool(preflight.get("allowed")):
+                    result = {
+                        "profile_name": profile_name,
+                        "status": "skipped",
+                        "message": str(preflight.get("reason", "") or "profile is unavailable"),
+                        "details": {"preflight": preflight},
+                        "disabled_sites": [],
+                    }
+                    log_message(logger, f"{profile_name}: skipped before keepalive start: {result['message']}")
+                    for profile in config["profiles"]:
+                        if profile.get("profile_name") != profile_name:
+                            continue
+                        profile["last_keepalive_at"] = now_text()
+                        profile["last_keepalive_status"] = result["status"]
+                        profile["last_keepalive_message"] = result["message"]
+                        profile["last_keepalive_details"] = result.get("details", {})
+                        break
+                    profile_results.append(result)
+                    any_skipped = True
+                    save_app_config(config, path)
+                    if index < len(target_profiles) - 1:
+                        interruptible_sleep(int(config["keepalive"]["between_profiles_seconds"]), stop_controller)
+                    continue
 
                 try:
                     result = run_profile_keepalive(
@@ -4147,6 +4275,7 @@ def run_keepalive_job(
                         profile_name,
                         logger=logger,
                         stop_controller=stop_controller,
+                        progress_callback=progress_callback,
                     )
                 except KeepAliveStoppedError as exc:
                     result = {
@@ -4255,7 +4384,11 @@ def run_keepalive_job(
 
         mirror_summary = None
         mirror_settings = config.get("mirror", {})
-        if bool(mirror_settings.get("enabled", False)):
+        should_run_mirror = bool(mirror_settings.get("enabled", False)) and any(
+            str(item.get("status", "") or "").strip().lower() in {"success", "partial", "failed"}
+            for item in profile_results
+        )
+        if should_run_mirror:
             config["mirror"]["last_run_at"] = now_text()
             config["mirror"]["last_run_finished_at"] = ""
             config["mirror"]["last_run_status"] = "running"

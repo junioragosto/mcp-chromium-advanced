@@ -112,6 +112,18 @@ def _trace_mcp_tool(tool_name: str, func: Callable[[], dict], *, session_id: str
         )
 
 
+def _extract_action_level_error(result: object) -> tuple[bool, str, str]:
+    if not isinstance(result, dict):
+        return False, "", ""
+    if result.get("ok") is not False:
+        return False, "", ""
+    return (
+        True,
+        str(result.get("error", "") or "").strip(),
+        str(result.get("error_type", "") or "").strip(),
+    )
+
+
 def acquire_single_instance_guard(name: str):
     if os.name != "nt":
         return None
@@ -608,6 +620,54 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             lambda: {"session_id": session_id, **session_manager.resolve_session(session_id).run_script(script, tab_id=tab_id)},
             session_id=session_id,
         )
+
+    @server.tool(annotations=browser_script_annotations)
+    def run_script_batch(
+        session_id: str,
+        scripts: list[str],
+        tab_id: str = "",
+        stop_on_error: bool = True,
+    ) -> dict:
+        """Run multiple JavaScript snippets in one logical call to reduce tool round-trips."""
+        if not isinstance(scripts, list) or not scripts:
+            raise ValueError("scripts is required")
+
+        def _call() -> dict:
+            browser_session = session_manager.resolve_session(session_id)
+            items = []
+            for index, script in enumerate(scripts):
+                script_text = str(script or "")
+                item = {
+                    "index": index,
+                    "script": script_text,
+                }
+                try:
+                    item_result = browser_session.run_script(script_text, tab_id=tab_id)
+                    item["result"] = item_result
+                    failed, message, error_type = _extract_action_level_error(item_result)
+                    item["ok"] = not failed
+                    if failed:
+                        if message:
+                            item["error"] = message
+                        if error_type:
+                            item["error_type"] = error_type
+                        if stop_on_error:
+                            raise RuntimeError(message or "run_script_batch item failed")
+                except Exception as exc:
+                    item["ok"] = False
+                    item["error_type"] = type(exc).__name__
+                    item["error"] = str(exc)
+                    if stop_on_error:
+                        raise
+                items.append(item)
+            return {
+                "session_id": session_id,
+                "count": len(items),
+                "stop_on_error": bool(stop_on_error),
+                "items": items,
+            }
+
+        return _trace_mcp_tool("run_script_batch", _call, session_id=session_id)
 
     @server.tool(annotations=browser_read_annotations)
     def browser_get_console_messages(

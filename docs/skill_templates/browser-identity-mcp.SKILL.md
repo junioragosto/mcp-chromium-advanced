@@ -22,11 +22,13 @@ For the Chromium Profile Manager service used on this machine:
 - MCP endpoint:
   `http://127.0.0.1:28888/mcp`
 - daemon auth:
-  if `mcp.api_token` is configured, every daemon request must send `Authorization: Bearer <token>` with no localhost bypass
+  if `mcp.api_token` is configured, every business request must send `Authorization: Bearer <token>` with no localhost bypass
+- daemon admin auth:
+  management endpoints use `mcp.admin_token`, which may differ from the business token
 - daemon model:
   a stable daemon listens on `28888`
 - worker model:
-  a browser-capable MCP worker is lazily started on demand and reclaimed after idle timeout
+  a browser-capable MCP worker is policy-controlled: `lazy`, `sticky`, or `always_on`
 - identity parameter:
   `profile_name`
 
@@ -40,6 +42,8 @@ For the Chromium Profile Manager service used on this machine:
 6. Perform the browser work.
 7. Release the session when finished.
 
+For multi-step tasks, keep one session open for the whole task. Do not repeatedly start and close the same profile session for each individual page action unless the task explicitly requires isolation.
+
 ## Required Behavior
 
 - Never guess a real-login identity automatically.
@@ -49,7 +53,9 @@ For the Chromium Profile Manager service used on this machine:
 - If the same identity is already occupied, do not steal it unless the project explicitly supports safe reuse and the user intends that reuse.
 - When the task depends on a specific website login, verify that website's actual logged-in account inside the page before doing account-sensitive work.
 - Always close or release the session after the task completes unless the user explicitly asks to keep it open.
+- For one task with many browser steps, prefer one `start_profile_session(...)`, many page actions, then one `close_profile_session(...)`.
 - If direct daemon HTTP verification is needed, include the configured bearer token on every request instead of assuming localhost is trusted.
+- Do not assume the same token can call management endpoints. `/_daemon/worker/*`, force reclaim, and expiry-reap operations require the admin token when the daemon is configured with one.
 
 ## Parameter Mapping
 
@@ -115,6 +121,21 @@ For multi-tab work inside one session, prefer this extension:
 4. page actions on the active tab
 5. `browser_close_tab(...)` if the tab is no longer needed
 
+Tool-family boundary:
+
+1. once a session was created through `browserIdentity`, keep all subsequent browser actions inside the same `browserIdentity` tool family
+2. do not switch mid-task to another MCP server such as generic `mcp:playwright/*`, `browser-use`, or unrelated browser tools just because they expose similarly named tab APIs
+3. `session_id` returned by `browserIdentity` is only valid for this MCP service; it is not transferable to another MCP server
+4. if the task needs richer capabilities than the current engine exposes, restart the task with a different `engine` on `browserIdentity` instead of mixing tool families
+
+For long tasks or agent workflows that naturally pause between actions:
+
+1. start one session
+2. reuse the same `session_id` across all steps
+3. only close when the whole task or subtask is complete
+
+Do not treat `start_profile_session` and `close_profile_session` as per-action wrappers.
+
 If an action fails and the page looks dynamic or broken, prefer structured diagnostics before guessing:
 
 1. `browser_get_interaction_context`
@@ -144,6 +165,28 @@ Recommended engine-selection policy for this project:
 - switch to `selenium_uc` when stealth or anti-detection tolerance matters more than raw speed
 - switch to `patchright` when the task needs the richest structured diagnostics, snapshot/ref behavior, or deeper complex-frontend inspection
 
+Important engine capability examples:
+
+- `playwright_cli`
+  best default for high-throughput browsing, ordinary click/type/navigate/tab work, and lower token overhead
+- `selenium_uc`
+  prefer this when the target is stealth-sensitive, shows automation friction, or needs coordinate-level mouse actions such as drag, gesture unlock, slider/pattern input, or vision-style XY fallback
+- `patchright`
+  prefer this when the task depends on snapshot refs, richer DOM diagnostics, stronger structured extraction, or difficult complex-frontend inspection
+
+How to switch engines explicitly:
+
+- set `engine="playwright_cli"` on both `can_start_profile_session(...)` and `start_profile_session(...)`
+- set `engine="selenium_uc"` when a page needs gesture/drag/XY mouse actions
+- set `engine="patchright"` when a page needs snapshot/ref-style targeting or deeper structured diagnosis
+
+Example:
+
+- `can_start_profile_session(profile_name="Profile 4", engine="selenium_uc")`
+- `start_profile_session(profile_name="Profile 4", engine="selenium_uc")`
+
+Do not assume the service is single-engine. This MCP exposes multiple browser backends behind one profile/session interface, and the caller is allowed to choose the engine per new session.
+
 Important engine-switching boundary:
 
 - changing the GUI default engine affects only future sessions
@@ -165,6 +208,8 @@ Important engine-switching boundary:
 - If the same profile is already occupied on a live-root session, prefer surfacing that state first. Reuse should be explicit, not implicit.
 - If `can_start_profile_session(profile_name)` reports `allowed=false` for the same profile, do not try to force parallel reuse. Same-profile concurrency is intentionally blocked.
 - For multi-tab tasks, do not assume a newly opened tab became the effective action target unless you explicitly activated it or the tool says it was activated.
+- After `start_profile_session`, do not route subsequent tab or click actions to generic `mcp:playwright/*` tools. Use this service's own `browser_*` tools for tabs, clicks, typing, snapshot, diagnosis, and close.
+- If an agent message says the session is open but also says it "cannot click because there is no tree node interface", that is almost certainly a tool-routing mistake rather than a real runtime capability loss. The correct fix is to keep using the `browserIdentity` session tools or restart with `engine=\"patchright\"` when snapshot/ref-style targeting is required.
 - When diagnosing broken pages, prefer the MCP debug tools over manual screenshots of DevTools whenever possible.
 - The managed runtime now exposes `session_health.recovery_actions` and `resolution_trace`; use them to decide whether to retry directly, refresh candidate search, or recreate the session.
 - The managed runtime exposes `browser_get_action_trace` for per-session action timing and `get_mcp_tool_trace` for MCP worker timing. Use these before guessing why an interaction is slow.
@@ -175,6 +220,7 @@ Important engine-switching boundary:
 - `playwright_cli` console/network diagnostics are intentionally bounded and include noise categories. A partial diagnosis with `diagnostic_errors` is better than blocking the worker on a noisy site.
 - For `playwright_cli`, simple selector click/fill actions prefer a fast DOM eval path and fall back to native CLI commands when needed. Untargeted candidate discovery is intentionally snapshot-backed while explicit selector reads use shorter target-scoped evals. Treat that split as the expected fast path, not as degraded behavior.
 - For `playwright_cli`, the runtime sanitizes upstream Chromium launch args so `AutomationControlled` is not injected through a real `--disable-blink-features` switch.
+- For `playwright_cli`, gesture-style pages are a known engine-selection boundary. If the task requires `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, pattern unlock, slider drag, or coordinate-based fallback, prefer starting the session with `engine="selenium_uc"` or `engine="patchright"` instead of assuming the default engine is sufficient.
 - Visible MCP browser sessions normally honor `mcp.start_minimized=true`, which should leave the browser in the taskbar instead of stealing foreground focus; users can click it open when they want to watch or take over.
 - Do not enable `mcp.headless=true` just to reduce desktop interference. Headless mode should only be used when the user explicitly asks for headless/regression/background validation.
 - When a `playwright_cli` session closes, the manager should release the named session and clean owned daemon/browser processes; startup also prunes stale temp dirs that are not referenced by live processes. If a browser window remains, treat it as an orphan-process bug and inspect the runtime root/session name.

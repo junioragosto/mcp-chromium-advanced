@@ -96,6 +96,7 @@ from chromium_advanced.chromium_profile_lib import (
     normalize_language_code,
     profile_sort_key,
     resolve_mcp_api_token,
+    resolve_mcp_admin_token,
     save_app_config,
     save_keepalive_plugin_source,
     migrate_keepalive_site_id_references,
@@ -130,6 +131,7 @@ MCP_WATCHDOG_RESTART_FAILURES = 6
 OCCUPANCY_EVENTS_POLL_MS = 2000
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
+MCP_WORKER_POLICY_OPTIONS = ["lazy", "sticky", "always_on"]
 CONCURRENCY_MODE_OPTIONS = ["per_profile_live", "block"]
 LANGUAGE_OPTIONS = load_language_options()
 I18N = load_translations()
@@ -280,6 +282,10 @@ def terminate_project_mcp_processes(exclude_pid: Optional[int] = None, timeout_s
     return terminated
 
 
+def find_project_mcp_processes(exclude_pid: Optional[int] = None) -> List[psutil.Process]:
+    return [proc for proc in iter_project_mcp_processes() if proc.pid != exclude_pid]
+
+
 def get_app_icon() -> QIcon:
     candidates = [
         get_resource_path(PACKAGED_APP_ICON_PATH),
@@ -361,13 +367,15 @@ def fetch_json(url: str, timeout: float = 1.5, headers: Optional[Dict[str, str]]
 def get_frozen_companion_executable(stem: str) -> str:
     base_dir = os.path.dirname(os.path.abspath(sys.executable))
     extension = ".exe" if SYSTEM_TYPE == "Windows" else ""
-    direct_path = os.path.join(base_dir, f"{stem}{extension}")
-    if os.path.exists(direct_path):
-        return direct_path
-    bundled_path = os.path.join(base_dir, stem, f"{stem}{extension}")
-    if os.path.exists(bundled_path):
-        return bundled_path
-    return direct_path
+    candidates = [
+        os.path.join(base_dir, f"{stem}{extension}"),
+        os.path.join(base_dir, stem, f"{stem}{extension}"),
+        os.path.join(base_dir, stem, stem, f"{stem}{extension}"),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
 
 
 def get_startup_command() -> str:
@@ -639,11 +647,18 @@ class ChromiumManagerWindow(QMainWindow):
     def ensure_mcp_api_token_persisted(self):
         self.config.setdefault("mcp", {})
         token = str(self.config["mcp"].get("api_token", "")).strip()
-        if token:
-            return
-        token = resolve_mcp_api_token(self.config)
-        self.config["mcp"]["api_token"] = token
-        self.config = save_app_config(self.config, self.config_path)
+        admin_token = str(self.config["mcp"].get("admin_token", "")).strip()
+        changed = False
+        if not token:
+            token = resolve_mcp_api_token(self.config)
+            self.config["mcp"]["api_token"] = token
+            changed = True
+        if not admin_token:
+            admin_token = resolve_mcp_admin_token(self.config)
+            self.config["mcp"]["admin_token"] = admin_token
+            changed = True
+        if changed:
+            self.config = save_app_config(self.config, self.config_path)
 
     def _current_screen_available_geometry(self):
         screen = self.screen()
@@ -1212,6 +1227,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_path_edit = QLineEdit()
         self.mcp_idle_timeout_spin = FocusWheelSpinBox()
         self.mcp_idle_timeout_spin.setRange(10, 86400)
+        self.mcp_worker_policy_combo = QComboBox()
+        self.mcp_worker_policy_combo.addItems(MCP_WORKER_POLICY_OPTIONS)
         self.mcp_start_minimized_checkbox = QCheckBox()
         self.mcp_log_level_combo = QComboBox()
         self.mcp_log_level_combo.addItems(MCP_LOG_LEVEL_OPTIONS)
@@ -1221,6 +1238,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_layout.addRow("Worker Port", self.mcp_worker_port_spin)
         self.mcp_layout.addRow("Path", self.mcp_path_edit)
         self.mcp_layout.addRow("Idle Timeout(s)", self.mcp_idle_timeout_spin)
+        self.mcp_layout.addRow("Worker Policy", self.mcp_worker_policy_combo)
         self.mcp_layout.addRow(self.tr("mcp_start_minimized"), self.mcp_start_minimized_checkbox)
         self.mcp_layout.addRow(self.tr("mcp_log_level"), self.mcp_log_level_combo)
 
@@ -1232,6 +1250,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_api_token_edit.setToolTip(self.tr("mcp_api_token_tooltip"))
         self.btn_regenerate_api_token = QPushButton()
         self.btn_regenerate_api_token.clicked.connect(self.regenerate_api_token)
+        self.mcp_admin_token_label = QLabel("Admin Token")
+        self.mcp_admin_token_edit = QLineEdit()
+        self.mcp_admin_token_edit.setReadOnly(True)
+        self.mcp_admin_token_edit.setEchoMode(QLineEdit.Normal)
         self.mcp_auth_warning_label = QLabel()
         self.mcp_auth_warning_label.setStyleSheet("color: #e67e22; font-weight: bold;")
         self.mcp_auth_warning_label.setWordWrap(True)
@@ -1240,6 +1262,7 @@ class ChromiumManagerWindow(QMainWindow):
         token_row.addWidget(self.mcp_api_token_edit, 1)
         token_row.addWidget(self.btn_regenerate_api_token)
         self.mcp_layout.addRow(self.mcp_api_token_label, token_row)
+        self.mcp_layout.addRow(self.mcp_admin_token_label, self.mcp_admin_token_edit)
         self.mcp_layout.addRow("", self.mcp_auth_warning_label)
         self.config_layout.addWidget(self.mcp_group)
 
@@ -1330,7 +1353,8 @@ class ChromiumManagerWindow(QMainWindow):
     def on_keepalive_worker_message(self, kind: str, payload: Dict):
         if kind == "__PROFILE_START__":
             self.keepalive_running_profile_name = str((payload or {}).get("profile_name", "")).strip()
-            if self.keepalive_running_profile_name:
+            acquired = bool((payload or {}).get("lock_acquired", True))
+            if self.keepalive_running_profile_name and acquired:
                 _write_gui_profile_occupancy(
                     self.keepalive_running_profile_name,
                     scene_type="keepalive",
@@ -1536,7 +1560,17 @@ class ChromiumManagerWindow(QMainWindow):
         self.append_log(self.tr("log_config_reloaded"))
 
     def load_profile_occupancy_cache(self) -> Dict[str, Dict]:
-        return list_profile_occupancy_entries()
+        from chromium_advanced.session_manager import SessionManager
+
+        manager = SessionManager(config_path=self.config_path)
+        try:
+            return manager.list_profile_occupancy()
+        except TimeoutError:
+            try:
+                self.append_log("Profile occupancy registry is temporarily busy; using empty occupancy cache.", prefix="GUI")
+            except Exception:
+                pass
+            return {}
 
     def format_scene_type_label(self, scene_type: str) -> str:
         scene_type = str(scene_type or "").strip().lower()
@@ -2720,6 +2754,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_worker_port_spin.setValue(int(settings.get("worker_port", 28889)))
         self.mcp_path_edit.setText(str(settings.get("path", "/mcp")))
         self.mcp_idle_timeout_spin.setValue(int(settings.get("idle_timeout_seconds", 60)))
+        worker_policy = str(settings.get("worker_policy", "sticky") or "sticky")
+        if worker_policy not in MCP_WORKER_POLICY_OPTIONS:
+            worker_policy = "sticky"
+        self.mcp_worker_policy_combo.setCurrentText(worker_policy)
         self.mcp_start_minimized_checkbox.setChecked(bool(settings.get("start_minimized", True)))
         log_level = str(settings.get("log_level", "info"))
         if log_level not in MCP_LOG_LEVEL_OPTIONS:
@@ -2729,6 +2767,7 @@ class ChromiumManagerWindow(QMainWindow):
 
         api_token = str(settings.get("api_token", ""))
         self.mcp_api_token_edit.setText(api_token)
+        self.mcp_admin_token_edit.setText(str(settings.get("admin_token", "")))
         self._refresh_api_token_warning(api_token)
         self.mcp_service_checkbox.setChecked(bool(settings.get("enabled", False)))
         self.mcp_service_checkbox.blockSignals(False)
@@ -2763,10 +2802,13 @@ class ChromiumManagerWindow(QMainWindow):
     def regenerate_api_token(self):
         import secrets
         new_token = secrets.token_hex(24)
+        new_admin_token = secrets.token_hex(24)
         self.config.setdefault("mcp", {})
         self.config["mcp"]["api_token"] = new_token
+        self.config["mcp"]["admin_token"] = new_admin_token
         self.config = save_app_config(self.config, self.config_path)
         self.mcp_api_token_edit.setText(new_token)
+        self.mcp_admin_token_edit.setText(new_admin_token)
         self._refresh_api_token_warning(new_token)
         self.append_log(self.tr("log_api_token_regenerated"))
 
@@ -2793,6 +2835,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.config["mcp"]["port"] = self.mcp_port_spin.value()
         self.config["mcp"]["worker_port"] = self.mcp_worker_port_spin.value()
         self.config["mcp"]["idle_timeout_seconds"] = self.mcp_idle_timeout_spin.value()
+        self.config["mcp"]["worker_policy"] = self.mcp_worker_policy_combo.currentText().strip() or "sticky"
         self.config["mcp"]["start_minimized"] = self.mcp_start_minimized_checkbox.isChecked()
         self.config["mcp"]["log_level"] = self.mcp_log_level_combo.currentText().strip() or "info"
         self.config["mcp"]["enabled"] = self.mcp_service_checkbox.isChecked()
@@ -2866,6 +2909,13 @@ class ChromiumManagerWindow(QMainWindow):
             return {}
         return {"Authorization": f"Bearer {api_token}"}
 
+    def get_mcp_admin_auth_headers(self) -> Dict[str, str]:
+        settings = self.config.get("mcp", {}) if isinstance(self.config, dict) else {}
+        admin_token = str(settings.get("admin_token", "")).strip() if isinstance(settings, dict) else ""
+        if not admin_token:
+            return self.get_mcp_auth_headers()
+        return {"Authorization": f"Bearer {admin_token}"}
+
     def get_mcp_connect_host_port(self):
         settings = self.config.get("mcp", {})
         host = str(settings.get("host", "127.0.0.1")).strip() or "127.0.0.1"
@@ -2877,7 +2927,12 @@ class ChromiumManagerWindow(QMainWindow):
     def is_mcp_expected_enabled(self) -> bool:
         return bool(self.config.get("mcp", {}).get("enabled", False))
 
-    def query_mcp_status(self, force: bool = False) -> Dict:
+    def query_mcp_status(
+        self,
+        force: bool = False,
+        expected_pid: int = 0,
+        expected_instance_id: str = "",
+    ) -> Dict:
         now_ts = time.monotonic()
         if (
             not force
@@ -2892,6 +2947,18 @@ class ChromiumManagerWindow(QMainWindow):
                 timeout=MCP_STATUS_QUERY_TIMEOUT_SECONDS,
                 headers=self.get_mcp_auth_headers(),
             )
+            if expected_pid:
+                status_pid = int(status.get("daemon_pid", 0) or 0) if isinstance(status, dict) else 0
+                if status_pid != int(expected_pid):
+                    raise RuntimeError(f"daemon pid mismatch: expected {expected_pid}, got {status_pid or '-'}")
+            if expected_instance_id:
+                status_instance_id = str(status.get("daemon_instance_id", "") or "").strip() if isinstance(status, dict) else ""
+                if status_instance_id != str(expected_instance_id).strip():
+                    raise RuntimeError(
+                        f"daemon instance mismatch: expected {expected_instance_id}, got {status_instance_id or '-'}"
+                    )
+            if isinstance(status, dict) and status and not bool(status.get("daemon_ready", True)):
+                raise RuntimeError("daemon is warming up")
             self.mcp_status_last_query_at = now_ts
             if isinstance(status, dict) and status:
                 self.mcp_status_cache = status
@@ -2923,6 +2990,9 @@ class ChromiumManagerWindow(QMainWindow):
             active_requests = int(daemon_status.get("active_proxy_requests", 0) or 0)
             idle_seconds = int(daemon_status.get("idle_seconds", 0) or 0)
             idle_timeout = int(daemon_status.get("idle_timeout_seconds", 0) or 0)
+            worker_policy = str(daemon_status.get("worker_policy", "sticky") or "sticky")
+            status_build_ms = int(daemon_status.get("status_build_ms", 0) or 0)
+            external_scan_ms = int(((daemon_status.get("server_status") or {}) if isinstance(daemon_status.get("server_status"), dict) else {}).get("external_scan_ms", 0) or 0)
             if worker_state == "running":
                 self.mcp_status_label.setText(self.tr("mcp_state_running"))
                 self.mcp_status_detail_label.setText(
@@ -2933,11 +3003,13 @@ class ChromiumManagerWindow(QMainWindow):
                         idle_seconds=idle_seconds,
                         idle_timeout=idle_timeout,
                     )
+                    + f" policy={worker_policy}, status={status_build_ms}ms, scan={external_scan_ms}ms"
                 )
             else:
                 self.mcp_status_label.setText(self.tr("mcp_state_guarding"))
                 self.mcp_status_detail_label.setText(
                     self.trf("mcp_status_detail_guarding", reason=(daemon_status.get("last_stop_reason") or "-"))
+                    + f" policy={worker_policy}, status={status_build_ms}ms, scan={external_scan_ms}ms"
                 )
             self.refresh_bottom_stats()
             return
@@ -2995,7 +3067,7 @@ class ChromiumManagerWindow(QMainWindow):
         if startup_token != self.mcp_startup_token or not self.mcp_startup_in_progress:
             return
         try:
-            status = self.query_mcp_status(force=True)
+            status = self.query_mcp_status(force=True, expected_pid=self.mcp_launch_pid)
             if status:
                 self.mcp_startup_in_progress = False
                 self.mcp_startup_deadline = None
@@ -3033,6 +3105,8 @@ class ChromiumManagerWindow(QMainWindow):
                 str(settings.get("log_level", "info")),
                 "--idle-timeout-seconds",
                 str(int(settings.get("idle_timeout_seconds", 60))),
+                "--worker-policy",
+                str(settings.get("worker_policy", "sticky") or "sticky"),
                 "--config-path",
                 self.config_path,
             ]
@@ -3041,6 +3115,10 @@ class ChromiumManagerWindow(QMainWindow):
             if api_token:
                 args.append("--api-token")
                 args.append(api_token)
+            admin_token = str(settings.get("admin_token", "")).strip()
+            if admin_token:
+                args.append("--admin-token")
+                args.append(admin_token)
             return args
 
         args = [
@@ -3060,6 +3138,8 @@ class ChromiumManagerWindow(QMainWindow):
             str(settings.get("log_level", "info")),
             "--idle-timeout-seconds",
             str(int(settings.get("idle_timeout_seconds", 60))),
+            "--worker-policy",
+            str(settings.get("worker_policy", "sticky") or "sticky"),
             "--config-path",
             self.config_path,
         ]
@@ -3068,6 +3148,10 @@ class ChromiumManagerWindow(QMainWindow):
         if api_token:
             args.append("--api-token")
             args.append(api_token)
+        admin_token = str(settings.get("admin_token", "")).strip()
+        if admin_token:
+            args.append("--admin-token")
+            args.append(admin_token)
         return args
 
     def start_mcp_service(self):
@@ -3191,6 +3275,8 @@ class ChromiumManagerWindow(QMainWindow):
         if daemon_status:
             return
         if self.mcp_status_consecutive_failures >= 3:
+            if find_project_mcp_processes(exclude_pid=os.getpid()):
+                return
             self.append_mcp_log(self.tr("log_mcp_watchdog_not_running"), prefix="MCP-WARN")
             self.start_mcp_service()
 
@@ -3433,7 +3519,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.keepalive_log_prefix = describe_keepalive_source(source, [item for item in selected_profiles if item])
         self.append_log(f"{self.tr('log_keepalive_started')} (engine={engine_name})", prefix=self.keepalive_log_prefix)
         self.keepalive_target_profiles = self.resolve_keepalive_target_profiles(selected_profiles)
-        self.keepalive_running_profile_name = self.keepalive_target_profiles[0] if len(self.keepalive_target_profiles) == 1 else ""
+        self.keepalive_running_profile_name = ""
         self.keepalive_stop_requested = False
         self.set_keepalive_buttons_enabled(False)
         self.keepalive_worker = KeepAliveWorker(self.config_path, selected_profiles, source, self, self.tr)

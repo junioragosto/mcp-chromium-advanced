@@ -19,6 +19,8 @@ For the Chromium Profile Manager service on this machine:
   `http://127.0.0.1:28888/mcp`
 - daemon auth:
   if `mcp.api_token` is configured, every daemon request must send `Authorization: Bearer <token>` with no localhost bypass
+- daemon admin auth:
+  management endpoints use `mcp.admin_token`, which may differ from the business token
 - important configuration boundary:
   this skill alone does not register an MCP server; the WSL-side Codex config must also define `mcp_servers.browserIdentity`
 
@@ -32,6 +34,12 @@ For the Chromium Profile Manager service on this machine:
 6. Before starting a browser session, still check occupancy and confirm the browser profile identity parameter with the user if it is not specified.
 7. For multi-tab or debug-heavy tasks, use the same explicit tab activation and structured debug tools as the normal browser identity MCP workflow.
 
+Tool-family boundary still applies from WSL:
+
+1. once a session was created through `browserIdentity`, keep all subsequent browser actions inside the same `browserIdentity` MCP service
+2. do not open the session with `browserIdentity` and then send tab or click actions to generic `mcp:playwright/*` tools
+3. if richer capabilities are needed, restart with another `engine` on `browserIdentity` instead of mixing MCP families
+
 For the Chromium Profile Manager service on this machine, the supported engine values remain:
 
 - `selenium_uc`
@@ -43,6 +51,22 @@ Recommended engine-selection policy remains the same from WSL:
 - default to `playwright_cli` for ordinary MCP task execution
 - use `selenium_uc` for stealth-sensitive or higher anti-detection workflows
 - use `patchright` for richer structured diagnostics and complex frontend inspection
+
+Important engine capability examples from WSL remain the same:
+
+- `playwright_cli`
+  best default for high-throughput ordinary browsing tasks
+- `selenium_uc`
+  prefer this when the page needs gesture unlock, drag, slider movement, or coordinate-level mouse fallback
+- `patchright`
+  prefer this when the task needs snapshot refs, stronger structured extraction, or deeper frontend diagnostics
+
+How to switch engines explicitly:
+
+- `can_start_profile_session(profile_name="Profile 4", engine="playwright_cli")`
+- `start_profile_session(profile_name="Profile 4", engine="selenium_uc")`
+
+Do not assume the service is single-engine. This MCP exposes multiple browser backends behind one profile/session interface, and the caller is allowed to choose the engine per new session.
 
 Changing the GUI default engine still affects only future sessions. Existing sessions keep their original engine, and same-profile multi-engine starts are blocked rather than mutating a live session in place.
 
@@ -71,6 +95,10 @@ url = "http://<windows-host-ip>:28888/mcp"
 [mcp_servers.browserIdentity.http_headers]
 Authorization = "Bearer <token>"
 ```
+
+WSL callers should also keep one browser session open across a multi-step task
+instead of repeatedly acquiring and closing the same profile for each small
+action. Reuse the same `session_id` until the task or subtask is complete.
 
 On Linux/WSL, this is typically stored in:
 
@@ -101,6 +129,7 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - Verify that the Windows service is listening on a WSL-reachable host such as `0.0.0.0` or a specific LAN address.
 - If WSL cannot reach the service, check Windows firewall rules and listening host configuration before debugging MCP semantics.
 - If auth is enabled on Windows, include the bearer token on every WSL-side connectivity check and MCP request.
+- Do not assume the business token can call management routes. `/_daemon/worker/*`, force reclaim, and expiry-reap operations require the admin token when the daemon is configured with one.
 - After connectivity is confirmed, follow the same identity confirmation and occupancy rules as the normal browser identity MCP workflow.
 - After connectivity is confirmed, do not infer a target website account from the GUI profile account label; verify the actual site login inside the target website when account correctness matters.
 - After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, `browser_diagnose_page`, `browser_get_action_trace`, and `get_mcp_tool_trace` over screenshot-only diagnosis.
@@ -108,4 +137,5 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - The Windows MCP server publishes standard tool annotations, treating normal profile/session operations, navigation, tab operations, browser actions, screenshots, diagnostics, and cleanup as trusted low-risk. Arbitrary JavaScript remains non-read-only. Use those hints when the WSL-side client supports trusted/read-only execution, but do not bypass identity or occupancy checks.
 - Treat partial `playwright_cli` diagnostics with `diagnostic_errors` as useful signal. The runtime intentionally bounds heavy console/network calls, classifies common noise, and avoids long MCP worker stalls.
 - `playwright_cli` simple selector click/fill actions may use the fast DOM eval path before native CLI fallback. This is expected and should be treated as the high-performance path.
+- If the target page needs gesture/pattern unlock, drag, slider movement, or coordinate-level mouse fallback, do not assume the default engine is enough. Start the session with `engine="selenium_uc"` or `engine="patchright"` explicitly.
 - If the Windows side reports `external_chromium_running`, do not assume the entire service is blocked. Check whether the target profile itself is the one that is occupied.
