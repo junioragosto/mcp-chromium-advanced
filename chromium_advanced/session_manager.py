@@ -11,7 +11,6 @@ from chromium_advanced.browser_session_kernel import ManagedBrowserSession
 from chromium_advanced.browser_engines.factory import create_browser_engine, resolve_browser_engine_name
 from chromium_advanced.chromium_profile_lib import (
     build_runtime_config_overrides,
-    clear_profile_occupancy,
     clear_stale_lockfile,
     cleanup_keepalive_profile_processes,
     ensure_profile_bookmarks_initialized,
@@ -19,21 +18,24 @@ from chromium_advanced.chromium_profile_lib import (
     get_chromium_processes_for_profile,
     get_lock_path,
     get_mirror_lock_path,
-    get_occupancy_events_path,
     get_profile_runtime_lock_path,
     is_process_alive,
-    list_profile_occupancy_entries,
     load_app_config,
-    load_profile_occupancy_registry,
     normalize_config,
     normalize_fs_path,
     now_text,
-    occupancy_entry_is_expired,
     read_recent_jsonl_events,
     SingleRunLock,
-    write_profile_occupancy,
 )
 from chromium_advanced.mirror_manager import MirrorManager
+from chromium_advanced.occupancy_registry import (
+    clear_profile_occupancy,
+    get_occupancy_events_path,
+    list_profile_occupancy_entries,
+    load_profile_occupancy_registry,
+    occupancy_entry_is_expired,
+    write_profile_occupancy,
+)
 
 
 @dataclass
@@ -90,8 +92,9 @@ class SessionManager:
     EXTERNAL_BUSY_CACHE_TTL_SECONDS = 1.5
     STARTING_PROFILE_STALE_SECONDS = 120.0
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, config_override: Optional[Dict] = None):
         self.config_path = config_path
+        self._config_override = copy.deepcopy(config_override) if isinstance(config_override, dict) else None
         self._lock = threading.RLock()
         self._sessions_by_id: Dict[str, SessionRecord] = {}
         self._session_ids_by_profile: Dict[str, List[str]] = {}
@@ -100,6 +103,8 @@ class SessionManager:
         self._external_busy_cache_at = 0.0
 
     def _load_config(self) -> Dict:
+        if isinstance(self._config_override, dict):
+            return copy.deepcopy(self._config_override)
         return load_app_config(self.config_path)
 
     def _load_occupancy_registry(self) -> Dict:
@@ -237,9 +242,9 @@ class SessionManager:
         entry = profiles.get(profile_name, {})
         return entry if isinstance(entry, dict) else {}
 
-    def list_profile_occupancy(self) -> Dict[str, Dict]:
+    def list_profile_occupancy(self, *, tolerate_lock_timeout: bool = False) -> Dict[str, Dict]:
         self.reconcile_stale_profile_occupancy()
-        return list_profile_occupancy_entries()
+        return list_profile_occupancy_entries(tolerate_lock_timeout=tolerate_lock_timeout)
 
     def list_recent_occupancy_events(self, limit: int = 100) -> List[Dict]:
         return read_recent_jsonl_events(get_occupancy_events_path(), limit=limit)

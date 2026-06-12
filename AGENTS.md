@@ -19,9 +19,11 @@ This project exposes a GUI-managed MCP service for real Chromium profiles with p
 
 ## Busy-State Rule
 
-- If GUI-launched Chromium is already running, MCP browser session startup should be treated as unavailable.
-- If keepalive is running, MCP browser session startup should be treated as unavailable.
-- If another MCP session already occupies the browser service, new sessions should be rejected unless the same session is explicitly being reused.
+- Busy-state is profile-scoped, not global-service exclusive.
+- If the target profile already has GUI Chromium running, MCP startup for that same profile should be treated as unavailable.
+- If keepalive is running, treat it as a per-profile lock signal rather than a full-service outage.
+- If another MCP session already occupies the same profile, a second same-profile session should be rejected unless the same session is explicitly being reused.
+- Different profiles may still be startable in parallel when `can_start_profile_session(profile_name)` reports `allowed=true`.
 
 ## WSL Access
 
@@ -32,7 +34,7 @@ This project exposes a GUI-managed MCP service for real Chromium profiles with p
 
 Use wording like this in other tasks when you want the agent to use the real-login browser MCP:
 
-`Use the browserIdentity MCP for this task. If I did not specify profile_name, ask me which profile to use first. Before starting, check server/profile status. If occupied, tell me instead of forcing reuse. When done, close the profile session.`
+`Use the browserIdentity MCP for this task. If I did not specify profile_name, ask me which profile to use first. Before starting, check server/profile status. If the target profile is busy, tell me instead of forcing reuse. When done, close the profile session.`
 
 If the profile is already known, use wording like this:
 

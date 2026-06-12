@@ -70,6 +70,12 @@ The daemon now separates business access from management access.
 - `admin_token`
   Required for management endpoints such as worker lifecycle control and force reclaim.
 
+Security boundary:
+
+- `admin_token` is intentionally independent from `api_token`.
+- If `admin_token` is absent, management endpoints stay disabled instead of silently accepting the business token.
+- GUI and daemon bootstrap now generate distinct values for both tokens when persistence needs to seed them.
+
 Current endpoint boundary:
 
 - Business surface:
@@ -105,6 +111,7 @@ The worker runtime policy is configurable:
 - Release resources automatically after idle timeout
 - Run keepalive jobs against real logged-in profiles
 - Coordinate multi-tab browser work with explicit tab listing, opening, activation, and closing tools
+- Support formal coordinate and gesture interactions on capable engines via `browser_mouse_move_xy`, `browser_mouse_click_xy`, and `browser_mouse_drag_xy`
 - Collect structured console, page error, and network diagnostics instead of relying on screenshots alone
 - Fall back to generic DOM-based snapshot, candidate enumeration, wait, and target diagnostics when a runtime lacks native support
 
@@ -358,6 +365,7 @@ The daemon stays available between tasks. The browser worker is started only whe
 Operational notes:
 
 - If `mcp.api_token` is configured, every daemon request must send `Authorization: Bearer <token>`. There is no localhost bypass.
+- If `mcp.admin_token` is not configured, admin-only daemon endpoints remain disabled instead of falling back to `mcp.api_token`.
 - GUI status polling also uses the same bearer token, so the GUI and external MCP clients follow one authentication rule.
 - The daemon is intended to stay stable while the worker is short-lived and lazily started.
 - A worker reclaimed because of `idle_timeout` is a normal managed lifecycle event, not a crash.
@@ -365,7 +373,8 @@ Operational notes:
 - That busy-state rule is now enforced per profile root, including `playwright_cli`.
 - MCP tools publish standard tool annotations so clients can distinguish trusted local/browser operations from arbitrary script execution.
 - These annotations reduce unnecessary approval prompts in clients that honor MCP hints, but they do not bypass the client approval policy or this project's profile/busy-state governance.
-- Normal profile/session operations, navigation, tab operations, clicking, typing, key presses, mouse actions, screenshots, diagnostics, and cleanup are treated as trusted low-risk MCP operations for local real-profile workflows. `run_script` remains non-read-only because arbitrary JavaScript is the highest-risk browser action.
+- Normal profile/session operations, navigation, tab operations, clicking, typing, key presses, mouse actions, screenshots, diagnostics, and cleanup are treated as trusted low-risk MCP operations for local real-profile workflows.
+- `run_script` and `run_script_batch` are intentionally high-trust, non-read-only actions because they execute arbitrary JavaScript inside a real logged-in browser context.
 
 Typical MCP flow:
 
@@ -455,6 +464,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Also powers the existing keepalive workflows
 - Uses the shared `launch.*` defaults for direct profile launch
 - Best current stealth-oriented option in the project
+- Best current option when a page needs gesture unlock, slider drag, pattern input, or coordinate-level fallback
 - Still the code-level fallback default if no configured engine is present
 
 ### Patchright
@@ -464,6 +474,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Intended for sites where a Playwright-compatible execution model is more reliable
 - Provides the strongest tab model and the richest structured debug telemetry in the current project
 - Collects DevTools-style diagnostics through per-tab CDP sessions, so agents can read console output, uncaught exceptions, and network failures without opening browser DevTools manually
+- Supports the formal coordinate and gesture tool family
 - Keepalive is not routed through Patchright yet in this stage
 
 ### Playwright CLI
@@ -478,6 +489,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Reuses the real `user-data-dir` together with Chromium `--profile-directory=Profile N`, so logged-in state can be preserved
 - Supports the validated first-stage surface: session start, navigation, multi-tab basics, script execution, type/click/key actions, screenshot, console, requests, and coarse page diagnostics
 - Managed runtime fallbacks lift the raw CLI session with generic `snapshot`, candidate enumeration, waiting, target verification, and snapshot-ref style targeting where possible
+- Does not currently implement the formal gesture/XY tool family. If the task depends on drag, slider movement, pattern unlock, or coordinate-level fallback, switch to `selenium_uc` or `patchright`.
 - Uses a fast DOM eval path for simple selector `click` and `fill` operations, then falls back to native `playwright-cli` commands if the DOM path is not safe or fails
 - Classifies console and network noise into categories such as third-party, asset, media, security policy, CORS, and auth, so diagnostics can separate useful signal from common site noise
 - Sanitizes the upstream `playwright-cli` Chromium launch args so `AutomationControlled` is not injected through `--disable-blink-features`

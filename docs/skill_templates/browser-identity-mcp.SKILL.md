@@ -25,6 +25,7 @@ For the Chromium Profile Manager service used on this machine:
   if `mcp.api_token` is configured, every business request must send `Authorization: Bearer <token>` with no localhost bypass
 - daemon admin auth:
   management endpoints use `mcp.admin_token`, which may differ from the business token
+  if `mcp.admin_token` is absent, management endpoints stay disabled instead of falling back to `mcp.api_token`
 - daemon model:
   a stable daemon listens on `28888`
 - worker model:
@@ -64,7 +65,7 @@ Translate the project-specific field into this mental model:
 - identity parameter:
   the field that selects the real browser profile/container, such as `profile_name`, `persona`, or `slot`
 - state query:
-  the API or tool that reports whether the browser service is idle, starting, occupied, or externally busy
+  the API or tool that reports whether the browser service is idle, starting, keepalive-running, mirroring, active for other profiles, or externally busy
 - session start:
   the API or tool that claims the identity and returns a session handle
 - session release:
@@ -173,6 +174,8 @@ Important engine capability examples:
   prefer this when the target is stealth-sensitive, shows automation friction, or needs coordinate-level mouse actions such as drag, gesture unlock, slider/pattern input, or vision-style XY fallback
 - `patchright`
   prefer this when the task depends on snapshot refs, richer DOM diagnostics, stronger structured extraction, or difficult complex-frontend inspection
+- `gesture_actions`
+  treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, and `browser_mouse_drag_xy` as a formal capability boundary rather than a generic fallback every engine should support
 
 How to switch engines explicitly:
 
@@ -202,7 +205,7 @@ Important engine-switching boundary:
 - The daemon endpoint on `28888` is expected to stay stable across tasks.
 - A first request to `/mcp` may lazily start the worker; this is normal.
 - If `get_server_status` reports `starting`, `keepalive_running`, or `mirroring`, do not force a new browser session.
-- If `get_server_status` reports `occupied`, treat that as the live-root path being occupied. Do not steal it.
+- Do not expect `occupied` as a canonical top-level server state. The current service reports states such as `idle`, `starting`, `keepalive_running`, `mirroring`, `active_sessions`, `isolated_runtime_active`, and `external_chromium_running`.
 - If `get_server_status` reports `external_chromium_running`, treat it as a profile-scoped signal, not an automatic full-service outage.
 - If `external_chromium_running` is reported, the practical meaning is usually that the configured Chromium binary root is already open outside MCP, so governance is blocking startup before the engine is even created.
 - If the same profile is already occupied on a live-root session, prefer surfacing that state first. Reuse should be explicit, not implicit.
@@ -214,13 +217,15 @@ Important engine-switching boundary:
 - The managed runtime now exposes `session_health.recovery_actions` and `resolution_trace`; use them to decide whether to retry directly, refresh candidate search, or recreate the session.
 - The managed runtime exposes `browser_get_action_trace` for per-session action timing and `get_mcp_tool_trace` for MCP worker timing. Use these before guessing why an interaction is slow.
 - MCP tool traces are persisted as rotated JSONL; the GUI MCP status panel shows the active trace file path.
-- The MCP server publishes standard tool annotations. Normal profile/session operations, navigation, tab operations, clicking, typing, key presses, mouse actions, screenshots, diagnostics, and cleanup are treated as trusted low-risk; arbitrary JavaScript remains non-read-only.
+- The MCP server publishes standard tool annotations. Normal profile/session operations, navigation, tab operations, clicking, typing, key presses, mouse actions, screenshots, diagnostics, and cleanup are treated as trusted low-risk.
+- `run_script` and `run_script_batch` are deliberately high-trust, non-read-only actions because they execute arbitrary JavaScript inside a real logged-in browser context.
 - If the client supports trusted/read-only tool execution, use those annotations to avoid unnecessary approval prompts. Do not bypass profile occupancy, keepalive, mirror, or account-verification rules just to reduce approvals.
 - `session_health.page_drift` is a first-class signal. When it reports `drifted=true`, prefer `reactivate_expected_tab`, `reopen_expected_url`, or `retry_on_sticky_tab` before assuming the selector itself is bad.
 - `playwright_cli` console/network diagnostics are intentionally bounded and include noise categories. A partial diagnosis with `diagnostic_errors` is better than blocking the worker on a noisy site.
 - For `playwright_cli`, simple selector click/fill actions prefer a fast DOM eval path and fall back to native CLI commands when needed. Untargeted candidate discovery is intentionally snapshot-backed while explicit selector reads use shorter target-scoped evals. Treat that split as the expected fast path, not as degraded behavior.
 - For `playwright_cli`, the runtime sanitizes upstream Chromium launch args so `AutomationControlled` is not injected through a real `--disable-blink-features` switch.
 - For `playwright_cli`, gesture-style pages are a known engine-selection boundary. If the task requires `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, pattern unlock, slider drag, or coordinate-based fallback, prefer starting the session with `engine="selenium_uc"` or `engine="patchright"` instead of assuming the default engine is sufficient.
+- Use `get_session_capabilities(session_id)` when the task may need gesture actions. The capability surface now distinguishes generic coordinate support from formal `gesture_actions` support.
 - Visible MCP browser sessions normally honor `mcp.start_minimized=true`, which should leave the browser in the taskbar instead of stealing foreground focus; users can click it open when they want to watch or take over.
 - Do not enable `mcp.headless=true` just to reduce desktop interference. Headless mode should only be used when the user explicitly asks for headless/regression/background validation.
 - When a `playwright_cli` session closes, the manager should release the named session and clean owned daemon/browser processes; startup also prunes stale temp dirs that are not referenced by live processes. If a browser window remains, treat it as an orphan-process bug and inspect the runtime root/session name.

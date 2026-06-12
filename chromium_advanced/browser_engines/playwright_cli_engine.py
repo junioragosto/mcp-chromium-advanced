@@ -23,10 +23,9 @@ from chromium_advanced.chromium_profile_lib import (
     get_profile_user_data_root,
     get_hidden_subprocess_kwargs,
     now_text,
-    resolve_mcp_headless,
-    resolve_mcp_start_minimized,
     resolve_chromium_binary,
 )
+from chromium_advanced.mcp_runtime_config import resolve_mcp_headless, resolve_mcp_start_minimized
 
 
 TAB_LINE_PATTERN = re.compile(r"^- (\d+): (?:(\(current\)) )?\[(.*)\]\((.*)\)$")
@@ -760,6 +759,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
             "supports_selector_actions": True,
             "supports_highlight": False,
             "supports_coordinates": False,
+            "supports_gesture_actions": False,
             "supports_post_action_context": False,
             "supports_tabs": True,
             "supports_console_messages": True,

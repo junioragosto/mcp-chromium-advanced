@@ -12,9 +12,8 @@ from chromium_advanced.chromium_profile_lib import (
     get_chromium_restore_prompt_suppression_args,
     get_profile_user_data_root,
     now_text,
-    resolve_mcp_headless,
-    resolve_mcp_start_minimized,
 )
+from chromium_advanced.mcp_runtime_config import resolve_mcp_headless, resolve_mcp_start_minimized
 
 
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
@@ -456,6 +455,7 @@ class PatchrightBrowserSession(BrowserSession):
             "supports_selector_actions": True,
             "supports_highlight": True,
             "supports_coordinates": True,
+            "supports_gesture_actions": True,
             "supports_post_action_context": True,
             "supports_tabs": True,
             "supports_console_messages": True,

@@ -58,7 +58,6 @@ from chromium_advanced.chromium_profile_lib import (
     APP_NAME,
     LEGACY_CHATGPT_PROMPT,
     KeepAliveStopController,
-    clear_profile_occupancy,
     build_keepalive_plugin_template,
     build_profile_detail_text,
     delete_keepalive_plugin_source,
@@ -77,13 +76,10 @@ from chromium_advanced.chromium_profile_lib import (
     get_keepalive_site_icon_path,
     get_keepalive_site_ids,
     get_keepalive_site_label,
-    get_occupancy_events_path,
     get_profile_directory_path,
     get_profile_user_data_root,
-    occupancy_entry_is_expired,
     read_recent_jsonl_events,
     is_legacy_default_mirror_root,
-    list_profile_occupancy_entries,
     load_json_file,
     find_running_chromium_processes,
     get_project_root,
@@ -95,8 +91,6 @@ from chromium_advanced.chromium_profile_lib import (
     now_text,
     normalize_language_code,
     profile_sort_key,
-    resolve_mcp_api_token,
-    resolve_mcp_admin_token,
     save_app_config,
     save_keepalive_plugin_source,
     migrate_keepalive_site_id_references,
@@ -104,13 +98,20 @@ from chromium_advanced.chromium_profile_lib import (
     terminate_chromium_processes,
     update_profile_launch_time,
     warm_keepalive_site_icon_cache,
-    write_profile_occupancy,
     write_json_atomic,
     run_keepalive_job,
 )
 from chromium_advanced.browser_engines.constants import BROWSER_ENGINE_OPTIONS, DEFAULT_BROWSER_ENGINE
 from chromium_advanced.browser_engines.factory import normalize_browser_engine_name
 from chromium_advanced.i18n import load_language_options, load_translations
+from chromium_advanced.mcp_runtime_config import resolve_mcp_admin_token, resolve_mcp_api_token
+from chromium_advanced.occupancy_registry import (
+    clear_profile_occupancy,
+    get_occupancy_events_path,
+    list_profile_occupancy_entries,
+    occupancy_entry_is_expired,
+    write_profile_occupancy,
+)
 
 
 SYSTEM_TYPE = platform.system()
@@ -1564,8 +1565,8 @@ class ChromiumManagerWindow(QMainWindow):
 
         manager = SessionManager(config_path=self.config_path)
         try:
-            return manager.list_profile_occupancy()
-        except TimeoutError:
+            return manager.list_profile_occupancy(tolerate_lock_timeout=True)
+        except (TimeoutError, PermissionError, OSError):
             try:
                 self.append_log("Profile occupancy registry is temporarily busy; using empty occupancy cache.", prefix="GUI")
             except Exception:

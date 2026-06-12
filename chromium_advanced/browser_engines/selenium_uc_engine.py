@@ -521,6 +521,7 @@ class SeleniumBrowserSession(BrowserSession):
             "supports_selector_actions": True,
             "supports_highlight": False,
             "supports_coordinates": True,
+            "supports_gesture_actions": True,
             "supports_post_action_context": False,
             "supports_tabs": True,
             "supports_console_messages": True,
