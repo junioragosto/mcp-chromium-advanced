@@ -123,6 +123,24 @@ class KeepaliveGovernanceTests(unittest.TestCase):
         self.assertEqual(result["status"], "skipped")
         self.assertIn("Profile 4 chromium already running", result["message"])
 
+    def test_skipped_keepalive_does_not_run_mirror_refresh(self):
+        config = self.make_config()
+        config["mirror"]["enabled"] = True
+        with mock.patch.object(lib, "load_app_config", return_value=config):
+            with mock.patch.object(lib, "save_app_config", side_effect=lambda cfg, path: cfg):
+                with mock.patch.object(lib, "find_running_chromium_processes", return_value=[{"pid": 999, "name": "chrome.exe"}]):
+                    with mock.patch.object(lib, "get_chromium_processes_for_profile", return_value=[{"pid": 1234}]):
+                        with mock.patch.object(lib.SingleRunLock, "try_acquire", return_value=True):
+                            with mock.patch.object(lib.SingleRunLock, "release", return_value=None):
+                                with mock.patch("chromium_advanced.mirror_manager.MirrorManager.refresh_snapshots") as refresh_snapshots:
+                                    result = lib.run_keepalive_job(
+                                        config_path="dummy.json",
+                                        selected_profiles=["Profile 4"],
+                                        source="manual:profile:Profile 4",
+                                    )
+        self.assertEqual(result["status"], "skipped")
+        refresh_snapshots.assert_not_called()
+
     def test_gui_startup_does_not_immediately_run_scheduler(self):
         source = inspect.getsource(ChromiumManagerWindow.__init__)
         self.assertNotIn("QTimer.singleShot(0, self.on_scheduler_timer)", source)

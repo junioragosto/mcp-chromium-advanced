@@ -275,6 +275,14 @@ class KeepaliveGuiContractTests(unittest.TestCase):
             {"Authorization": "Bearer demo-token"},
         )
 
+    def test_get_mcp_admin_auth_headers_prefers_admin_token(self):
+        window = self.make_window()
+        window.config = normalize_config({"mcp": {"api_token": "demo-token", "admin_token": "admin-demo-token"}})
+        self.assertEqual(
+            window.get_mcp_admin_auth_headers(),
+            {"Authorization": "Bearer admin-demo-token"},
+        )
+
     def test_query_mcp_status_passes_auth_headers(self):
         window = self.make_window()
         window.config = normalize_config({"mcp": {"api_token": "demo-token"}})

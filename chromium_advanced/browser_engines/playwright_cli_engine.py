@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import os
 import re
-import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -142,6 +143,29 @@ def _hostname(value: str) -> str:
         return ""
 
 
+def _normalize_url_for_compare(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return raw.rstrip("/")
+    hostname = str(parsed.hostname or "").lower()
+    scheme = str(parsed.scheme or "").lower()
+    if not hostname or not scheme:
+        return raw.rstrip("/")
+    port = parsed.port
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        port = None
+    netloc = hostname if port is None else f"{hostname}:{port}"
+    path = str(parsed.path or "/").strip() or "/"
+    if path != "/":
+        path = path.rstrip("/") or "/"
+    query = str(parsed.query or "").strip()
+    return f"{scheme}://{netloc}{path}" + (f"?{query}" if query else "")
+
+
 def _classify_console_message(level: str, text: str, url: str = "") -> Dict[str, str]:
     lowered = f"{level} {text} {url}".lower()
     category = "runtime"
@@ -236,6 +260,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
         self,
         *,
         cli_path: str,
+        cli_command: List[str],
         session_name: str,
         config_path: str,
         output_root: str,
@@ -243,6 +268,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
         profile_name: str,
     ):
         self.cli_path = cli_path
+        self.cli_command = list(cli_command or [cli_path])
         self.session_name = session_name
         self.config_path = config_path
         self.output_root = output_root
@@ -254,6 +280,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
         self._sticky_tab_id: str = ""
         self._expected_page_by_tab: Dict[str, Dict[str, str]] = {}
         self._last_observed_page_by_tab: Dict[str, Dict[str, str]] = {}
+        self._command_lock = threading.RLock()
 
     def _remember_page(self, tab_id: str, url: str = "", title: str = "") -> None:
         self._commit_expected_page(tab_id=tab_id, url=url, title=title)
@@ -350,6 +377,75 @@ class PlaywrightCliBrowserSession(BrowserSession):
         }
         return self._attach_page_drift(payload, tab_id=resolved_tab_id, url=url, title=title)
 
+    def _navigation_target_reached(self, target_url: str, current_url: str) -> bool:
+        expected_raw = str(target_url or "").strip()
+        current_raw = str(current_url or "").strip()
+        if not expected_raw or not current_raw:
+            return False
+        if _normalize_url_for_compare(expected_raw) == _normalize_url_for_compare(current_raw):
+            return True
+        try:
+            expected = urlparse(expected_raw)
+            current = urlparse(current_raw)
+        except Exception:
+            return False
+        if _hostname(expected_raw) != _hostname(current_raw):
+            return False
+        expected_path = str(expected.path or "/").strip() or "/"
+        current_path = str(current.path or "/").strip() or "/"
+        expected_path = expected_path.rstrip("/") or "/"
+        current_path = current_path.rstrip("/") or "/"
+        if expected_path != "/" and expected_path != current_path:
+            return False
+        expected_query = str(expected.query or "").strip()
+        current_query = str(current.query or "").strip()
+        if expected_query and expected_query != current_query:
+            return False
+        return True
+
+    def _recover_navigation_timeout(self, *, target_url: str, tab_id: str = "", action_name: str = "navigate") -> Optional[Dict[str, Any]]:
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        try:
+            payload = self._current_page_payload(tab_id=effective_tab_id, commit_expected=False, action_name=action_name)
+            observed_url = str(payload.get("url", "") or "")
+            observed_title = str(payload.get("title", "") or "")
+            resolved_tab_id = str(payload.get("tab_id", "") or effective_tab_id)
+            if self._navigation_target_reached(target_url, observed_url):
+                self._commit_expected_page(resolved_tab_id, url=observed_url, title=observed_title)
+                return self._attach_page_drift(
+                    {
+                        "tab_id": resolved_tab_id,
+                        "url": observed_url,
+                        "title": observed_title,
+                    },
+                    tab_id=resolved_tab_id,
+                    url=observed_url,
+                    title=observed_title,
+                )
+        except Exception:
+            pass
+        try:
+            tabs = self._refresh_tabs()
+            for tab in tabs:
+                candidate_url = str(tab.get("url", "") or "")
+                if self._navigation_target_reached(target_url, candidate_url):
+                    resolved_tab_id = str(tab.get("tab_id", "") or effective_tab_id)
+                    observed_title = str(tab.get("title", "") or "")
+                    self._commit_expected_page(resolved_tab_id, url=candidate_url, title=observed_title)
+                    return self._attach_page_drift(
+                        {
+                            "tab_id": resolved_tab_id,
+                            "url": candidate_url,
+                            "title": observed_title,
+                        },
+                        tab_id=resolved_tab_id,
+                        url=candidate_url,
+                        title=observed_title,
+                    )
+        except Exception:
+            pass
+        return None
+
     def _parse_cli_json(self, stdout: str) -> Any:
         return _parse_json_loose(stdout)
 
@@ -372,35 +468,38 @@ class PlaywrightCliBrowserSession(BrowserSession):
         expect_action_success: bool = True,
         timeout_seconds: int = PLAYWRIGHT_CLI_DEFAULT_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
-        command = [self.cli_path, f"-s={self.session_name}", *args]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-                cwd=self.output_root,
-                timeout=max(1, int(timeout_seconds)),
-                **get_hidden_subprocess_kwargs(),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError(f"playwright-cli command timed out after {max(1, int(timeout_seconds))}s: {' '.join(command)}") from exc
-        result = {
-            "command": command,
-            "returncode": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-            "parsed": self._parse_cli_json(completed.stdout),
-        }
-        if expect_process_success and completed.returncode != 0:
-            raise self._normalize_cli_error(result)
+        command = [*self.cli_command, f"-s={self.session_name}", *args]
+        with self._command_lock:
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                    cwd=self.output_root,
+                    timeout=max(1, int(timeout_seconds)),
+                    **get_hidden_subprocess_kwargs(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise TimeoutError(
+                    f"playwright-cli command timed out after {max(1, int(timeout_seconds))}s: {' '.join(command)}"
+                ) from exc
+            result = {
+                "command": command,
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+                "parsed": self._parse_cli_json(completed.stdout),
+            }
+            if expect_process_success and completed.returncode != 0:
+                raise self._normalize_cli_error(result)
 
-        if expect_action_success and isinstance(result["parsed"], dict) and result["parsed"].get("isError"):
-            raise self._normalize_cli_error(result)
+            if expect_action_success and isinstance(result["parsed"], dict) and result["parsed"].get("isError"):
+                raise self._normalize_cli_error(result)
 
-        return result
+            return result
 
     def _action_error_payload(
         self,
@@ -632,6 +731,24 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 )
         except Exception:
             pass
+        try:
+            tabs = self._refresh_tabs()
+            if tabs:
+                active_tab = next((tab for tab in tabs if tab.get("active")), tabs[0])
+                return BrowserSessionSummary(
+                    current_url=str(active_tab.get("url", "") or ""),
+                    title=str(active_tab.get("title", "") or ""),
+                    alive=True,
+                )
+        except Exception:
+            pass
+        if self._last_tabs:
+            active_tab = next((tab for tab in self._last_tabs if tab.get("active")), self._last_tabs[0])
+            return BrowserSessionSummary(
+                current_url=str(active_tab.get("url", "") or ""),
+                title=str(active_tab.get("title", "") or ""),
+                alive=True,
+            )
         return BrowserSessionSummary(alive=False)
 
     def get_capabilities(self) -> Dict:
@@ -668,7 +785,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
         wait_for_ready: bool = True,
         timeout_seconds: int = 20,
     ) -> Dict:
-        del wait_for_ready, timeout_seconds
+        del wait_for_ready
         original_tabs = self._refresh_tabs()
         original_active = next((tab for tab in original_tabs if tab.get("active")), {})
         original_index = int(original_active.get("index", 0)) if original_active else 0
@@ -681,7 +798,12 @@ class PlaywrightCliBrowserSession(BrowserSession):
         self._select_index(new_index)
         self._sticky_tab_id = _tab_id_for_index(new_index)
         if str(url or "").strip():
-            self._run_cli(["goto", str(url).strip(), "--json"])
+            target_url = str(url).strip()
+            try:
+                self._run_cli(["goto", target_url, "--json"], timeout_seconds=timeout_seconds)
+            except TimeoutError:
+                if not self._recover_navigation_timeout(target_url=target_url, tab_id=self._sticky_tab_id, action_name="open_tab"):
+                    raise
             tabs_after_open = self._refresh_tabs()
             new_tab = next((item for item in tabs_after_open if int(item.get("index", -1)) == new_index), new_tab)
         if not activate:
@@ -737,11 +859,18 @@ class PlaywrightCliBrowserSession(BrowserSession):
         }
 
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
-        del wait_for_ready, timeout_seconds
+        del wait_for_ready
         effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
         if effective_tab_id:
             self._ensure_tab_selected(tab_id=effective_tab_id)
-        self._run_cli(["goto", str(url).strip(), "--json"])
+        target_url = str(url).strip()
+        try:
+            self._run_cli(["goto", target_url, "--json"], timeout_seconds=timeout_seconds)
+        except TimeoutError:
+            recovered = self._recover_navigation_timeout(target_url=target_url, tab_id=effective_tab_id, action_name="navigate")
+            if recovered:
+                return recovered
+            raise
         return self._current_page_payload(tab_id=effective_tab_id, commit_expected=True, action_name="navigate")
 
     def get_current_url(self, tab_id: str = "") -> Dict:
@@ -1566,8 +1695,32 @@ class PlaywrightCliBrowserSession(BrowserSession):
 class PlaywrightCliEngine(BrowserEngine):
     engine_name = "playwright_cli"
 
+    @staticmethod
+    def _resolve_cli_launch_command() -> tuple[str, List[str]]:
+        direct_cli = shutil.which("playwright-cli")
+        cmd_cli = shutil.which("playwright-cli.cmd") or shutil.which("playwright-cli.CMD")
+        if direct_cli:
+            direct_path = Path(direct_cli)
+            try:
+                if direct_path.is_file():
+                    node_exe = direct_path.parent / "node.exe"
+                    cli_js = direct_path.parent / "node_modules" / "@playwright" / "cli" / "playwright-cli.js"
+                    if node_exe.exists() and cli_js.exists():
+                        return str(direct_path), [str(node_exe), str(cli_js)]
+            except Exception:
+                pass
+            return str(direct_path), [str(direct_path)]
+        if cmd_cli:
+            cmd_path = Path(cmd_cli)
+            node_exe = cmd_path.parent / "node.exe"
+            cli_js = cmd_path.parent / "node_modules" / "@playwright" / "cli" / "playwright-cli.js"
+            if node_exe.exists() and cli_js.exists():
+                return str(cmd_path), [str(node_exe), str(cli_js)]
+            return str(cmd_path), [str(cmd_path)]
+        return "", []
+
     def create_session(self, config: Dict, profile_name: str) -> BrowserSession:
-        cli_path = shutil.which("playwright-cli") or shutil.which("playwright-cli.CMD")
+        cli_path, cli_command = self._resolve_cli_launch_command()
         if not cli_path:
             raise RuntimeError("playwright-cli was not found on PATH. Install it with: npm install -g @playwright/cli")
         cleanup_stale_playwright_cli_temp_dirs()
@@ -1629,13 +1782,13 @@ class PlaywrightCliEngine(BrowserEngine):
             print(
                 (
                     f"[{now_text()}] [PLAYWRIGHT-CLI] create_session begin: "
-                    f"profile={profile_name} cli={cli_path} chromium={chromium_binary} "
+                    f"profile={profile_name} cli={cli_path} command={' '.join(cli_command)} chromium={chromium_binary} "
                     f"user_data_root={user_data_root}"
                 ),
                 flush=True,
             )
             command = [
-                cli_path,
+                *cli_command,
                 f"-s={session_name}",
                 "--config",
                 config_path,
@@ -1673,6 +1826,7 @@ class PlaywrightCliEngine(BrowserEngine):
 
             session = PlaywrightCliBrowserSession(
                 cli_path=cli_path,
+                cli_command=cli_command,
                 session_name=session_name,
                 config_path=config_path,
                 output_root=output_root,

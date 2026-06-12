@@ -233,6 +233,23 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:28888/_daemon/status' -Headers @{ Autho
 
 If `mcp.api_token` is configured, every daemon request must send that bearer token. There is no localhost exemption.
 
+Management endpoints are intentionally separate:
+
+- `mcp.admin_token` is for management endpoints only.
+- `/_daemon/worker/start`
+- `/_daemon/worker/stop`
+- `/_daemon/profiles/{profile_name}/reclaim`
+- `/_daemon/reap-expired`
+
+Do not assume the business token can call those endpoints. If `mcp.admin_token`
+is configured, those routes must use the admin bearer token instead.
+
+Worker lifecycle is controlled by `mcp.worker_policy`:
+
+- `lazy`: reclaim soon after idle timeout
+- `sticky`: default, reduces churn for real business traffic
+- `always_on`: do not reclaim because of idle timeout
+
 Then use the MCP tools in this order:
 
 ```text
@@ -244,6 +261,12 @@ start_profile_session(profile_name, engine?)
 browser action tools
 close_profile_session(session_id)
 ```
+
+Session reuse rule:
+
+- For one user task with many browser actions, open one session and keep the same `session_id` until the task is complete.
+- Do not treat `start_profile_session(...)` and `close_profile_session(...)` as per-action wrappers.
+- Only use `reuse_existing=true` when the caller explicitly wants to attach to the same compatible live session for the same profile and engine.
 
 Rules for AI agents:
 
@@ -261,6 +284,21 @@ navigate("https://example.com")
 get_current_url()
 get_page_text()
 close_profile_session(session_id)
+```
+
+Client configuration reminder:
+
+- If the daemon has `mcp.api_token` configured, every MCP client must send `Authorization: Bearer <token>`.
+- There is no localhost or `127.0.0.1` bypass.
+- If you need management HTTP calls, configure and use the separate `mcp.admin_token` instead of reusing the business token by assumption.
+- For Codex, the typical config shape is:
+
+```toml
+[mcp_servers.browserIdentity]
+url = "http://127.0.0.1:28888/mcp"
+
+[mcp_servers.browserIdentity.http_headers]
+Authorization = "Bearer <token>"
 ```
 
 Login-sensitive smoke test:

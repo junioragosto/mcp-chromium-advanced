@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from types import MethodType
 from unittest import mock
 
 from chromium_advanced.browser_engines.playwright_cli_engine import (
@@ -22,6 +23,7 @@ class FakePlaywrightCliSession(PlaywrightCliBrowserSession):
     def __init__(self):
         super().__init__(
             cli_path="playwright-cli",
+            cli_command=["playwright-cli"],
             session_name="fake-session",
             config_path="fake.json",
             output_root=".",
@@ -49,6 +51,7 @@ class FakePlaywrightCliSession(PlaywrightCliBrowserSession):
         self.clicked_targets = []
         self.next_click_page_by_tab = {}
         self.commands = []
+        self.goto_timeout_targets = set()
 
     def _run_cli(self, args, expect_process_success=True, expect_action_success=True, **kwargs):
         del expect_process_success, expect_action_success
@@ -71,6 +74,15 @@ class FakePlaywrightCliSession(PlaywrightCliBrowserSession):
             replacement = self.next_click_page_by_tab.pop(active["tab_id"], None)
             if isinstance(replacement, dict):
                 self.page_by_tab[active["tab_id"]].update(replacement)
+            return {"parsed": {"ok": True}, "stdout": "", "stderr": "", "returncode": 0}
+        if command[:1] == ["goto"]:
+            target_url = command[1]
+            active = next(tab for tab in self.tabs if tab["active"])
+            active["url"] = target_url
+            page = self.page_by_tab[active["tab_id"]]
+            page["url"] = target_url
+            if target_url in self.goto_timeout_targets:
+                raise TimeoutError(f"playwright-cli command timed out after 20s: goto {target_url}")
             return {"parsed": {"ok": True}, "stdout": "", "stderr": "", "returncode": 0}
         if command[:1] == ["eval"]:
             active = next(tab for tab in self.tabs if tab["active"])
@@ -121,9 +133,18 @@ class PlaywrightCliEngineTests(unittest.TestCase):
         temp_dir = tempfile.mkdtemp()
         chrome_path = os.path.join(temp_dir, "chrome.exe")
         profile_root = os.path.join(temp_dir, "UserData")
+        cli_root = os.path.join(temp_dir, "cli-bin")
         os.makedirs(os.path.join(profile_root, "Profile 1"), exist_ok=True)
+        os.makedirs(os.path.join(cli_root, "node_modules", "@playwright", "cli"), exist_ok=True)
         with open(chrome_path, "w", encoding="utf-8"):
             pass
+        node_path = os.path.join(cli_root, "node.exe")
+        cli_path = os.path.join(cli_root, "playwright-cli")
+        cli_cmd_path = os.path.join(cli_root, "playwright-cli.cmd")
+        cli_js_path = os.path.join(cli_root, "node_modules", "@playwright", "cli", "playwright-cli.js")
+        for path in (node_path, cli_path, cli_cmd_path, cli_js_path):
+            with open(path, "w", encoding="utf-8"):
+                pass
         config = {
             "paths": {"chromium_dir": chrome_path, "user_data_root": profile_root},
             "mcp": {"headless": bool(headless), "start_minimized": bool(start_minimized)},
@@ -140,7 +161,11 @@ class PlaywrightCliEngineTests(unittest.TestCase):
         )
         which_patch = mock.patch(
             "chromium_advanced.browser_engines.playwright_cli_engine.shutil.which",
-            return_value="playwright-cli",
+            side_effect=lambda name: {
+                "playwright-cli": cli_path,
+                "playwright-cli.cmd": cli_cmd_path,
+                "playwright-cli.CMD": cli_cmd_path,
+            }.get(name),
         )
         rmtree_patch = mock.patch("chromium_advanced.browser_engines.playwright_cli_engine.shutil.rmtree")
         with run_patch as run_mock, which_patch, rmtree_patch:
@@ -150,6 +175,12 @@ class PlaywrightCliEngineTests(unittest.TestCase):
         with open(config_path, "r", encoding="utf-8") as handle:
             cli_config = json.load(handle)
         return session, run_mock.call_args.args[0], cli_config
+
+    def test_cli_prefers_node_js_chain_over_cmd_launcher(self):
+        session, command, _cli_config = self._create_session_with_mocked_open(headless=False)
+        self.assertTrue(command[0].lower().endswith("node.exe"))
+        self.assertTrue(command[1].lower().endswith("playwright-cli.js"))
+        self.assertEqual(session.cli_command[:2], command[:2])
 
     def test_launch_args_block_upstream_automation_controlled_injection(self):
         args = _normalize_playwright_cli_launch_args([
@@ -298,6 +329,46 @@ class PlaywrightCliEngineTests(unittest.TestCase):
         self.assertIn("summary", console)
         self.assertEqual(network["requests"][0]["category"], "third_party")
         self.assertIn("summary", network)
+
+    def test_get_summary_falls_back_to_tab_list_when_page_probe_temporarily_fails(self):
+        session = FakePlaywrightCliSession()
+        original_eval_json = session._eval_json
+
+        def flaky_eval(self, func_text, tab_id=""):
+            if "location.href" in str(func_text):
+                raise RuntimeError("Target page, context or browser has been closed")
+            return original_eval_json(func_text, tab_id=tab_id)
+
+        session._eval_json = MethodType(flaky_eval, session)
+        summary = session.get_summary()
+        self.assertTrue(summary.alive)
+        self.assertEqual(summary.current_url, "https://panel.awoocd.online/vault")
+        self.assertEqual(summary.title, "Other")
+
+    def test_navigate_recovers_when_cli_goto_times_out_after_page_commit(self):
+        session = FakePlaywrightCliSession()
+        session.tabs[0]["active"] = True
+        session.tabs[1]["active"] = False
+        session.goto_timeout_targets.add("https://github.com/")
+        session.page_by_tab["tab-000"]["title"] = "GitHub"
+        result = session.navigate("https://github.com/", timeout_seconds=20, tab_id="tab-000")
+        self.assertEqual(result["url"], "https://github.com/")
+        self.assertEqual(result["title"], "GitHub")
+        self.assertFalse(result["page_drift"]["drifted"])
+
+    def test_navigate_timeout_still_raises_when_page_never_reaches_target(self):
+        session = FakePlaywrightCliSession()
+        session.tabs[0]["active"] = True
+        session.tabs[1]["active"] = False
+
+        def timeout_without_commit(self, args, expect_process_success=True, expect_action_success=True, **kwargs):
+            if list(args)[:1] == ["goto"]:
+                raise TimeoutError("playwright-cli command timed out after 20s: goto https://github.com/")
+            return FakePlaywrightCliSession._run_cli(self, args, expect_process_success=expect_process_success, expect_action_success=expect_action_success, **kwargs)
+
+        session._run_cli = MethodType(timeout_without_commit, session)
+        with self.assertRaises(TimeoutError):
+            session.navigate("https://github.com/", timeout_seconds=20, tab_id="tab-000")
 
     def test_cleanup_stale_playwright_cli_temp_dirs_removes_empty_dirs(self):
         temp_root = tempfile.mkdtemp()

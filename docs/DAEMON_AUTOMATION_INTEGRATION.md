@@ -12,6 +12,9 @@ Use this path when the caller is a normal local script or service and needs:
 - explicit acquire / heartbeat / release lifecycle control
 - bounded browser actions instead of arbitrary remote code execution
 
+This path is intended for one script to hold one session across a whole task, not
+to acquire and release the same profile around each tiny browser step.
+
 The integration path is:
 
 ```text
@@ -39,13 +42,27 @@ It does not accept:
 
 ## Authentication
 
-Every daemon request must send the configured API token:
+Normal browser automation requests must send the configured business token:
 
 ```http
 Authorization: Bearer <token>
 ```
 
 If the token is missing or wrong, the daemon returns `401`.
+
+Management endpoints use a separate admin token.
+
+- Business token:
+  - `/mcp`
+  - `/_daemon/status`
+  - `/_daemon/profiles`
+  - `/_daemon/profiles/{profile_name}`
+  - `/_daemon/automation/*`
+- Admin token:
+  - `/_daemon/worker/start`
+  - `/_daemon/worker/stop`
+  - `/_daemon/profiles/{profile_name}/reclaim`
+  - `/_daemon/reap-expired`
 
 ## Core Endpoints
 
@@ -60,6 +77,7 @@ Example body:
   "profile_name": "Profile 4",
   "engine": "selenium_uc",
   "owner_label": "gmail_batch_job",
+  "reuse_existing": true,
   "heartbeat_timeout_seconds": 180,
   "runtime_options": {
     "headless": false,
@@ -85,6 +103,17 @@ Typical failures:
 - `400`: bad request body
 - `404`: profile not found
 - `409`: profile already occupied
+
+`reuse_existing=true` can be used when the same profile and engine may already
+have a live session owned by the same automation flow. This reduces repeated
+session startup/shutdown overhead for short-cycle jobs.
+
+Recommended acquire/reuse policy:
+
+- prefer one `acquire` at task start, many `action` calls, then one `release`
+- use `reuse_existing=true` only when the caller intentionally wants to attach to
+  the same compatible live session for the same profile and engine
+- do not open a second same-profile automation session implicitly
 
 ### 2. Action
 
@@ -119,6 +148,7 @@ Currently supported action names:
 - `type_text`
 - `press_key`
 - `run_script`
+- `run_script_batch`
 - `get_console_messages`
 - `get_network_requests`
 - `screenshot`
@@ -131,6 +161,31 @@ Typical failures:
 - `400`: missing `session_id`, missing `action`, unsupported action
 - `404`: session not found
 - `409`: session no longer usable
+
+`run_script_batch` accepts:
+
+```json
+{
+  "session_id": "session-xxxx",
+  "owner_label": "gmail_batch_job",
+  "action": "run_script_batch",
+  "args": {
+    "tab_id": "",
+    "stop_on_error": true,
+    "scripts": [
+      "return document.title;",
+      "return location.href;",
+      "return document.body.innerText.slice(0, 500);"
+    ]
+  }
+}
+```
+
+Use this when one logical extraction currently sends many small `run_script`
+calls. It reduces round-trips and usually lowers both latency and token spend.
+
+For normal task orchestration, also prefer one acquired session with several
+`action` calls over repeated short-lived acquire/release cycles.
 
 ### 3. Heartbeat
 
@@ -191,6 +246,11 @@ Useful daemon endpoints around the automation flow:
 
 Use them to inspect occupancy, recent events, and stale lock recovery state.
 
+Important access rule:
+
+- reading status/profile state uses the business token
+- force reclaim uses the admin token
+
 ## Runtime Options
 
 `runtime_options` is applied as a temporary launch override for the acquired
@@ -217,6 +277,7 @@ The daemon now exposes stable HTTP semantics for automation callers:
 
 - `400`: caller request problem
 - `401`: authentication failure
+- `403`: management endpoint called without the admin token
 - `404`: missing session, profile, or occupancy
 - `409`: occupancy conflict or incompatible reuse attempt
 - `500`: unexpected internal failure
@@ -234,6 +295,14 @@ Latest verified reports:
 
 - `demo/output/managed_daemon_smoke_20260611_230345.json`
 - `demo/output/managed_daemon_failures_20260611_230315.json`
+
+Latest validation status on the current code line:
+
+- isolated daemon regression on `127.0.0.1:38888` with `playwright_cli` passed
+- five consecutive rounds of
+  `acquire -> get_summary -> navigate(https://github.com/) -> run_script(meta[name="user-login"]) -> release`
+  completed successfully on `Profile 1`
+- GitHub login extraction returned `junioragosto` during validation
 
 Important validation rule:
 
@@ -303,3 +372,24 @@ For production callers, use this order:
 5. Send heartbeat if the script is long-running
 6. Release explicitly
 7. Use reclaim only for stale-owner recovery, not as a normal close path
+
+In practical terms:
+
+- keep the same `session_id` for the whole task whenever possible
+- batch multiple JS reads with `run_script_batch` when that matches the task
+- treat `release` as end-of-task cleanup, not as a per-step wrapper
+
+## Current Boundary
+
+This integration surface is now suitable for fixed-script automation that needs:
+
+- real Chromium login state
+- central profile locking
+- bounded browser actions
+- explicit release and stale-owner recovery
+
+It is still not intended for:
+
+- arbitrary remote code upload
+- turning the daemon into a general-purpose script execution host
+- bypassing the same profile-governance rules used by MCP

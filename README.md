@@ -58,8 +58,40 @@ On top of that browser layer, the MCP service adds:
 - shared profile occupancy registry and event stream
 - session start and release APIs
 - profile reclaim and recovery primitives for stale locks or expired script leases
-- a stable daemon endpoint with a lazy-start worker
+- a stable daemon endpoint with a policy-controlled worker (`lazy`, `sticky`, or `always_on`)
 - GUI-based lifecycle control and logs
+
+## Runtime control and security
+
+The daemon now separates business access from management access.
+
+- `api_token`
+  Used by normal MCP clients and daemon automation callers for browser work.
+- `admin_token`
+  Required for management endpoints such as worker lifecycle control and force reclaim.
+
+Current endpoint boundary:
+
+- Business surface:
+  - `/mcp`
+  - `/_daemon/status`
+  - `/_daemon/profiles`
+  - `/_daemon/profiles/{profile_name}`
+  - `/_daemon/automation/*`
+- Admin-only surface:
+  - `/_daemon/worker/start`
+  - `/_daemon/worker/stop`
+  - `/_daemon/profiles/{profile_name}/reclaim`
+  - `/_daemon/reap-expired`
+
+The worker runtime policy is configurable:
+
+- `lazy`
+  Reclaims the worker soon after idle timeout.
+- `sticky`
+  Default. Keeps the worker alive longer for real business traffic and reduces frequent restart churn.
+- `always_on`
+  Never reclaims the worker due to idle timeout.
 
 ## Main capabilities
 
@@ -345,6 +377,10 @@ Typical MCP flow:
 6. perform browser actions
 7. `close_profile_session(session_id)`
 
+For one multi-step task, keep a single session alive across the whole task.
+Do not repeatedly `start_profile_session -> do one action -> close_profile_session`
+for every small step unless the task explicitly needs isolation between steps.
+
 Engine-aware callers may also pass an explicit engine when starting a session. If omitted, the configured GUI default engine is used.
 
 For example:
@@ -352,6 +388,17 @@ For example:
 ```powershell
 $token = "<your-api-token>"
 Invoke-RestMethod -Uri 'http://127.0.0.1:28888/_daemon/status' -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 5 | ConvertTo-Json -Depth 8
+```
+
+If you configure an MCP client manually, the same token must be attached on every
+request. Example Codex config shape:
+
+```toml
+[mcp_servers.browserIdentity]
+url = "http://127.0.0.1:28888/mcp"
+
+[mcp_servers.browserIdentity.http_headers]
+Authorization = "Bearer <token>"
 ```
 
 ```text
@@ -367,6 +414,7 @@ The worker now exposes formal multi-tab operations so agents do not have to rely
 - `browser_open_tab`
 - `browser_activate_tab`
 - `browser_close_tab`
+- Do not mix these session-bound tools with another MCP browser server such as generic `mcp:playwright/*`. A `browserIdentity` `session_id` belongs only to this service.
 
 The practical workflow is:
 
@@ -421,6 +469,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 ### Playwright CLI
 
 - Current preferred engine for normal MCP task execution on this machine when the GUI default is set to `playwright_cli`
+- Once a session is started here, all follow-up tab/click/type/snapshot/diagnostic actions should stay on this MCP service. Cross-routing the same task into another browser MCP is an agent integration bug, not a supported pattern.
 - Best fit for lower-overhead task execution in the new per-profile live runtime
 - Native stealth is weaker than `selenium_uc`
 - Native inspection fidelity is weaker than `patchright`, but the managed runtime lifts it with fallbacks, diagnostics, and structured recovery metadata
