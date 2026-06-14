@@ -14,6 +14,7 @@ build_stage/
 build_validate/
 dist_stage/
 dist_validate/
+out/
 *.spec
 *.ps1
 !build_chromium_manage_gui_exe.ps1
