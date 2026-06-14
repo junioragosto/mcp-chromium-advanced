@@ -62,6 +62,11 @@ Important engine capability examples from WSL remain the same:
 - `patchright`
   prefer this when the task needs snapshot refs, stronger structured extraction, or deeper frontend diagnostics
 
+Runtime isolation option from WSL:
+
+- `runtime_options.incognito=true`
+  use this when the caller wants the same governed profile selection but a fresh isolated browser session state for the target flow
+
 How to switch engines explicitly:
 
 - `can_start_profile_session(profile_name="Profile 4", engine="playwright_cli")`
@@ -139,5 +144,7 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - `run_script` and `run_script_batch` remain high-trust, non-read-only surfaces because they execute arbitrary JavaScript inside a real logged-in browser context. Use those hints when the WSL-side client supports trusted/read-only execution, but do not bypass identity or occupancy checks.
 - Treat partial `playwright_cli` diagnostics with `diagnostic_errors` as useful signal. The runtime intentionally bounds heavy console/network calls, classifies common noise, and avoids long MCP worker stalls.
 - `playwright_cli` simple selector click/fill actions may use the fast DOM eval path before native CLI fallback. This is expected and should be treated as the high-performance path.
+- `playwright_cli` now has safer generic script/text fallback behavior, but difficult dynamic frontends can still produce weaker structured extraction than `patchright`. Prefer engine switching over site-specific assumptions.
+- `runtime_options.incognito=true` remains subject to the same profile occupancy and session-governance rules; it is an isolation mode, not a concurrency bypass.
 - If the target page needs gesture/pattern unlock, drag, slider movement, or coordinate-level mouse fallback, do not assume the default engine is enough. Start the session with `engine="selenium_uc"` or `engine="patchright"` explicitly.
 - If the Windows side reports `external_chromium_running`, do not assume the entire service is blocked. Check whether the target profile itself is the one that is occupied.

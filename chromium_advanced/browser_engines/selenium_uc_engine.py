@@ -1336,7 +1336,9 @@ class SeleniumBrowserSession(BrowserSession):
         return {**self.get_current_url(tab_id=handle), "path": output_path}
 
     def close(self) -> None:
-        self.driver.quit()
+        from chromium_advanced.keepalive_runtime import safe_quit_driver
+
+        safe_quit_driver(self.driver)
 
 
 class SeleniumUCEngine(BrowserEngine):

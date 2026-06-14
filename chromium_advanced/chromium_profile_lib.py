@@ -463,6 +463,7 @@ def build_runtime_config_overrides(
     headless: Optional[bool] = None,
     start_minimized: Optional[bool] = None,
     mute_audio: Optional[bool] = None,
+    incognito: Optional[bool] = None,
     window_size: str = "",
     extra_args: Optional[Sequence[str]] = None,
     engine_name: str = "",
@@ -479,6 +480,10 @@ def build_runtime_config_overrides(
     if str(window_size or "").strip():
         runtime_config["launch"]["window_size"] = str(window_size).strip()
     merged_extra_args = [str(item).strip() for item in runtime_config["launch"].get("extra_args", []) if str(item).strip()]
+    if incognito is not None:
+        merged_extra_args = [item for item in merged_extra_args if item != "--incognito"]
+        if bool(incognito):
+            merged_extra_args.append("--incognito")
     if mute_audio:
         if "--mute-audio" not in merged_extra_args:
             merged_extra_args.append("--mute-audio")
@@ -2487,23 +2492,52 @@ $items | ConvertTo-Json -Compress
 
 
 def get_chromium_processes_for_profile(config: Dict, profile_name: str) -> List[Dict]:
+    return get_chromium_process_map_by_profile(config).get(str(profile_name or "").strip(), [])
+
+
+def get_chromium_process_map_by_profile(config: Dict) -> Dict[str, List[Dict]]:
     normalized = normalize_config(config)
     paths = normalized.get("paths", {})
     chromium_binary = resolve_chromium_binary(paths.get("chromium_dir", ""))
-    profile_root = get_profile_user_data_root(normalized, profile_name)
-    if not chromium_binary or not profile_root or not profile_name:
-        return []
+    profiles = normalized.get("profiles", [])
+    entries: Dict[str, List[Dict]] = {}
+    if not profiles:
+        return entries
+
+    for item in profiles:
+        profile_name = str(item.get("profile_name", "") or "").strip()
+        if profile_name:
+            entries[profile_name] = []
+
+    if not chromium_binary:
+        return entries
 
     chromium_root = os.path.dirname(chromium_binary)
     binary_norm = normalize_fs_path(chromium_binary)
     root_norm = normalize_fs_path(chromium_root)
-    allowed_user_data_roots = {normalize_fs_path(profile_root)}
     legacy_root = str(paths.get("user_data_root", "") or "").strip()
-    if legacy_root:
-        allowed_user_data_roots.add(normalize_fs_path(legacy_root))
-    profile_arg = f"--profile-directory={profile_name}".lower()
 
-    matches: List[Dict] = []
+    profile_specs = []
+    for item in profiles:
+        profile_name = str(item.get("profile_name", "") or "").strip()
+        profile_root = get_profile_user_data_root(normalized, profile_name)
+        if not profile_name or not profile_root:
+            continue
+        allowed_user_data_roots = {normalize_fs_path(profile_root)}
+        if legacy_root:
+            allowed_user_data_roots.add(normalize_fs_path(legacy_root))
+        profile_specs.append(
+            {
+                "profile_name": profile_name,
+                "profile_name_lower": profile_name.lower(),
+                "profile_arg": f"--profile-directory={profile_name}".lower(),
+                "allowed_user_data_roots": allowed_user_data_roots,
+            }
+        )
+
+    if not profile_specs:
+        return entries
+
     for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
         try:
             if proc.info.get("pid") == os.getpid():
@@ -2539,26 +2573,37 @@ def get_chromium_processes_for_profile(config: Dict, profile_name: str) -> List[
             joined_norm = joined.replace("/", os.sep).replace("\\", os.sep).lower()
             joined_lower = joined.lower()
             extracted_user_data = _extract_switch_value(cmdline, "--user-data-dir=")
-            if extracted_user_data:
-                if normalize_fs_path(extracted_user_data) not in allowed_user_data_roots:
-                    continue
-            elif not any(candidate.lower() in joined_norm for candidate in allowed_user_data_roots):
-                continue
-            if profile_arg not in joined_lower and profile_name.lower() not in joined_lower:
-                continue
+            extracted_profile_name = _extract_switch_value(cmdline, "--profile-directory=").strip()
 
-            matches.append(
-                {
-                    "pid": proc.info.get("pid"),
-                    "name": proc.info.get("name", ""),
-                    "path": proc.info.get("exe", "") or (cmdline[0] if cmdline else ""),
-                    "cmdline": cmdline,
-                }
-            )
+            for spec in profile_specs:
+                allowed_user_data_roots = spec["allowed_user_data_roots"]
+                if extracted_user_data:
+                    if normalize_fs_path(extracted_user_data) not in allowed_user_data_roots:
+                        continue
+                elif not any(candidate.lower() in joined_norm for candidate in allowed_user_data_roots):
+                    continue
+
+                if extracted_profile_name:
+                    if extracted_profile_name.lower() != spec["profile_name_lower"]:
+                        continue
+                elif spec["profile_arg"] not in joined_lower and spec["profile_name_lower"] not in joined_lower:
+                    continue
+
+                entries[spec["profile_name"]].append(
+                    {
+                        "pid": proc.info.get("pid"),
+                        "name": proc.info.get("name", ""),
+                        "path": proc.info.get("exe", "") or (cmdline[0] if cmdline else ""),
+                        "cmdline": cmdline,
+                    }
+                )
+                break
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
 
-    return matches
+    for profile_name in list(entries.keys()):
+        entries[profile_name] = sorted(entries[profile_name], key=lambda item: int(item.get("pid") or 0))
+    return entries
 
 
 def terminate_chromium_processes(processes: Sequence[Dict], logger: Optional[Callable[[str], None]] = None) -> int:

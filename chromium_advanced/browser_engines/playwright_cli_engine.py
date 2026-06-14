@@ -633,6 +633,41 @@ class PlaywrightCliBrowserSession(BrowserSession):
             return f"() => {{ {stripped} }}"
         return f"() => ({stripped})"
 
+    def _build_safe_eval_function(self, script: str) -> str:
+        inner = self._build_eval_function(script)
+        return (
+            "() => {"
+            " const __fn = (" + inner + ");"
+            " const __safe = (value, depth = 0) => {"
+            "   if (value === null || value === undefined) return value ?? null;"
+            "   if (depth > 4) return String(value);"
+            "   const t = typeof value;"
+            "   if (t === 'string' || t === 'number' || t === 'boolean') return value;"
+            "   if (t === 'bigint') return String(value);"
+            "   if (t === 'function' || t === 'symbol') return String(value);"
+            "   if (Array.isArray(value)) return value.slice(0, 200).map(item => __safe(item, depth + 1));"
+            "   if (value instanceof Date) return value.toISOString();"
+            "   if (value instanceof Error) return { name: value.name || 'Error', message: value.message || String(value) };"
+            "   if (value && value.nodeType) {"
+            "     return {"
+            "       tag_name: String(value.tagName || '').toLowerCase(),"
+            "       id: String(value.id || ''),"
+            "       class: String(value.className || ''),"
+            "       text: String(value.innerText || value.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 1000)"
+            "     };"
+            "   }"
+            "   if (t === 'object') {"
+            "     const out = {};"
+            "     for (const [k, v] of Object.entries(value).slice(0, 200)) out[String(k)] = __safe(v, depth + 1);"
+            "     return out;"
+            "   }"
+            "   return String(value);"
+            " };"
+            " const __result = __fn();"
+            " return __safe(__result);"
+            " }"
+        )
+
     def _read_target_value(self, target: str) -> str:
         details = self._describe_target_via_eval(target)
         return str(details.get("value", "") or "")
@@ -643,6 +678,41 @@ class PlaywrightCliBrowserSession(BrowserSession):
             self._ensure_tab_selected(tab_id=effective_tab_id)
         payload = self._run_cli(["eval", func_text, "--json"])
         return self._extract_result(payload)
+
+    def _page_text_via_dom_chunks(self, tab_id: str = "") -> str:
+        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+        result = self._eval_json(
+            "() => {"
+            " const root = document.body || document.documentElement;"
+            " if (!root) return '';"
+            " const parts = [];"
+            " const push = (text) => {"
+            "   const normalized = String(text || '').replace(/\\s+/g, ' ').trim();"
+            "   if (!normalized) return;"
+            "   if (parts.includes(normalized)) return;"
+            "   parts.push(normalized);"
+            " };"
+            " const selectors = ["
+            "   '[role=\"main\"] *',"
+            "   'main *',"
+            "   'ytcp-comment-thread',"
+            "   '[data-legacy-thread-id]',"
+            "   'tr',"
+            "   '[role=\"row\"]',"
+            "   'article',"
+            "   'section'"
+            " ];"
+            " for (const selector of selectors) {"
+            "   const nodes = Array.from(document.querySelectorAll(selector));"
+            "   for (const node of nodes.slice(0, 400)) push(node.innerText || node.textContent || '');"
+            "   if (parts.length >= 200) break;"
+            " }"
+            " if (!parts.length) push(root.innerText || root.textContent || '');"
+            " return parts.slice(0, 200).join('\\n');"
+            " }",
+            tab_id=effective_tab_id,
+        )
+        return str(result or "")
 
     def _describe_target_via_eval(self, target: str) -> Dict[str, Any]:
         payload = self._run_cli(
@@ -878,7 +948,10 @@ class PlaywrightCliBrowserSession(BrowserSession):
 
     def get_page_text(self, tab_id: str = "") -> Dict:
         effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
-        result = self._eval_json("() => document.body ? document.body.innerText : ''", tab_id=effective_tab_id)
+        try:
+            result = self._page_text_via_dom_chunks(tab_id=effective_tab_id)
+        except Exception:
+            result = str(self._eval_json("() => document.body ? document.body.innerText : ''", tab_id=effective_tab_id) or "")
         return {**self.get_current_url(tab_id=effective_tab_id), "text": str(result or "")}
 
     def get_page_html(self, tab_id: str = "") -> Dict:
@@ -1173,7 +1246,10 @@ class PlaywrightCliBrowserSession(BrowserSession):
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:
         effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
-        result = self._eval_json(self._build_eval_function(script), tab_id=effective_tab_id)
+        try:
+            result = self._eval_json(self._build_safe_eval_function(script), tab_id=effective_tab_id)
+        except Exception:
+            result = self._eval_json(self._build_eval_function(script), tab_id=effective_tab_id)
         return {**self.get_current_url(tab_id=effective_tab_id), "result": result}
 
     def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:

@@ -45,6 +45,17 @@ For the Chromium Profile Manager service used on this machine:
 
 For multi-step tasks, keep one session open for the whole task. Do not repeatedly start and close the same profile session for each individual page action unless the task explicitly requires isolation.
 
+## Session Red Lines
+
+- Default rule: one user task uses one browserIdentity session.
+- After `start_profile_session(...)`, keep reusing the returned `session_id` until the whole task is finished.
+- Do not wrap each browser step in its own `start_profile_session(...)` / `close_profile_session(...)` pair.
+- Do not close and recreate the session just because a new page, new site area, or new result page is needed.
+- When a new page is needed inside the same task, prefer `browser_open_tab(...)`, `browser_activate_tab(...)`, and normal navigation within the existing session.
+- Only recreate a session when the current session is confirmed unrecoverable, or when the user explicitly asks for isolation.
+- If a step fails, first inspect `session_health`, `recovery_actions`, `resolution_trace`, and page diagnostics before deciding to recreate the session.
+- Repeated acquire/release within one task is considered incorrect usage because it causes browser churn, weakens session stability, and makes real-profile debugging noisy.
+
 ## Required Behavior
 
 - Never guess a real-login identity automatically.
@@ -137,6 +148,22 @@ For long tasks or agent workflows that naturally pause between actions:
 
 Do not treat `start_profile_session` and `close_profile_session` as per-action wrappers.
 
+If the task needs multiple pages, tabs, or navigations, stay inside the same session and expand the work there. Do not interpret "open another page" as permission to release and reacquire the same profile.
+
+Bad pattern:
+
+1. `start_profile_session(...)`
+2. do one click or one page read
+3. `close_profile_session(...)`
+4. `start_profile_session(...)` again for the next step
+
+Correct pattern:
+
+1. `start_profile_session(...)`
+2. perform all page actions for the task
+3. use `browser_open_tab(...)` or navigation when another page is needed
+4. only call `close_profile_session(...)` once the whole task is complete
+
 If an action fails and the page looks dynamic or broken, prefer structured diagnostics before guessing:
 
 1. `browser_get_interaction_context`
@@ -176,6 +203,11 @@ Important engine capability examples:
   prefer this when the task depends on snapshot refs, richer DOM diagnostics, stronger structured extraction, or difficult complex-frontend inspection
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, and `browser_mouse_drag_xy` as a formal capability boundary rather than a generic fallback every engine should support
+
+Runtime isolation option:
+
+- `runtime_options.incognito=true`
+  use this when the caller wants to keep the same governed profile selection but validate a flow without inheriting the normal regular-window site session state
 
 How to switch engines explicitly:
 
@@ -223,11 +255,14 @@ Important engine-switching boundary:
 - `session_health.page_drift` is a first-class signal. When it reports `drifted=true`, prefer `reactivate_expected_tab`, `reopen_expected_url`, or `retry_on_sticky_tab` before assuming the selector itself is bad.
 - `playwright_cli` console/network diagnostics are intentionally bounded and include noise categories. A partial diagnosis with `diagnostic_errors` is better than blocking the worker on a noisy site.
 - For `playwright_cli`, simple selector click/fill actions prefer a fast DOM eval path and fall back to native CLI commands when needed. Untargeted candidate discovery is intentionally snapshot-backed while explicit selector reads use shorter target-scoped evals. Treat that split as the expected fast path, not as degraded behavior.
+- For `playwright_cli`, `run_script` now prefers a safer serialization wrapper and generic text reads can fall back to bounded DOM chunking/page text when direct structured extraction comes back empty.
+- For `playwright_cli`, that fallback improves robustness but not semantic quality. On complex dynamic frontends, structured extraction can still be noisier and weaker than `patchright`; choose the engine accordingly instead of expecting site-specific adapters in the core runtime.
 - For `playwright_cli`, the runtime sanitizes upstream Chromium launch args so `AutomationControlled` is not injected through a real `--disable-blink-features` switch.
 - For `playwright_cli`, gesture-style pages are a known engine-selection boundary. If the task requires `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, pattern unlock, slider drag, or coordinate-based fallback, prefer starting the session with `engine="selenium_uc"` or `engine="patchright"` instead of assuming the default engine is sufficient.
 - Use `get_session_capabilities(session_id)` when the task may need gesture actions. The capability surface now distinguishes generic coordinate support from formal `gesture_actions` support.
 - Visible MCP browser sessions normally honor `mcp.start_minimized=true`, which should leave the browser in the taskbar instead of stealing foreground focus; users can click it open when they want to watch or take over.
 - Do not enable `mcp.headless=true` just to reduce desktop interference. Headless mode should only be used when the user explicitly asks for headless/regression/background validation.
+- `runtime_options.incognito=true` is supported when the task needs isolated validation without normal session carry-over, but it still uses the same profile governance and occupancy rules.
 - When a `playwright_cli` session closes, the manager should release the named session and clean owned daemon/browser processes; startup also prunes stale temp dirs that are not referenced by live processes. If a browser window remains, treat it as an orphan-process bug and inspect the runtime root/session name.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.

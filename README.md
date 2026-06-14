@@ -27,6 +27,8 @@ From a first-contact perspective, there are seven key ideas:
 
 Important account boundary: a Chromium `Profile N` is a browser data container, not a universal website account. The GUI `Account` field is an operator-maintained label or note and should be treated as a hint only. Each website still has its own login state inside that browser profile, so account-sensitive automation must verify the actual logged-in account on the target site before continuing.
 
+Important extraction boundary: this project deliberately stays generic and open. It does not ship site-specific DOM adapters for Gmail, YouTube Studio, GitHub, or other targets. The managed runtime now does safer script serialization plus generic DOM/text fallbacks, but complex dynamic applications can still yield weaker structured extraction under `playwright_cli` than under `patchright`. When the task depends on high-fidelity structured reads from a difficult frontend, prefer `patchright`.
+
 The public user entry point is:
 
 ```bash
@@ -178,7 +180,7 @@ Production direction now implemented in the codebase:
 - stale non-MCP occupancies can be reaped automatically when the owning process disappears or a lease expires
 - the daemon exposes profile status, recent occupancy events, and explicit reclaim endpoints
 - the GUI shows profile occupancy state and provides manual reclaim for recovery workflows
-- managed automation session acquisition can override runtime launch behavior such as `headless`, `start_minimized`, `mute_audio`, `window_size`, and `extra_args` through a temporary runtime config layer
+- managed automation session acquisition can override runtime launch behavior such as `headless`, `incognito`, `start_minimized`, `mute_audio`, `window_size`, and `extra_args` through a temporary runtime config layer
 
 The daemon now also exposes a managed automation HTTP flow for fixed scripts that should use the same governance model without speaking MCP directly:
 
@@ -491,10 +493,13 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Managed runtime fallbacks lift the raw CLI session with generic `snapshot`, candidate enumeration, waiting, target verification, and snapshot-ref style targeting where possible
 - Does not currently implement the formal gesture/XY tool family. If the task depends on drag, slider movement, pattern unlock, or coordinate-level fallback, switch to `selenium_uc` or `patchright`.
 - Uses a fast DOM eval path for simple selector `click` and `fill` operations, then falls back to native `playwright-cli` commands if the DOM path is not safe or fails
+- `run_script` now prefers a safer serialization wrapper, and generic page text reads can fall back to bounded DOM chunking or page-text extraction when direct structured extraction comes back empty
+- Even with that generic fallback, complex dynamic frontends can still produce noisy or low-fidelity structured output. If the task depends on precise structured extraction rather than resilient fallback, prefer `patchright`
 - Classifies console and network noise into categories such as third-party, asset, media, security policy, CORS, and auth, so diagnostics can separate useful signal from common site noise
 - Sanitizes the upstream `playwright-cli` Chromium launch args so `AutomationControlled` is not injected through `--disable-blink-features`
 - Honors `mcp.start_minimized=true` by default, so visible MCP browser sessions start minimized in the taskbar instead of stealing desktop focus while still allowing the user to click in and take over when needed
 - Keeps `mcp.headless=false` by default; headless mode is only for explicit user-requested regression or background validation, not the normal MCP browsing path
+- Supports `runtime_options.incognito=true` for isolated validation when the caller wants the same governed profile path but does not want to inherit the normal regular-window session state
 - On session close, the runtime attempts to terminate owned `playwright-cli` daemon and Chromium processes and then cleans isolated runtime directories; startup also prunes stale empty or old `chromium-advanced-playwright-cli-*` temp directories that are not referenced by live processes
 - Shared-root runtime is now treated as a migration-only legacy layout. Normal operation should use `paths.user_data_profiles_root`
 - Keepalive is not routed through `playwright_cli` in this stage
@@ -521,6 +526,12 @@ The repository includes reusable agent skill templates in:
 - `docs/skill_templates/`
 
 These files are examples for Codex or other AI workflows that need to consume this MCP service consistently. They are templates, not an auto-loaded runtime directory.
+
+The skill guidance should explicitly tell agents that:
+
+- `playwright_cli` is the normal default for ordinary MCP work
+- `patchright` should be selected when structured extraction or deep frontend diagnostics matter more than throughput
+- `runtime_options.incognito=true` is available when a flow should be validated without inheriting the current regular-window session state
 
 ## Keepalive Plugins
 

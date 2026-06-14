@@ -108,7 +108,7 @@ class SessionManager:
         return load_app_config(self.config_path)
 
     def _load_occupancy_registry(self) -> Dict:
-        return load_profile_occupancy_registry()
+        return load_profile_occupancy_registry(tolerate_lock_timeout=True)
 
     def _get_starting_profiles_snapshot(self) -> Dict[str, float]:
         with self._lock:
@@ -208,30 +208,47 @@ class SessionManager:
         last_heartbeat_at: float = 0.0,
         reclaimable: bool = False,
     ) -> None:
-        write_profile_occupancy(
-            profile_name,
-            scene_type=scene_type,
-            state=state,
-            owner_label=owner_label,
-            engine_name=engine_name,
-            session_id=session_id,
-            details=details,
-            event_source="session_manager",
-            owner_pid=owner_pid,
-            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
-            lease_expires_at=lease_expires_at,
-            last_heartbeat_at=last_heartbeat_at,
-            reclaimable=reclaimable,
+        self._run_occupancy_write_with_retry(
+            lambda: write_profile_occupancy(
+                profile_name,
+                scene_type=scene_type,
+                state=state,
+                owner_label=owner_label,
+                engine_name=engine_name,
+                session_id=session_id,
+                details=details,
+                event_source="session_manager",
+                owner_pid=owner_pid,
+                heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+                lease_expires_at=lease_expires_at,
+                last_heartbeat_at=last_heartbeat_at,
+                reclaimable=reclaimable,
+            )
         )
 
     def _clear_profile_occupancy(self, profile_name: str, *, session_id: str = "", event_state: str = "released") -> None:
-        clear_profile_occupancy(
-            profile_name,
-            session_id=session_id,
-            event_state=event_state,
-            details={"cleared": True},
-            event_source="session_manager",
+        self._run_occupancy_write_with_retry(
+            lambda: clear_profile_occupancy(
+                profile_name,
+                session_id=session_id,
+                event_state=event_state,
+                details={"cleared": True},
+                event_source="session_manager",
+            )
         )
+
+    def _run_occupancy_write_with_retry(self, func, *, attempts: int = 5, sleep_seconds: float = 0.1):
+        attempts = max(1, int(attempts or 1))
+        last_error = None
+        for _ in range(attempts):
+            try:
+                return func()
+            except TimeoutError as exc:
+                last_error = exc
+                time.sleep(max(0.01, float(sleep_seconds or 0.01)))
+        if last_error is not None:
+            raise last_error
+        return func()
 
     def get_profile_occupancy(self, profile_name: str) -> Dict:
         profile_name = str(profile_name or "").strip()
@@ -244,7 +261,7 @@ class SessionManager:
 
     def list_profile_occupancy(self, *, tolerate_lock_timeout: bool = False) -> Dict[str, Dict]:
         self.reconcile_stale_profile_occupancy()
-        return list_profile_occupancy_entries(tolerate_lock_timeout=tolerate_lock_timeout)
+        return list_profile_occupancy_entries(tolerate_lock_timeout=True if not tolerate_lock_timeout else tolerate_lock_timeout)
 
     def list_recent_occupancy_events(self, limit: int = 100) -> List[Dict]:
         return read_recent_jsonl_events(get_occupancy_events_path(), limit=limit)
@@ -347,7 +364,7 @@ class SessionManager:
     def reconcile_stale_profile_occupancy(self) -> List[Dict]:
         config = normalize_config(self._load_config())
         results: List[Dict] = []
-        registry_entries = list_profile_occupancy_entries()
+        registry_entries = list_profile_occupancy_entries(tolerate_lock_timeout=True)
         profile_names = self._get_profile_names()
         with self._lock:
             self._purge_dead_sessions_locked(probe_browser=False)
@@ -960,6 +977,7 @@ class SessionManager:
                     headless=runtime_options.get("headless"),
                     start_minimized=runtime_options.get("start_minimized"),
                     mute_audio=runtime_options.get("mute_audio"),
+                    incognito=runtime_options.get("incognito"),
                     window_size=str(runtime_options.get("window_size", "") or "").strip(),
                     extra_args=runtime_options.get("extra_args") if isinstance(runtime_options.get("extra_args"), list) else [],
                     engine_name=resolved_engine_name,

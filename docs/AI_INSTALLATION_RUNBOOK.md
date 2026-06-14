@@ -48,6 +48,12 @@ Supported browser engines:
 - `selenium_uc`: best stealth-oriented option, useful when avoiding automation detection matters more than throughput.
 - `patchright`: strongest structured inspection/debug path, useful for complex frontend diagnosis.
 
+Practical engine-selection rule for AI operators:
+
+- choose `playwright_cli` for ordinary browsing, forms, navigation, screenshots, multi-tab work, and lower-overhead production calls
+- choose `selenium_uc` when stealth or anti-detection tolerance is the first concern
+- choose `patchright` when the task depends on high-quality structured extraction or difficult complex-frontend diagnostics
+
 Changing the GUI default engine affects only future sessions. Existing sessions keep the engine used at startup.
 
 ## 2. Environment Detection Checklist
@@ -177,6 +183,10 @@ Configure these fields in the GUI or config file:
 - `mcp.start_minimized`: normally `true`, so MCP browser windows stay in the taskbar instead of stealing foreground focus.
 - `keepalive.schedule_time`: recommended low-usage time, commonly `06:00`.
 - `keepalive.plugin_dirs`: optional trusted local directories for Python keepalive site plugins; the GUI keepalive settings panel can also edit this field.
+
+Runtime note for callers:
+
+- `runtime_options.incognito=true` is supported for managed MCP/daemon sessions when the caller wants to validate a flow without inheriting the normal regular-window session state.
 
 Keepalive plugins can add new site logic without rebuilding the app. The GUI exposes a dedicated Keepalive Plugins tab for inspecting built-in plugin source and editing trusted local plugins. See `docs/KEEPALIVE_PLUGIN_GUIDE.md`.
 
@@ -317,6 +327,7 @@ Use this policy unless the user gives a different explicit instruction:
 - Use `playwright_cli` for ordinary browsing, forms, navigation, multi-tab work, screenshots, console/network checks, and parallel mirror-isolated workloads.
 - Use `selenium_uc` for stealth-sensitive sites, or when the user reports automation banners/detection problems and accepts lower throughput.
 - Use `patchright` for complex frontend debugging, structured snapshots, target inspection, and rich diagnostics.
+- If the task specifically needs isolated validation without normal session carry-over, keep the selected profile the same and add `runtime_options.incognito=true`.
 
 Do not assume an engine switch affects an already running session. Close the current session and start a new one with the desired engine.
 

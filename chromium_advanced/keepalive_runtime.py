@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import inspect
 import os
+import signal
 import random
 import re
 import threading
@@ -70,6 +71,61 @@ def cleanup_keepalive_profile_processes(
     return _lib().terminate_chromium_processes(matches, logger=logger)
 
 
+def _get_driver_service_pid(driver) -> int:
+    try:
+        service = getattr(driver, "service", None)
+        process = getattr(service, "process", None)
+        pid = int(getattr(process, "pid", 0) or 0)
+        if pid > 0:
+            return pid
+    except Exception:
+        pass
+    return 0
+
+
+def terminate_driver_service_process(driver) -> int:
+    pid = _get_driver_service_pid(driver)
+    if pid <= 0:
+        return 0
+    try:
+        proc = _lib().psutil.Process(pid)
+    except Exception:
+        return 0
+
+    killed = 0
+    try:
+        for child in proc.children(recursive=True):
+            try:
+                child.kill()
+                killed += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        proc.kill()
+        killed += 1
+    except Exception:
+        pass
+    return killed
+
+
+def safe_quit_driver(driver) -> int:
+    terminated = 0
+    if driver is None:
+        return terminated
+    try:
+        driver.quit()
+    except Exception:
+        pass
+    try:
+        terminated += terminate_driver_service_process(driver)
+    except Exception:
+        pass
+    return terminated
+
+
 def is_browser_closed_error(exc: Exception) -> bool:
     text = str(exc or "").lower()
     markers = (
@@ -105,7 +161,7 @@ class KeepAliveStopController:
             driver = self._current_driver
         if driver is not None:
             try:
-                driver.quit()
+                safe_quit_driver(driver)
             except Exception:
                 pass
 
@@ -1177,7 +1233,7 @@ def run_profile_keepalive(
             stop_controller.clear_driver(driver)
         if driver:
             try:
-                driver.quit()
+                safe_quit_driver(driver)
             except Exception:
                 pass
         cleanup_keepalive_profile_processes(config, profile_name, before_pids=before_pids, logger=logger)

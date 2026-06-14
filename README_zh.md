@@ -27,6 +27,8 @@ MCP Chromium Advanced 是一个用于管理真实 Chromium 浏览器 Profile 的
 
 重要账号边界：Chromium 的 `Profile N` 是浏览器数据容器，不是所有网站共用的账号。GUI 里的 `Account` 字段只是人工维护的标签或备注，只能作为线索，不能当作 GitHub、YouTube、ChatGPT、Gmail、Google 等目标网站当前登录账号的证明。涉及账号正确性的自动化任务，必须进入目标网站后读取该网站自己的登录状态再继续。
 
+重要提取边界：项目刻意保持通用、开源、可复用，不会在核心代码里为 Gmail、YouTube Studio、GitHub 等站点写死专用 DOM 适配器。当前受管运行时已经补上了更安全的 `run_script` 序列化、通用 DOM fallback 和 page-text fallback，但在复杂动态前端上，`playwright_cli` 的结构化提取质量仍可能弱于 `patchright`。如果任务核心在于高保真结构化抽取，而不是一般性的浏览、点击、填写、截图，应优先切到 `patchright`。
+
 公开入口仍然是：
 
 ```bash
@@ -436,10 +438,13 @@ MCP trace 也会写入轮转 JSONL 文件，GUI 的 MCP 状态面板中会显示
 - 当前已覆盖的稳定能力包括：会话启动、导航、多标签基础、脚本执行、type / click / key、截图、console、requests 和粗粒度页面诊断
 - 受管运行时为它补充通用 `snapshot`、候选元素枚举、等待、target 验证与 snapshot-ref 风格定位
 - 简单 selector `click` / `fill` 会优先走快速 DOM eval path，失败时再退回原生命令
+- `run_script` 会优先走更安全的结果序列化包装；如果直接结构化抽取结果为空，通用文本提取会退回到 bounded DOM chunk / page-text fallback
+- 即便如此，在复杂动态前端上结构化提取仍可能出现噪音较大、保真度不够高的情况；如果任务依赖高质量结构化读数，而不是页面文本兜底，应优先切到 `patchright`
 - 会把 console / network 噪音分类，例如 third-party、asset、media、security policy、CORS、auth
 - 会清洗上游 Chromium launch args，避免通过真实 `--disable-blink-features` 注入 `AutomationControlled`
 - 默认遵守 `mcp.start_minimized=true`，可见 MCP 浏览器会最小化停在任务栏，而不是抢前台焦点
 - 默认保持 `mcp.headless=false`；headless 只用于用户明确要求的回归 / 后台验证
+- 支持 `runtime_options.incognito=true`，用于“同一个 Profile 治理路径下的无痕验证”场景，例如想验证未继承常规标签页会话状态的流程
 - 关闭 session 时会尝试清理自有 `playwright-cli` daemon / Chromium 进程，并回收隔离运行时目录；启动时也会清理不再被活进程引用的陈旧临时目录
 - 共享 root 运行时现在仅作为迁移兼容布局，正常运行应使用 `paths.user_data_profiles_root`
 - 当前还不支持正式的坐标/手势工具族；如果任务依赖拖拽、滑块、图案解锁或坐标级 fallback，应切到 `selenium_uc` 或 `patchright`
@@ -459,6 +464,12 @@ keepalive 站点现在走插件化运行时。内置站点包括 `chatgpt`、`go
 - `docs/skill_templates/`
 
 这些文件是给 Codex 或其它 AI 工作流复用的模板，不是程序自动装载的运行目录。
+
+当前 skill / 模板文档应该明确告诉调用方三件事：
+
+- `playwright_cli` 是普通 MCP 浏览任务的默认优先引擎
+- 当任务更依赖高质量结构化抽取、复杂前端诊断时，应显式切到 `patchright`
+- 当任务要验证“同一个 Profile，但不要继承当前常规会话状态”时，可以传 `runtime_options.incognito=true`
 
 ## 隐私与安全
 

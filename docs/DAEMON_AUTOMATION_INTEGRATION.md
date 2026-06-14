@@ -81,6 +81,7 @@ Example body:
   "heartbeat_timeout_seconds": 180,
   "runtime_options": {
     "headless": false,
+    "incognito": false,
     "start_minimized": true,
     "mute_audio": true,
     "window_size": "1280,720",
@@ -259,6 +260,7 @@ browser session.
 Supported keys in the current implementation:
 
 - `headless`
+- `incognito`
 - `start_minimized`
 - `mute_audio`
 - `window_size`
@@ -268,8 +270,10 @@ Supported keys in the current implementation:
 Important rule:
 
 - `headless` should only be enabled when the caller explicitly needs headless.
+- `incognito=true` is for isolation-sensitive validation. Use it when the task should avoid inheriting the normal regular-window site session state for the selected profile.
 - For user-observable desktop workflows, prefer `start_minimized=true` instead
   of stealing the foreground window.
+- `incognito` does not bypass profile governance. The same profile still stays exclusively occupied for that managed session.
 
 ## Error Contract
 
@@ -332,6 +336,7 @@ with httpx.Client(headers=headers, timeout=90.0) as client:
             "owner_label": "demo_script",
             "heartbeat_timeout_seconds": 180,
             "runtime_options": {
+                "incognito": False,
                 "start_minimized": True,
                 "mute_audio": True,
                 "window_size": "1280,720",
@@ -387,6 +392,12 @@ This integration surface is now suitable for fixed-script automation that needs:
 - central profile locking
 - bounded browser actions
 - explicit release and stale-owner recovery
+
+Additional practical boundary:
+
+- `playwright_cli` is a strong default for ordinary navigation/click/type/screenshot flows and lower-overhead daemon automation.
+- If the script depends on high-fidelity structured extraction from a complex dynamic frontend, `patchright` is still the better engine.
+- If the script needs to validate a no-login or isolated-session flow while still staying inside the same profile governance path, use `runtime_options.incognito=true`.
 
 It is still not intended for:
 

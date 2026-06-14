@@ -6,6 +6,7 @@ from typing import Dict, Optional
 from chromium_advanced.chromium_profile_lib import (
     SingleRunLock,
     append_jsonl_event,
+    clear_stale_lockfile,
     get_state_storage_dir,
     load_json_file,
     now_text,
@@ -14,6 +15,8 @@ from chromium_advanced.chromium_profile_lib import (
 
 
 _OCCUPANCY_REGISTRY_LOCK = threading.RLock()
+OCCUPANCY_REGISTRY_LOCK_TIMEOUT_SECONDS = 15.0
+OCCUPANCY_REGISTRY_LOCK_POLL_INTERVAL_SECONDS = 0.05
 
 
 def get_occupancy_registry_path() -> str:
@@ -37,12 +40,16 @@ def _load_profile_occupancy_registry_unlocked() -> Dict:
     return loaded
 
 
-def _acquire_occupancy_registry_file_lock(timeout_seconds: float = 5.0, poll_interval_seconds: float = 0.05):
+def _acquire_occupancy_registry_file_lock(
+    timeout_seconds: float = OCCUPANCY_REGISTRY_LOCK_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = OCCUPANCY_REGISTRY_LOCK_POLL_INTERVAL_SECONDS,
+):
     lock = SingleRunLock(get_occupancy_registry_lock_path(), stale_seconds=60)
     deadline = time.time() + max(0.1, float(timeout_seconds or 0.1))
     while True:
         if lock.try_acquire():
             return lock
+        clear_stale_lockfile(get_occupancy_registry_lock_path(), stale_seconds=5)
         if time.time() >= deadline:
             raise TimeoutError("timed out acquiring occupancy registry lock")
         time.sleep(max(0.01, float(poll_interval_seconds or 0.01)))
@@ -51,8 +58,8 @@ def _acquire_occupancy_registry_file_lock(timeout_seconds: float = 5.0, poll_int
 def load_profile_occupancy_registry(
     *,
     tolerate_lock_timeout: bool = False,
-    timeout_seconds: float = 5.0,
-    poll_interval_seconds: float = 0.05,
+    timeout_seconds: float = OCCUPANCY_REGISTRY_LOCK_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = OCCUPANCY_REGISTRY_LOCK_POLL_INTERVAL_SECONDS,
 ) -> Dict:
     with _OCCUPANCY_REGISTRY_LOCK:
         try:
