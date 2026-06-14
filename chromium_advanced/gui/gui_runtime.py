@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 
 from PyQt5.QtCore import QLockFile, QTime
 from PyQt5.QtGui import QIcon
+from PyQt5.QtNetwork import QLocalSocket
 
 from chromium_advanced.chromium_profile_lib import APP_NAME, get_project_root, get_state_storage_dir
 
@@ -21,6 +22,7 @@ SYSTEM_TYPE = platform.system()
 WINDOWS_RUN_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 PACKAGED_APP_ICON_PATH = os.path.join("resources", "chromium_profile_manager.ico")
 SINGLE_INSTANCE_MUTEX_NAME = "Local\\ChromiumProfileManagerGuiSingleton"
+SINGLE_INSTANCE_SERVER_NAME = "ChromiumProfileManagerGuiSingletonServer"
 MCP_DAEMON_EXE_NAME = "ChromiumMcpDaemon.exe"
 MCP_WORKER_EXE_NAME = "ChromiumMcpWorker.exe"
 
@@ -36,6 +38,21 @@ def show_single_instance_message() -> None:
             sys.stderr.write("Chromium Profile Manager is already running.\n")
         except Exception:
             pass
+
+
+def notify_existing_instance(timeout_ms: int = 1200) -> bool:
+    try:
+        socket_client = QLocalSocket()
+        socket_client.connectToServer(SINGLE_INSTANCE_SERVER_NAME)
+        if not socket_client.waitForConnected(timeout_ms):
+            return False
+        socket_client.write(b"show\n")
+        socket_client.flush()
+        socket_client.waitForBytesWritten(timeout_ms)
+        socket_client.disconnectFromServer()
+        return True
+    except Exception:
+        return False
 
 
 def acquire_single_instance_guard():
@@ -226,16 +243,22 @@ def fetch_json(url: str, timeout: float = 1.5, headers: Optional[Dict[str, str]]
 
 def get_frozen_companion_executable(stem: str) -> str:
     base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    parent_dir = os.path.dirname(base_dir)
     extension = ".exe" if SYSTEM_TYPE == "Windows" else ""
     candidates = [
         os.path.join(base_dir, f"{stem}{extension}"),
         os.path.join(base_dir, stem, f"{stem}{extension}"),
         os.path.join(base_dir, stem, stem, f"{stem}{extension}"),
+        os.path.join(parent_dir, f"{stem}{extension}"),
+        os.path.join(parent_dir, stem, f"{stem}{extension}"),
+        os.path.join(parent_dir, stem, stem, f"{stem}{extension}"),
     ]
     for candidate in candidates:
         if os.path.exists(candidate):
             return candidate
-    return candidates[0]
+    raise FileNotFoundError(
+        f"frozen companion executable not found for {stem}: {', '.join(candidates)}"
+    )
 
 
 def get_startup_command() -> str:

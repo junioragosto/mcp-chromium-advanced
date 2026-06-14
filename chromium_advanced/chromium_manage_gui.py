@@ -19,6 +19,7 @@ if __package__ in (None, ""):
 
 from PyQt5.QtCore import QProcess, QTimer, Qt, QSize
 from PyQt5.QtGui import QColor, QGuiApplication, QIcon
+from PyQt5.QtNetwork import QLocalServer
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -112,6 +113,7 @@ from chromium_advanced.gui.gui_runtime import (
     get_frozen_companion_executable,
     is_system_auto_start_enabled,
     parse_schedule_time,
+    notify_existing_instance,
     qtime_to_string,
     release_single_instance_guard,
     schedule_time_to_datetime,
@@ -265,6 +267,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.occupancy_event_file_offset = 0
         self.pending_ui_refresh_flags: Dict[str, bool] = {}
         self.keepalive_icon_refresh_scheduled = False
+        self._single_instance_server: Optional[QLocalServer] = None
 
         self.ensure_mcp_api_token_persisted()
         self.setWindowTitle(self.trf("window_title", version=APP_VERSION))
@@ -277,6 +280,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.fit_window_to_screen()
         self.retranslate_ui()
         self.setup_tray_icon()
+        self.setup_single_instance_server()
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
         self.refresh_all()
@@ -2813,6 +2817,46 @@ class ChromiumManagerWindow(QMainWindow):
         self.force_exit_requested = True
         self.close()
 
+    def setup_single_instance_server(self):
+        try:
+            QLocalServer.removeServer("ChromiumProfileManagerGuiSingletonServer")
+        except Exception:
+            pass
+        server = QLocalServer(self)
+        if not server.listen("ChromiumProfileManagerGuiSingletonServer"):
+            self._single_instance_server = None
+            return
+        server.newConnection.connect(self.on_single_instance_server_connection)
+        self._single_instance_server = server
+
+    def on_single_instance_server_connection(self):
+        if self._single_instance_server is None:
+            return
+        while self._single_instance_server.hasPendingConnections():
+            socket_client = self._single_instance_server.nextPendingConnection()
+            if socket_client is None:
+                continue
+            socket_client.readyRead.connect(
+                lambda client=socket_client: self.on_single_instance_socket_ready(client)
+            )
+            socket_client.disconnected.connect(socket_client.deleteLater)
+
+    def on_single_instance_socket_ready(self, socket_client):
+        try:
+            payload = bytes(socket_client.readAll()).decode("utf-8", errors="replace").strip().lower()
+        except Exception:
+            payload = ""
+        if payload.startswith("show"):
+            self.show_from_tray()
+            if self.isMinimized():
+                self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        try:
+            socket_client.disconnectFromServer()
+        except Exception:
+            pass
+
     def showEvent(self, event):
         super().showEvent(event)
         self.update_tray_actions()
@@ -2964,6 +3008,7 @@ def main():
 
     single_instance_guard = acquire_single_instance_guard()
     if not single_instance_guard:
+        notify_existing_instance()
         show_single_instance_message()
         raise SystemExit(0)
 

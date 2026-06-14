@@ -165,11 +165,16 @@ def build_worker_command(
             os.path.join(parent_dir, "ChromiumMcpWorker", f"ChromiumMcpWorker{extension}"),
             os.path.join(parent_dir, "ChromiumMcpWorker", "ChromiumMcpWorker", f"ChromiumMcpWorker{extension}"),
         ]
-        worker_executable = candidates[0]
+        worker_executable = ""
         for candidate in candidates:
             if os.path.exists(candidate):
                 worker_executable = candidate
                 break
+        if not worker_executable:
+            raise FileNotFoundError(
+                "ChromiumMcpWorker companion executable not found. Checked: "
+                + ", ".join(candidates)
+            )
         worker_args = [
             worker_executable,
             "--transport",

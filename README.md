@@ -531,13 +531,13 @@ Version `0.1.0` is the first formal release baseline for cross-platform build au
 
 For this release line:
 
-- GitHub Actions now has a cross-platform build workflow for Windows, macOS, and Linux
-- browser assets are intentionally not bundled yet
+- GitHub Actions now builds Windows, macOS x64, macOS arm64, and Linux artifacts
+- browser binaries and ChromeDriver are intentionally not bundled yet
 - each target machine is expected to configure its own Chromium binary and ChromeDriver paths after launch
-- the current packaging goal is to stabilize the GUI, daemon, worker, Python runtime, Node runtime, and MCP service distribution first
-- release artifacts should include the reusable skill templates under `docs/skill_templates/` so operators can wire Codex or WSL clients without returning to the repository
+- release artifacts bundle the GUI app, daemon, worker runtime, `resources/`, skill templates, example config, and release docs
+- release artifacts also bundle the latest fingerprint plugin zip from `omegaee/my-fingerprint` together with release metadata
 
-This keeps release engineering simple while browser/runtime asset management is still being standardized.
+This keeps release engineering simple while browser/runtime asset management is still being standardized and still gives operators a usable install bundle.
 
 The release build entrypoints are now:
 
@@ -549,13 +549,13 @@ The release build entrypoints are now:
 Current packaging behavior by platform:
 
 - Windows:
-  reuses the existing PyInstaller-based desktop build and packages `dist/` into a zip artifact
+  reuses the existing PyInstaller-based desktop build and packages the runnable app plus bundled docs/resources into a zip artifact
 - macOS:
-  packages a portable source/runtime bundle for the current codebase
+  builds native PyInstaller binaries on both Intel and Apple Silicon runners and packages the runnable app plus bundled docs/resources into zip artifacts
 - Linux:
-  packages a portable source/runtime bundle as `tar.gz`
+  builds native PyInstaller binaries and packages the runnable app plus bundled docs/resources as `tar.gz`
 
-This `0.1.0` release line is therefore a real cross-platform build baseline, but not yet a fully self-contained browser-assets release.
+This `0.1.0` release line is therefore a real cross-platform runnable release baseline, but not yet a browser-bundled release.
 
 ## Skill templates
 

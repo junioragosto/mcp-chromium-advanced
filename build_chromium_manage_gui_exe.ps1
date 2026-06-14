@@ -78,11 +78,15 @@ Invoke-ExternalChecked -StepName "Build ChromiumProfileManager" -Command {
       --workpath $stageBuildRoot `
       --distpath $stageDistRoot `
       --noconsole `
-      --onefile `
+      --onedir `
       --name "ChromiumProfileManager" `
       --icon $iconPath `
       --copy-metadata "fastmcp" `
       --collect-all "patchright" `
+      --hidden-import "selenium.webdriver.common.action_chains" `
+      --hidden-import "selenium.webdriver.common.actions.action_builder" `
+      --hidden-import "selenium.webdriver.common.actions.pointer_input" `
+      --hidden-import "selenium.webdriver.common.actions.mouse_button" `
       --collect-data "rich" `
       --collect-submodules "rich._unicode_data" `
       --add-data "resources;resources" `
@@ -97,6 +101,10 @@ Invoke-ExternalChecked -StepName "Build ChromiumMcpDaemon" -Command {
       --onedir `
       --name "ChromiumMcpDaemon" `
       --copy-metadata "fastmcp" `
+      --hidden-import "selenium.webdriver.common.action_chains" `
+      --hidden-import "selenium.webdriver.common.actions.action_builder" `
+      --hidden-import "selenium.webdriver.common.actions.pointer_input" `
+      --hidden-import "selenium.webdriver.common.actions.mouse_button" `
       --collect-data "rich" `
       --collect-submodules "rich._unicode_data" `
       $daemonScriptPath
@@ -111,6 +119,10 @@ Invoke-ExternalChecked -StepName "Build ChromiumMcpWorker" -Command {
       --name "ChromiumMcpWorker" `
       --copy-metadata "fastmcp" `
       --collect-all "patchright" `
+      --hidden-import "selenium.webdriver.common.action_chains" `
+      --hidden-import "selenium.webdriver.common.actions.action_builder" `
+      --hidden-import "selenium.webdriver.common.actions.pointer_input" `
+      --hidden-import "selenium.webdriver.common.actions.mouse_button" `
       --collect-data "rich" `
       --collect-submodules "rich._unicode_data" `
       $workerScriptPath

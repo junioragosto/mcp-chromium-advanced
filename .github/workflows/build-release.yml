@@ -14,8 +14,10 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: chromium-profile-manager-windows-x64
-          - os: macos-latest
-            artifact_name: chromium-profile-manager-macos
+          - os: macos-13
+            artifact_name: chromium-profile-manager-macos-x64
+          - os: macos-14
+            artifact_name: chromium-profile-manager-macos-arm64
           - os: ubuntu-latest
             artifact_name: chromium-profile-manager-linux-x64
     runs-on: ${{ matrix.os }}
