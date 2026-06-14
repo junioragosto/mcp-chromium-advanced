@@ -36,9 +36,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from chromium_advanced.browser_engines.constants import DEFAULT_BROWSER_ENGINE
 from chromium_advanced.browser_engines.factory import normalize_browser_engine_name
+from chromium_advanced.version import get_app_version
 
 
 APP_NAME = "ChromiumProfileManager"
+APP_DISPLAY_NAME = "Chromium Profile Manager"
+APP_VERSION = get_app_version()
 CONFIG_FILENAME = "chromium_profiles.json"
 LOCK_FILENAME = "chromium_keepalive.lock"
 MIRROR_LOCK_FILENAME = "chromium_mirroring.lock"

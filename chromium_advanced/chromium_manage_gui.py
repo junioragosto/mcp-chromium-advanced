@@ -50,6 +50,8 @@ from PyQt5.QtWidgets import (
 
 from chromium_advanced.chromium_profile_lib import (
     APP_NAME,
+    APP_DISPLAY_NAME,
+    APP_VERSION,
     LEGACY_CHATGPT_PROMPT,
     KeepAliveStopController,
     build_keepalive_plugin_template,
@@ -265,7 +267,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.keepalive_icon_refresh_scheduled = False
 
         self.ensure_mcp_api_token_persisted()
-        self.setWindowTitle(self.tr("window_title"))
+        self.setWindowTitle(self.trf("window_title", version=APP_VERSION))
         bounds = self.config.get("app", {}).get("window_bounds", {})
         initial_width = max(720, int(bounds.get("width", 860) or 860))
         initial_height = max(560, int(bounds.get("height", 680) or 680))
@@ -2165,7 +2167,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.refresh_mcp_status_ui()
 
     def retranslate_ui(self):
-        self.setWindowTitle(self.tr("window_title"))
+        self.setWindowTitle(self.trf("window_title", version=APP_VERSION))
         self.btn_add.setText(self.tr("toolbar_add"))
         self.btn_edit.setText(self.tr("toolbar_edit"))
         self.btn_remove.setText(self.tr("toolbar_remove"))
@@ -2719,7 +2721,7 @@ class ChromiumManagerWindow(QMainWindow):
             tray_icon = get_app_icon()
 
         self.tray_icon = QSystemTrayIcon(tray_icon, self)
-        self.tray_icon.setToolTip(APP_NAME)
+        self.tray_icon.setToolTip(f"{APP_DISPLAY_NAME} {APP_VERSION}")
 
         self.tray_menu = QMenu(self)
         self.tray_action_show = self.tray_menu.addAction(self.tr("tray_show"))

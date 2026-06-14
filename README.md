@@ -2,6 +2,8 @@
 
 MCP Chromium Advanced is a desktop GUI and MCP service for managing real Chromium browser profiles. It is intended for workflows that need an existing logged-in browser identity rather than a fresh automation-only browser.
 
+Current release baseline: `0.1.0`
+
 [中文文档](./README_zh.md)
 
 ## Overview
@@ -522,6 +524,38 @@ This is a Python project and the source code is being kept platform-aware.
 - Windows is the primary tested platform
 - macOS and Linux are supported at source level when valid browser and driver paths are provided
 - Windows packaging is currently the most complete desktop packaging path
+
+## Release packaging
+
+Version `0.1.0` is the first formal release baseline for cross-platform build automation.
+
+For this release line:
+
+- GitHub Actions now has a cross-platform build workflow for Windows, macOS, and Linux
+- browser assets are intentionally not bundled yet
+- each target machine is expected to configure its own Chromium binary and ChromeDriver paths after launch
+- the current packaging goal is to stabilize the GUI, daemon, worker, Python runtime, Node runtime, and MCP service distribution first
+- release artifacts should include the reusable skill templates under `docs/skill_templates/` so operators can wire Codex or WSL clients without returning to the repository
+
+This keeps release engineering simple while browser/runtime asset management is still being standardized.
+
+The release build entrypoints are now:
+
+- local cross-platform packager:
+  `python scripts/build_release.py --artifact-name <name>`
+- GitHub Actions workflow:
+  `.github/workflows/build-release.yml`
+
+Current packaging behavior by platform:
+
+- Windows:
+  reuses the existing PyInstaller-based desktop build and packages `dist/` into a zip artifact
+- macOS:
+  packages a portable source/runtime bundle for the current codebase
+- Linux:
+  packages a portable source/runtime bundle as `tar.gz`
+
+This `0.1.0` release line is therefore a real cross-platform build baseline, but not yet a fully self-contained browser-assets release.
 
 ## Skill templates
 
