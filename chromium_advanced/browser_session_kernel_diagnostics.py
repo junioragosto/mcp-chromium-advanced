@@ -6,9 +6,115 @@ from typing import Any, Callable, Dict, Optional
 
 
 HTML_PREVIEW_LIMIT = 12000
+ANTI_BOT_TEXT_LIMIT = 12000
+ANTI_BOT_TITLE_URL_LIMIT = 2000
+ANTI_BOT_STRONG_MARKERS = (
+    "challenge-platform",
+    "cf-challenge",
+    "cf-browser-verification",
+    "turnstile",
+    "g-recaptcha",
+    "hcaptcha",
+    "verify you are human",
+    "checking your browser before accessing",
+    "ddos protection by cloudflare",
+    "recaptcha - bot challenge!",
+    "正在进行安全验证",
+    "请稍候",
+)
+ANTI_BOT_WEAK_MARKERS = (
+    "cloudflare",
+    "attention required",
+    "security check",
+    "bot challenge",
+    "human verification",
+    "captcha",
+)
 
 
 class ManagedSessionDiagnosticsMixin:
+    def _build_anti_bot_detection(self, page_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        page = page_payload if isinstance(page_payload, dict) else {}
+        tab_id = str(page.get("tab_id", "") or "")
+        title = str(page.get("title", "") or "")
+        url = str(page.get("url", "") or "")
+        text_excerpt = ""
+        html_excerpt = ""
+        text_error = ""
+        html_error = ""
+        try:
+            text_payload = self._raw.get_page_text(tab_id=tab_id) if tab_id else self._raw.get_page_text()
+            if isinstance(text_payload, dict):
+                text_excerpt = str(text_payload.get("text", "") or "")[:ANTI_BOT_TEXT_LIMIT]
+        except Exception as exc:
+            text_error = str(exc)
+        try:
+            html_payload = self._raw.get_page_html(tab_id=tab_id) if tab_id else self._raw.get_page_html()
+            if isinstance(html_payload, dict):
+                html_excerpt = str(html_payload.get("html", "") or "")[:ANTI_BOT_TEXT_LIMIT]
+        except Exception as exc:
+            html_error = str(exc)
+
+        title_url_haystack = "\n".join([title[:ANTI_BOT_TITLE_URL_LIMIT], url[:ANTI_BOT_TITLE_URL_LIMIT]]).lower()
+        text_haystack = text_excerpt.lower()
+        html_haystack = html_excerpt.lower()
+        strong_hits = [
+            marker
+            for marker in ANTI_BOT_STRONG_MARKERS
+            if marker.lower() in title_url_haystack or marker.lower() in text_haystack or marker.lower() in html_haystack
+        ]
+        weak_hits = [
+            marker
+            for marker in ANTI_BOT_WEAK_MARKERS
+            if marker.lower() in title_url_haystack or marker.lower() in text_haystack or marker.lower() in html_haystack
+        ]
+
+        structured_signals: Dict[str, Any] = {}
+        try:
+            structured = self._run_script_result(
+                """
+                return {
+                  recaptcha: document.querySelectorAll('.g-recaptcha, iframe[src*="recaptcha"], iframe[title*="reCAPTCHA"]').length,
+                  hcaptcha: document.querySelectorAll('iframe[src*="hcaptcha"], [data-hcaptcha-response], [name="h-captcha-response"]').length,
+                  turnstile: document.querySelectorAll('iframe[src*="challenges.cloudflare.com"], .cf-turnstile, [name="cf-turnstile-response"]').length,
+                  challengeForms: document.querySelectorAll('form[id*="challenge"], form[action*="challenge"]').length,
+                  challengeInputs: document.querySelectorAll('input[name*="captcha"], input[name*="challenge"], input[name*="cf"]').length,
+                };
+                """,
+                tab_id=tab_id,
+            )
+            if isinstance(structured, dict):
+                structured_signals = dict(structured)
+        except Exception:
+            structured_signals = {}
+
+        structured_positive = any(int(structured_signals.get(key, 0) or 0) > 0 for key in structured_signals.keys())
+        likely_challenge = bool(strong_hits) or structured_positive
+        confidence = "high" if likely_challenge else ("low" if weak_hits else "none")
+
+        if not likely_challenge and "cloudflare" in [item.lower() for item in weak_hits]:
+            if ("/search?" in url or "/detail/" in url) and (
+                "magnet:?" in text_haystack or "磁力链接" in text_excerpt or "资源详情" in text_excerpt
+            ):
+                weak_hits = [item for item in weak_hits if item.lower() != "cloudflare"]
+                confidence = "none" if not weak_hits else "low"
+
+        return {
+            "detected": bool(likely_challenge),
+            "confidence": confidence,
+            "strong_markers": strong_hits,
+            "weak_markers": weak_hits,
+            "structured_signals": structured_signals,
+            "page_signals": {
+                "url": url,
+                "title": title,
+                "has_text": bool(text_excerpt),
+                "has_html": bool(html_excerpt),
+            },
+            "text_error": text_error,
+            "html_error": html_error,
+        }
+
     def _engine_suggestions_for_action(self, action_name: str) -> list[str]:
         normalized = str(action_name or "").strip()
         if normalized in {"mouse_move_xy", "mouse_click_xy", "mouse_drag_xy"}:
@@ -245,6 +351,7 @@ class ManagedSessionDiagnosticsMixin:
             payload["network"] = self._raw.get_network_requests(tab_id=normalized_tab_id, limit=40, failed_only=True)
         except Exception:
             payload["network"] = {"count": 0, "requests": []}
+        payload["anti_bot"] = self._build_anti_bot_detection(current if isinstance(current, dict) else {})
         return payload
 
     def _extract_structured_page_data(self, text: str, snapshot_text: str = "") -> Dict[str, Any]:
@@ -329,6 +436,7 @@ class ManagedSessionDiagnosticsMixin:
             "active_tab_id": active_tab_id,
             "active_element": active_element,
             "modal_state": modal_state,
+            "anti_bot": self._build_anti_bot_detection(page),
             "snapshot": {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
             "recent_actions": self._recent_actions_payload(limit=8),
             "session_health": self._build_session_health_snapshot(page_payload=page),
@@ -378,6 +486,9 @@ class ManagedSessionDiagnosticsMixin:
                 "primary_dialog": modal_state.get("primary_dialog", {}) if isinstance(modal_state.get("primary_dialog", {}), dict) else {},
                 "dialogs": modal_state.get("dialogs", []) if isinstance(modal_state.get("dialogs", []), list) else [],
             },
+            "anti_bot": context.get("anti_bot", self._build_anti_bot_detection(normalized_page))
+            if isinstance(context.get("anti_bot", None), dict)
+            else self._build_anti_bot_detection(normalized_page),
             "snapshot": snapshot or {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
             "recent_actions": context.get("recent_actions", self._recent_actions_payload(limit=8))
             if isinstance(context.get("recent_actions", None), list)
@@ -520,6 +631,11 @@ class ManagedSessionDiagnosticsMixin:
             payload["interaction_context"] = self._build_post_action_context("diagnose_target", tab_id=str(payload.get("tab_id", "") or ""))
         elif action_name == "diagnose_page":
             payload["interaction_context"] = self._build_post_action_context("diagnose_page", tab_id=str(payload.get("tab_id", "") or ""))
+        if "anti_bot" not in payload or not isinstance(payload.get("anti_bot"), dict):
+            page_source = payload.get("page", {})
+            if not isinstance(page_source, dict):
+                page_source = payload.get("interaction_context", {}).get("page", {}) if isinstance(payload.get("interaction_context"), dict) else {}
+            payload["anti_bot"] = self._build_anti_bot_detection(page_source if isinstance(page_source, dict) else {})
         payload["recent_actions"] = self._recent_actions_excluding_current(action_name, limit=12)
         payload["recent_failures"] = [item for item in self._recent_actions_excluding_current(action_name, limit=12) if not item.get("ok")]
         payload["managed_diagnostics"] = {

@@ -190,7 +190,7 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 Recommended engine-selection policy for this project:
 
 - default to `playwright_cli` for ordinary MCP browsing tasks
-- switch to `selenium_uc` when stealth or anti-detection tolerance matters more than raw speed
+- switch to `selenium_uc` when stealth, anti-detection tolerance, recurring challenge pages, or gesture/coordinate fallback matter more than raw speed
 - switch to `patchright` when the task needs the richest structured diagnostics, snapshot/ref behavior, or deeper complex-frontend inspection
 
 Important engine capability examples:
@@ -198,11 +198,11 @@ Important engine capability examples:
 - `playwright_cli`
   best default for high-throughput browsing, ordinary click/type/navigate/tab work, and lower token overhead
 - `selenium_uc`
-  prefer this when the target is stealth-sensitive, shows automation friction, or needs coordinate-level mouse actions such as drag, gesture unlock, slider/pattern input, or vision-style XY fallback
+  prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs coordinate-level mouse actions such as drag, gesture unlock, slider/pattern input, or vision-style XY fallback
 - `patchright`
   prefer this when the task depends on snapshot refs, richer DOM diagnostics, stronger structured extraction, or difficult complex-frontend inspection
 - `gesture_actions`
-  treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, and `browser_mouse_drag_xy` as a formal capability boundary rather than a generic fallback every engine should support
+  treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as a formal capability boundary rather than a generic fallback every engine should support
 
 Runtime isolation option:
 
@@ -258,8 +258,10 @@ Important engine-switching boundary:
 - For `playwright_cli`, `run_script` now prefers a safer serialization wrapper and generic text reads can fall back to bounded DOM chunking/page text when direct structured extraction comes back empty.
 - For `playwright_cli`, that fallback improves robustness but not semantic quality. On complex dynamic frontends, structured extraction can still be noisier and weaker than `patchright`; choose the engine accordingly instead of expecting site-specific adapters in the core runtime.
 - For `playwright_cli`, the runtime sanitizes upstream Chromium launch args so `AutomationControlled` is not injected through a real `--disable-blink-features` switch.
-- For `playwright_cli`, gesture-style pages are a known engine-selection boundary. If the task requires `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, pattern unlock, slider drag, or coordinate-based fallback, prefer starting the session with `engine="selenium_uc"` or `engine="patchright"` instead of assuming the default engine is sufficient.
+- For `playwright_cli`, gesture-style pages are a known engine-selection boundary. If the task requires `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, `browser_mouse_gesture_path`, pattern unlock, slider drag, or coordinate-based fallback, prefer starting the session with `engine="selenium_uc"` or `engine="patchright"` instead of assuming the default engine is sufficient.
 - Use `get_session_capabilities(session_id)` when the task may need gesture actions. The capability surface now distinguishes generic coordinate support from formal `gesture_actions` support.
+- `browser_mouse_gesture_path(session_id, points=[...])` is the preferred interface for gesture locks, slider tracks, and continuous path input. Use `patchright` first when the target page is frontend-heavy or needs stronger debug context; use `selenium_uc` when stealth is more important than diagnostics.
+- managed post-action context and `browser_diagnose_page` now include an `anti_bot` block. Treat `anti_bot.detected=true` with strong markers or structured signals as a likely real challenge page; do not treat every page mentioning Cloudflare as a challenge automatically.
 - Visible MCP browser sessions normally honor `mcp.start_minimized=true`, which should leave the browser in the taskbar instead of stealing foreground focus; users can click it open when they want to watch or take over.
 - Do not enable `mcp.headless=true` just to reduce desktop interference. Headless mode should only be used when the user explicitly asks for headless/regression/background validation.
 - `runtime_options.incognito=true` is supported when the task needs isolated validation without normal session carry-over, but it still uses the same profile governance and occupancy rules.

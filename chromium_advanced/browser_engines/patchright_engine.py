@@ -1639,6 +1639,47 @@ class PatchrightBrowserSession(BrowserSession):
             "post_action_context": self._post_action_context("mouse_drag_xy", page=page),
         }
 
+    def mouse_gesture_path(
+        self,
+        points: list[dict[str, object]],
+        *,
+        steps_per_segment: int = 18,
+        hold_before_ms: int = 0,
+        segment_delay_ms: int = 0,
+    ) -> Dict:
+        normalized_points: list[tuple[float, float]] = []
+        for item in list(points or []):
+            if not isinstance(item, dict):
+                raise ValueError("gesture points must be dictionaries with x/y coordinates")
+            try:
+                normalized_points.append((float(item["x"]), float(item["y"])))
+            except Exception as exc:
+                raise ValueError("gesture points must include numeric x/y coordinates") from exc
+        if len(normalized_points) < 2:
+            raise ValueError("gesture path requires at least two points")
+
+        page = self._resolve_page()
+        start_x, start_y = normalized_points[0]
+        page.mouse.move(start_x, start_y)
+        page.mouse.down()
+        if int(hold_before_ms) > 0:
+            time.sleep(max(0, int(hold_before_ms)) / 1000.0)
+        for x, y in normalized_points[1:]:
+            page.mouse.move(float(x), float(y), steps=max(1, int(steps_per_segment)))
+            if int(segment_delay_ms) > 0:
+                time.sleep(max(0, int(segment_delay_ms)) / 1000.0)
+        page.mouse.up()
+        return {
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
+            "gesture_performed": True,
+            "point_count": len(normalized_points),
+            "points": [{"x": x, "y": y} for x, y in normalized_points],
+            "steps_per_segment": max(1, int(steps_per_segment)),
+            "hold_before_ms": max(0, int(hold_before_ms)),
+            "segment_delay_ms": max(0, int(segment_delay_ms)),
+            "post_action_context": self._post_action_context("mouse_gesture_path", page=page),
+        }
+
     def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
         page = self._resolve_page(tab_id=tab_id)
         output_path = str(filename or "").strip()

@@ -113,7 +113,7 @@ The worker runtime policy is configurable:
 - Release resources automatically after idle timeout
 - Run keepalive jobs against real logged-in profiles
 - Coordinate multi-tab browser work with explicit tab listing, opening, activation, and closing tools
-- Support formal coordinate and gesture interactions on capable engines via `browser_mouse_move_xy`, `browser_mouse_click_xy`, and `browser_mouse_drag_xy`
+- Support formal coordinate and gesture interactions on capable engines via `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path`
 - Collect structured console, page error, and network diagnostics instead of relying on screenshots alone
 - Fall back to generic DOM-based snapshot, candidate enumeration, wait, and target diagnostics when a runtime lacks native support
 
@@ -467,6 +467,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Uses the shared `launch.*` defaults for direct profile launch
 - Best current stealth-oriented option in the project
 - Best current option when a page needs gesture unlock, slider drag, pattern input, or coordinate-level fallback
+- Supports the full low-level gesture family, including multi-point `browser_mouse_gesture_path`
 - Still the code-level fallback default if no configured engine is present
 
 ### Patchright
@@ -476,7 +477,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Intended for sites where a Playwright-compatible execution model is more reliable
 - Provides the strongest tab model and the richest structured debug telemetry in the current project
 - Collects DevTools-style diagnostics through per-tab CDP sessions, so agents can read console output, uncaught exceptions, and network failures without opening browser DevTools manually
-- Supports the formal coordinate and gesture tool family
+- Supports the formal coordinate and gesture tool family, including multi-point `browser_mouse_gesture_path`
 - Keepalive is not routed through Patchright yet in this stage
 
 ### Playwright CLI
@@ -491,7 +492,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Reuses the real `user-data-dir` together with Chromium `--profile-directory=Profile N`, so logged-in state can be preserved
 - Supports the validated first-stage surface: session start, navigation, multi-tab basics, script execution, type/click/key actions, screenshot, console, requests, and coarse page diagnostics
 - Managed runtime fallbacks lift the raw CLI session with generic `snapshot`, candidate enumeration, waiting, target verification, and snapshot-ref style targeting where possible
-- Does not currently implement the formal gesture/XY tool family. If the task depends on drag, slider movement, pattern unlock, or coordinate-level fallback, switch to `selenium_uc` or `patchright`.
+- Does not currently implement the formal gesture/XY tool family, including `browser_mouse_gesture_path`. If the task depends on drag, slider movement, pattern unlock, or coordinate-level fallback, switch to `selenium_uc` or `patchright`.
 - Uses a fast DOM eval path for simple selector `click` and `fill` operations, then falls back to native `playwright-cli` commands if the DOM path is not safe or fails
 - `run_script` now prefers a safer serialization wrapper, and generic page text reads can fall back to bounded DOM chunking or page-text extraction when direct structured extraction comes back empty
 - Even with that generic fallback, complex dynamic frontends can still produce noisy or low-fidelity structured output. If the task depends on precise structured extraction rather than resilient fallback, prefer `patchright`
@@ -510,6 +511,9 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Selenium sessions now expose the same high-level tab and debug tools where Chromium logging supports them
 - Console and network diagnostics are gathered from browser and performance logs, so they are best-effort compared with Patchright
 - Structured accessibility snapshots and snapshot-ref targeting still remain Patchright-only
+- Use `selenium_uc` when stealth, anti-detection tolerance, or challenge-heavy browsing matters more than throughput
+- Current challenge validation against `skrbtso.top` confirmed that `selenium_uc` can pass recurring recaptcha/browser-verification gates and still reach both result pages and detail pages
+- Managed post-action context and `browser_diagnose_page` now expose an `anti_bot` block so callers can distinguish likely real challenge pages from normal pages that merely mention providers such as Cloudflare
 
 ## Cross-platform notes
 
@@ -531,6 +535,7 @@ The skill guidance should explicitly tell agents that:
 
 - `playwright_cli` is the normal default for ordinary MCP work
 - `patchright` should be selected when structured extraction or deep frontend diagnostics matter more than throughput
+- `selenium_uc` should be selected when stealth, anti-bot tolerance, recurring challenge pages, gesture flows, or coordinate fallback matter more than speed
 - `runtime_options.incognito=true` is available when a flow should be validated without inheriting the current regular-window session state
 
 ## Keepalive Plugins

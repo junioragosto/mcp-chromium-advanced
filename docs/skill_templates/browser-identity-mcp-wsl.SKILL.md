@@ -50,7 +50,7 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 Recommended engine-selection policy remains the same from WSL:
 
 - default to `playwright_cli` for ordinary MCP task execution
-- use `selenium_uc` for stealth-sensitive or higher anti-detection workflows
+- use `selenium_uc` for stealth-sensitive pages, recurring challenge/verification pages, or when gesture/coordinate fallback matters more than raw speed
 - use `patchright` for richer structured diagnostics and complex frontend inspection
 
 Important engine capability examples from WSL remain the same:
@@ -58,9 +58,11 @@ Important engine capability examples from WSL remain the same:
 - `playwright_cli`
   best default for high-throughput ordinary browsing tasks
 - `selenium_uc`
-  prefer this when the page needs gesture unlock, drag, slider movement, or coordinate-level mouse fallback
+  prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs gesture unlock, drag, slider movement, or coordinate-level mouse fallback
 - `patchright`
   prefer this when the task needs snapshot refs, stronger structured extraction, or deeper frontend diagnostics
+- `gesture_actions`
+  treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as engine-scoped capabilities, not as guaranteed fallback tools on every runtime
 
 Runtime isolation option from WSL:
 
@@ -145,6 +147,10 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - Treat partial `playwright_cli` diagnostics with `diagnostic_errors` as useful signal. The runtime intentionally bounds heavy console/network calls, classifies common noise, and avoids long MCP worker stalls.
 - `playwright_cli` simple selector click/fill actions may use the fast DOM eval path before native CLI fallback. This is expected and should be treated as the high-performance path.
 - `playwright_cli` now has safer generic script/text fallback behavior, but difficult dynamic frontends can still produce weaker structured extraction than `patchright`. Prefer engine switching over site-specific assumptions.
+- Managed post-action context and `browser_diagnose_page` now include an `anti_bot` block. Treat `anti_bot.detected=true` with strong markers or structured signals as a likely real challenge page.
+- Do not treat every page that merely mentions Cloudflare as a challenge automatically. Normal search/detail pages can mention Cloudflare while still being valid result pages.
 - `runtime_options.incognito=true` remains subject to the same profile occupancy and session-governance rules; it is an isolation mode, not a concurrency bypass.
-- If the target page needs gesture/pattern unlock, drag, slider movement, or coordinate-level mouse fallback, do not assume the default engine is enough. Start the session with `engine="selenium_uc"` or `engine="patchright"` explicitly.
+- If the target page needs gesture/pattern unlock, drag, slider movement, continuous path input, or coordinate-level mouse fallback, do not assume the default engine is enough. Start the session with `engine="selenium_uc"` or `engine="patchright"` explicitly.
+- `browser_mouse_gesture_path(session_id, points=[...])` is the preferred gesture interface from WSL as well. Prefer `patchright` first for frontend-heavy pages and `selenium_uc` when stealth pressure is higher.
+- Use `get_session_capabilities(session_id)` when the task may need gesture actions. The capability surface distinguishes generic coordinate support from formal `gesture_actions` support.
 - If the Windows side reports `external_chromium_running`, do not assume the entire service is blocked. Check whether the target profile itself is the one that is occupied.

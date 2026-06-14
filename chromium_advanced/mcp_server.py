@@ -922,6 +922,33 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             **browser_session.mouse_drag_xy(float(start_x), float(start_y), float(end_x), float(end_y)),
         }
 
+    @server.tool(annotations=trusted_browser_action_annotations)
+    def browser_mouse_gesture_path(
+        session_id: str,
+        points: list[dict[str, float]],
+        steps_per_segment: int = 18,
+        hold_before_ms: int = 0,
+        segment_delay_ms: int = 0,
+    ) -> dict:
+        """Perform one continuous mouse gesture across multiple viewport points."""
+        browser_session = session_manager.resolve_session(session_id)
+        normalized_points = []
+        for item in list(points or []):
+            if not isinstance(item, dict):
+                raise ValueError("points must be a list of {x, y} objects")
+            if "x" not in item or "y" not in item:
+                raise ValueError("each gesture point must include x and y")
+            normalized_points.append({"x": float(item["x"]), "y": float(item["y"])})
+        return {
+            "session_id": session_id,
+            **browser_session.mouse_gesture_path(
+                normalized_points,
+                steps_per_segment=int(steps_per_segment),
+                hold_before_ms=int(hold_before_ms),
+                segment_delay_ms=int(segment_delay_ms),
+            ),
+        }
+
     @server.tool(annotations=browser_read_annotations)
     def screenshot(session_id: str, filename: str = "", tab_id: str = "") -> dict:
         """Save a screenshot to disk and return the file path."""

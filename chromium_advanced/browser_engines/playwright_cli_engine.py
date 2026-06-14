@@ -1703,6 +1703,16 @@ class PlaywrightCliBrowserSession(BrowserSession):
     def mouse_drag_xy(self, start_x: float, start_y: float, end_x: float, end_y: float) -> Dict:
         raise NotImplementedError("mouse_drag_xy is not implemented for playwright_cli in v1.")
 
+    def mouse_gesture_path(
+        self,
+        points: list[dict[str, object]],
+        *,
+        steps_per_segment: int = 18,
+        hold_before_ms: int = 0,
+        segment_delay_ms: int = 0,
+    ) -> Dict:
+        raise NotImplementedError("mouse_gesture_path is not implemented for playwright_cli in v1.")
+
     def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
         if str(tab_id or "").strip():
             self._ensure_tab_selected(tab_id=tab_id)

@@ -112,7 +112,7 @@ class RuntimeCapabilities:
                 "coordinates": {"supported": self.coordinates},
                 "gesture_actions": {
                     "supported": self.gesture_actions,
-                    "actions": ["mouse_move_xy", "mouse_click_xy", "mouse_drag_xy"] if self.gesture_actions else [],
+                    "actions": ["mouse_move_xy", "mouse_click_xy", "mouse_drag_xy", "mouse_gesture_path"] if self.gesture_actions else [],
                 },
                 "highlight": {"supported": self.highlight},
             },
@@ -1542,6 +1542,24 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
 
     def mouse_drag_xy(self, start_x: float, start_y: float, end_x: float, end_y: float) -> Dict:
         return self._dispatch("mouse_drag_xy", lambda: self._raw.mouse_drag_xy(start_x, start_y, end_x, end_y))
+
+    def mouse_gesture_path(
+        self,
+        points: list[dict[str, Any]],
+        *,
+        steps_per_segment: int = 18,
+        hold_before_ms: int = 0,
+        segment_delay_ms: int = 0,
+    ) -> Dict:
+        return self._dispatch(
+            "mouse_gesture_path",
+            lambda: self._raw.mouse_gesture_path(
+                points,
+                steps_per_segment=steps_per_segment,
+                hold_before_ms=hold_before_ms,
+                segment_delay_ms=segment_delay_ms,
+            ),
+        )
 
     def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
         return self._dispatch("screenshot", lambda: self._raw.screenshot(filename=filename, tab_id=tab_id))

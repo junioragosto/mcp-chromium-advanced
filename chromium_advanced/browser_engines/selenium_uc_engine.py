@@ -1326,6 +1326,69 @@ class SeleniumBrowserSession(BrowserSession):
             "viewport": viewport,
         }
 
+    def mouse_gesture_path(
+        self,
+        points: list[dict[str, object]],
+        *,
+        steps_per_segment: int = 18,
+        hold_before_ms: int = 0,
+        segment_delay_ms: int = 0,
+    ) -> Dict:
+        normalized_points: list[tuple[float, float]] = []
+        for item in list(points or []):
+            if not isinstance(item, dict):
+                raise ValueError("gesture points must be dictionaries with x/y coordinates")
+            try:
+                normalized_points.append((float(item["x"]), float(item["y"])))
+            except Exception as exc:
+                raise ValueError("gesture points must include numeric x/y coordinates") from exc
+        if len(normalized_points) < 2:
+            raise ValueError("gesture path requires at least two points")
+
+        viewport = get_viewport_metrics(self.driver)
+        for x, y in normalized_points:
+            ensure_viewport_point(viewport, float(x), float(y))
+        try:
+            start_x, start_y = normalized_points[0]
+            dispatch_cdp_mouse(self.driver, "mouseMoved", start_x, start_y)
+            dispatch_cdp_mouse(self.driver, "mousePressed", start_x, start_y)
+            if int(hold_before_ms) > 0:
+                time.sleep(max(0, int(hold_before_ms)) / 1000.0)
+            for end_x, end_y in normalized_points[1:]:
+                for step_index in range(1, max(1, int(steps_per_segment)) + 1):
+                    ratio = step_index / float(max(1, int(steps_per_segment)))
+                    current_x = start_x + ((end_x - start_x) * ratio)
+                    current_y = start_y + ((end_y - start_y) * ratio)
+                    dispatch_cdp_mouse(self.driver, "mouseMoved", current_x, current_y, button="left", buttons=1)
+                start_x, start_y = end_x, end_y
+                if int(segment_delay_ms) > 0:
+                    time.sleep(max(0, int(segment_delay_ms)) / 1000.0)
+            dispatch_cdp_mouse(self.driver, "mouseReleased", start_x, start_y)
+        except Exception:
+            mouse = PointerInput("mouse", "default")
+            actions = ActionBuilder(self.driver, mouse=mouse)
+            start_x, start_y = normalized_points[0]
+            actions.pointer_action.move_to_location(int(start_x), int(start_y))
+            actions.pointer_action.pointer_down()
+            if int(hold_before_ms) > 0:
+                time.sleep(max(0, int(hold_before_ms)) / 1000.0)
+            for end_x, end_y in normalized_points[1:]:
+                actions.pointer_action.move_to_location(int(end_x), int(end_y))
+                if int(segment_delay_ms) > 0:
+                    time.sleep(max(0, int(segment_delay_ms)) / 1000.0)
+            actions.pointer_action.release()
+            actions.perform()
+        return {
+            **self.get_current_url(),
+            "gesture_performed": True,
+            "point_count": len(normalized_points),
+            "points": [{"x": x, "y": y} for x, y in normalized_points],
+            "steps_per_segment": max(1, int(steps_per_segment)),
+            "hold_before_ms": max(0, int(hold_before_ms)),
+            "segment_delay_ms": max(0, int(segment_delay_ms)),
+            "viewport": viewport,
+        }
+
     def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
         handle = self._resolve_handle(tab_id=tab_id)
         self._activate_handle(handle)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Protocol
+from typing import Any, Dict, Protocol
 
 
 @dataclass
@@ -215,6 +215,16 @@ class BrowserSession(Protocol):
         ...
 
     def mouse_drag_xy(self, start_x: float, start_y: float, end_x: float, end_y: float) -> Dict:
+        ...
+
+    def mouse_gesture_path(
+        self,
+        points: list[dict[str, Any]],
+        *,
+        steps_per_segment: int = 18,
+        hold_before_ms: int = 0,
+        segment_delay_ms: int = 0,
+    ) -> Dict:
         ...
 
     def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
