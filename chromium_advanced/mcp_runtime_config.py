@@ -32,15 +32,13 @@ def resolve_mcp_api_token(config: Dict) -> str:
     return token
 
 
-def resolve_mcp_admin_token(config: Dict) -> str:
-    """Return the configured admin token, generating a distinct token when absent."""
-    mcp = config.get("mcp", {}) if isinstance(config, dict) else {}
-    if not isinstance(mcp, dict):
-        return ""
-    admin_token = str(mcp.get("admin_token", "")).strip()
-    if admin_token:
-        return admin_token
-    return secrets.token_hex(24)
+def resolve_control_api_token(config: Dict) -> str:
+    """Return the configured control API token, generating one when persistence needs to seed it."""
+    control = config.get("control", {}) if isinstance(config, dict) else {}
+    token = str(control.get("api_token", "")).strip() if isinstance(control, dict) else ""
+    if not token:
+        token = secrets.token_hex(24)
+    return token
 
 
 def is_mcp_localhost_listening(config: Dict) -> bool:
@@ -58,3 +56,13 @@ def mcp_auth_required(config: Dict) -> bool:
     if not bool(mcp.get("enabled", False)):
         return False
     return bool(str(mcp.get("api_token", "")).strip())
+
+
+def control_auth_required(config: Dict) -> bool:
+    """Return True when control API token authentication is required."""
+    control = config.get("control", {}) if isinstance(config, dict) else {}
+    if not isinstance(control, dict):
+        return False
+    if not bool(control.get("enabled", True)):
+        return False
+    return bool(str(control.get("api_token", "")).strip())

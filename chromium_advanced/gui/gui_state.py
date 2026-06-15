@@ -48,11 +48,14 @@ def build_profile_runtime_state_text(
     external_profile_process_map: Dict[str, List[int]],
     is_profile_keepalive_running: Callable[[str], bool],
     tr: TranslateFunc,
+    control_profile: Optional[Dict] = None,
 ) -> str:
     profile_name = str(profile_name or "").strip()
     if not profile_name:
         return tr("runtime_state_unknown", "Unknown")
-    occupancy = occupancy_cache.get(profile_name, {})
+    control_profile = control_profile if isinstance(control_profile, dict) else {}
+    control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
+    occupancy = control_occupancy or occupancy_cache.get(profile_name, {})
     if occupancy:
         scene_type = str(occupancy.get("scene_type", "") or "").strip()
         owner_label = str(occupancy.get("owner_label", "") or "").strip()
@@ -62,6 +65,11 @@ def build_profile_runtime_state_text(
             return f"{scene_type}:{state}{suffix}"
     if is_profile_keepalive_running(profile_name):
         return tr("runtime_state_keepalive", "Keepalive running")
+    control_external_process_count = int(control_profile.get("external_process_count", 0) or 0)
+    if control_external_process_count > 0:
+        return tr("runtime_state_external_running", "External Chromium running: {pid_text}").format(
+            pid_text=str(control_external_process_count)
+        )
     pids = external_profile_process_map.get(profile_name, [])
     if pids:
         return tr("runtime_state_external_running", "External Chromium running: {pid_text}").format(
@@ -110,8 +118,11 @@ def build_profile_status_display(
     external_profile_process_map: Dict[str, List[int]],
     is_profile_keepalive_running: Callable[[str], bool],
     tr: TranslateFunc,
+    control_profile: Optional[Dict] = None,
 ) -> Dict[str, str]:
-    occupancy = occupancy_cache.get(profile_name, {})
+    control_profile = control_profile if isinstance(control_profile, dict) else {}
+    control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
+    occupancy = control_occupancy or occupancy_cache.get(profile_name, {})
     if occupancy:
         scene_type = str(occupancy.get("scene_type", "") or "").strip() or "in_use"
         state = str(occupancy.get("state", "") or "").strip() or "active"
@@ -143,6 +154,7 @@ def build_selected_profile_status_text(
     external_profile_process_map: Dict[str, List[int]],
     is_profile_keepalive_running: Callable[[str], bool],
     tr: TranslateFunc,
+    control_profile: Optional[Dict] = None,
 ) -> str:
     resolved_profile = profile
     if not resolved_profile and selected_profile_name:
@@ -161,8 +173,11 @@ def build_selected_profile_status_text(
         external_profile_process_map,
         is_profile_keepalive_running,
         tr,
+        control_profile,
     )
-    occupancy = occupancy_cache.get(profile_name, {})
+    control_profile = control_profile if isinstance(control_profile, dict) else {}
+    control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
+    occupancy = control_occupancy or occupancy_cache.get(profile_name, {})
     occupancy_text = "-"
     if occupancy:
         owner_pid = int(occupancy.get("owner_pid", 0) or 0)
@@ -190,16 +205,31 @@ def build_bottom_stats_text(
     mcp_status_cache,
     mcp_status_label_text: str,
     tr: TranslateFunc,
+    control_profiles_payload: Optional[Dict] = None,
 ) -> str:
     profile_count = len(config.get("profiles", []))
     mcp_state_text = tr("bottom_mcp_stopped", "stopped")
-    active_session_count = len(
-        [
-            item
-            for item in occupancy_cache.values()
-            if isinstance(item, dict) and item.get("state") not in {"released", "idle", "start_failed"}
-        ]
-    )
+    control_profiles_payload = control_profiles_payload if isinstance(control_profiles_payload, dict) else {}
+    control_profiles = control_profiles_payload.get("profiles", []) if isinstance(control_profiles_payload.get("profiles", []), list) else []
+    if control_profiles:
+        active_session_count = len(
+            [
+                item
+                for item in control_profiles
+                if isinstance(item, dict)
+                and isinstance(item.get("occupancy", {}), dict)
+                and item.get("occupancy", {})
+                and str(item.get("occupancy", {}).get("state", "") or "").strip() not in {"released", "idle", "start_failed"}
+            ]
+        )
+    else:
+        active_session_count = len(
+            [
+                item
+                for item in occupancy_cache.values()
+                if isinstance(item, dict) and item.get("state") not in {"released", "idle", "start_failed"}
+            ]
+        )
     if mcp_startup_in_progress:
         mcp_state_text = "starting"
     elif mcp_status_cache:
@@ -320,11 +350,15 @@ def build_profile_row_action_state(
     is_profile_keepalive_ui_locked: Callable[[str], bool],
     keepalive_worker_present: bool,
     tr: TranslateFunc,
+    control_profile: Optional[Dict] = None,
 ) -> Dict[str, object]:
     profile_name = str(profile_name or "").strip()
     row_locked = bool(is_profile_keepalive_ui_locked(profile_name))
     is_running = bool(is_profile_keepalive_running(profile_name))
-    external_running = bool(external_profile_process_map.get(profile_name, []))
+    control_profile = control_profile if isinstance(control_profile, dict) else {}
+    control_external_running = bool(int(control_profile.get("external_process_count", 0) or 0))
+    control_profile_lock_active = bool(control_profile.get("profile_lock_active", False))
+    external_running = control_external_running or control_profile_lock_active or bool(external_profile_process_map.get(profile_name, []))
 
     launch_text = tr("action_close", "Close") if external_running else tr("action_launch", "Launch")
     launch_tooltip = ""
@@ -423,6 +457,24 @@ def build_mcp_status_url(settings: Dict) -> str:
     return f"http://{host}:{port}/_daemon/status"
 
 
+def build_control_status_url(control_settings: Dict, mcp_settings: Dict) -> str:
+    host = str(control_settings.get("host", "")).strip() or str(mcp_settings.get("host", "127.0.0.1")).strip() or "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    port = int(mcp_settings.get("port", 28888))
+    path = str(control_settings.get("path", "/_control")).strip() or "/_control"
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"http://{host}:{port}{path.rstrip('/')}/status"
+
+
+def build_control_ping_url(control_settings: Dict, mcp_settings: Dict) -> str:
+    base = build_control_status_url(control_settings, mcp_settings)
+    if base.endswith("/status"):
+        return base[: -len("/status")] + "/ping"
+    return base.rstrip("/") + "/ping"
+
+
 def resolve_mcp_connect_host_port(settings: Dict) -> tuple[str, int]:
     host = str(settings.get("host", "127.0.0.1")).strip() or "127.0.0.1"
     if host in {"0.0.0.0", "::"}:
@@ -433,8 +485,13 @@ def resolve_mcp_connect_host_port(settings: Dict) -> tuple[str, int]:
 
 def build_mcp_auth_headers(settings: Dict, admin: bool = False) -> Dict[str, str]:
     api_token = str(settings.get("api_token", "")).strip()
-    admin_token = str(settings.get("admin_token", "")).strip()
-    token = admin_token if admin and admin_token else api_token
+    if not api_token:
+        return {}
+    return {"Authorization": f"Bearer {api_token}"}
+
+
+def build_control_auth_headers(settings: Dict) -> Dict[str, str]:
+    token = str(settings.get("api_token", "")).strip()
     if not token:
         return {}
     return {"Authorization": f"Bearer {token}"}
@@ -460,6 +517,7 @@ def build_mcp_auth_warning_state(host: str, api_token: str, tr: TranslateFunc) -
 
 def build_mcp_process_arguments(
     settings: Dict,
+    control_settings: Dict,
     config_path: str,
     transport_options: List[str],
     frozen: bool,
@@ -493,9 +551,9 @@ def build_mcp_process_arguments(
     api_token = str(settings.get("api_token", "")).strip()
     if api_token:
         args.extend(["--api-token", api_token])
-    admin_token = str(settings.get("admin_token", "")).strip()
-    if admin_token:
-        args.extend(["--admin-token", admin_token])
+    control_token = str(control_settings.get("api_token", "")).strip()
+    if control_token:
+        args.extend(["--control-token", control_token])
     return args
 
 

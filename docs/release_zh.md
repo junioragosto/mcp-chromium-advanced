@@ -47,10 +47,10 @@
 
 - `mcp.api_token`
   普通 MCP / 浏览器业务请求使用
-- `mcp.admin_token`
-  daemon 管理接口使用，例如 worker 启停、reclaim 等
+- `control.api_token`
+  GUI / control 接口使用，例如 dashboard、日志、keepalive 状态、插件管理、worker 启停等
 
-如果 `admin_token` 为空，则管理接口保持禁用。
+如果 `control.api_token` 为空，则 `/_control/*` 接口保持禁用。
 
 ## 浏览器与 Driver 要求
 

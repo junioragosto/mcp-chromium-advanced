@@ -24,13 +24,30 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from chromium_advanced.chromium_profile_lib import (
+    append_jsonl_event,
+    build_keepalive_plugin_template,
+    delete_keepalive_plugin_source,
+    ensure_profile_bookmarks_initialized,
     get_default_config_path,
+    get_keepalive_plugin_records,
+    get_keepalive_plugin_source_text,
     get_hidden_subprocess_kwargs,
+    inspect_keepalive_plugin_source,
     get_project_root,
     get_runtime_launch_cwd,
+    get_chromium_processes_for_profile,
+    launch_profile,
     now_text,
+    normalize_config,
+    load_app_config,
+    read_recent_jsonl_events,
+    save_app_config,
+    save_keepalive_plugin_source,
+    terminate_chromium_processes,
+    update_profile_launch_time,
+    run_keepalive_job,
 )
-from chromium_advanced.mcp_runtime_config import resolve_mcp_admin_token, resolve_mcp_api_token
+from chromium_advanced.mcp_runtime_config import resolve_control_api_token, resolve_mcp_api_token
 from chromium_advanced.occupancy_registry import list_profile_occupancy_entries
 from chromium_advanced.session_manager import SessionManager
 
@@ -49,6 +66,156 @@ WORKER_SESSION_REUSED_PATTERN = re.compile(
 WORKER_SESSION_CLOSED_PATTERN = re.compile(
     r"\[MCP-WORKER\]\s+session\s+closed:.*session_id=(?P<session_id>\S+)"
 )
+CONTROL_LOG_FILE_NAME = "control_runtime.jsonl"
+
+
+class KeepaliveJobManager:
+    def __init__(self, config_path: str):
+        self.config_path = config_path
+        self._lock = threading.RLock()
+        self._thread: Optional[threading.Thread] = None
+        self._stop_controller = None
+        self._runtime = {
+            "running": False,
+            "source": "",
+            "selected_profiles": [],
+            "started_at": "",
+            "finished_at": "",
+            "last_summary": {},
+            "last_error": "",
+            "current_profile_name": "",
+            "stop_requested": False,
+        }
+
+    def get_status(self) -> Dict:
+        with self._lock:
+            return dict(self._runtime)
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return bool(self._runtime.get("running", False))
+
+    def start(self, *, selected_profiles: Optional[list[str]] = None, source: str = "manual") -> Dict:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("keepalive job already running")
+            from chromium_advanced.keepalive_runtime import KeepAliveStopController
+
+            self._stop_controller = KeepAliveStopController()
+            self._runtime = {
+                "running": True,
+                "source": str(source or "manual"),
+                "selected_profiles": [str(item).strip() for item in (selected_profiles or []) if str(item).strip()],
+                "started_at": now_text(),
+                "finished_at": "",
+                "last_summary": {},
+                "last_error": "",
+                "current_profile_name": "",
+                "stop_requested": False,
+            }
+            thread = threading.Thread(
+                target=self._run_job,
+                args=(list(self._runtime["selected_profiles"]), self._runtime["source"], self._stop_controller),
+                name="chromium-keepalive-job",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
+            return self.get_status()
+
+    def request_stop(self) -> Dict:
+        with self._lock:
+            if self._stop_controller is not None:
+                self._runtime["stop_requested"] = True
+                self._stop_controller.request_stop()
+            return dict(self._runtime)
+
+    def _run_job(self, selected_profiles: list[str], source: str, stop_controller) -> None:
+        def _progress(kind: str, payload: Dict) -> None:
+            if str(kind or "").strip().lower() != "profile_start":
+                return
+            with self._lock:
+                self._runtime["current_profile_name"] = str((payload or {}).get("profile_name", "") or "")
+
+        try:
+            summary = run_keepalive_job(
+                config_path=self.config_path,
+                selected_profiles=selected_profiles,
+                logger=None,
+                source=source,
+                stop_controller=stop_controller,
+                progress_callback=_progress,
+            )
+            with self._lock:
+                self._runtime["last_summary"] = dict(summary or {})
+                self._runtime["finished_at"] = str(summary.get("finished_at", "") or now_text())
+                self._runtime["current_profile_name"] = ""
+                self._runtime["running"] = False
+                self._runtime["last_error"] = ""
+        except Exception as exc:
+            with self._lock:
+                self._runtime["last_error"] = str(exc)
+                self._runtime["finished_at"] = now_text()
+                self._runtime["current_profile_name"] = ""
+                self._runtime["running"] = False
+        finally:
+            with self._lock:
+                self._thread = None
+                self._stop_controller = None
+
+
+class ManualProfileRuntimeManager:
+    def __init__(self, session_manager: SessionManager, config_path: str):
+        self.session_manager = session_manager
+        self.config_path = config_path
+
+    def launch(self, profile_name: str) -> Dict:
+        config = normalize_config(load_app_config(self.config_path))
+        normalized_name = str(profile_name or "").strip()
+        if not normalized_name:
+            raise ValueError("profile_name is required")
+        ensure_profile_bookmarks_initialized(config, normalized_name)
+        result = launch_profile(normalized_name, config)
+        config = update_profile_launch_time(config, normalized_name)
+        save_app_config(config, self.config_path)
+        time.sleep(0.5)
+        processes = get_chromium_processes_for_profile(config, normalized_name)
+        owner_pid = 0
+        if processes:
+            try:
+                owner_pid = int(processes[0].get("pid", 0) or 0)
+            except Exception:
+                owner_pid = 0
+        self.session_manager._register_profile_occupancy(
+            normalized_name,
+            scene_type="manual",
+            state="active",
+            owner_label="GUI launch",
+            engine_name="direct_launch",
+            details={"source": "control_launch"},
+            owner_pid=owner_pid,
+        )
+        return {
+            "profile_name": normalized_name,
+            "returncode": int(getattr(result, "returncode", 0) or 0),
+            "stdout": str(getattr(result, "stdout", "") or ""),
+            "stderr": str(getattr(result, "stderr", "") or ""),
+            "process_count": len(processes),
+            "owner_pid": owner_pid,
+        }
+
+    def close(self, profile_name: str) -> Dict:
+        config = normalize_config(load_app_config(self.config_path))
+        normalized_name = str(profile_name or "").strip()
+        if not normalized_name:
+            raise ValueError("profile_name is required")
+        processes = get_chromium_processes_for_profile(config, normalized_name)
+        terminated = terminate_chromium_processes(processes, logger=None) if processes else 0
+        self.session_manager._clear_profile_occupancy(normalized_name, event_state="released")
+        return {
+            "profile_name": normalized_name,
+            "terminated_process_count": int(terminated or 0),
+        }
 
 
 def safe_print(text: str) -> None:
@@ -112,6 +279,11 @@ def normalize_path(path: str) -> str:
     if not text.startswith("/"):
         text = "/" + text
     return text
+
+
+def get_control_log_path(config_path: str) -> str:
+    root = os.path.dirname(os.path.abspath(os.path.expanduser(str(config_path or "").strip() or get_default_config_path())))
+    return os.path.join(root, CONTROL_LOG_FILE_NAME)
 
 
 def acquire_single_instance_guard(name: str):
@@ -279,7 +451,7 @@ class WorkerManager:
 
     def _reconcile_active_browser_session_ids_locked(self) -> None:
         try:
-            occupancy_entries = list_profile_occupancy_entries()
+            occupancy_entries = list_profile_occupancy_entries(tolerate_lock_timeout=True)
         except Exception:
             return
         live_session_ids = {
@@ -396,7 +568,7 @@ class WorkerManager:
             self._stop_worker_locked(reason)
             return self.get_status()
 
-    def get_status(self) -> Dict:
+    def get_status(self, include_session_details: bool = True) -> Dict:
         with self._lock:
             self._cleanup_dead_process_locked()
             self._reconcile_active_browser_session_ids_locked()
@@ -409,12 +581,14 @@ class WorkerManager:
             idle_seconds = 0
             if self._last_activity_at > 0:
                 idle_seconds = max(0, int(now_ts - self._last_activity_at))
-            daemon_sessions = self.session_manager.list_sessions()
-            daemon_session_ids = sorted(
-                str(item.get("session_id", "") or "").strip()
-                for item in daemon_sessions
-                if str(item.get("session_id", "") or "").strip()
-            )
+            daemon_session_ids: list[str] = []
+            if include_session_details:
+                daemon_sessions = self.session_manager.list_sessions()
+                daemon_session_ids = sorted(
+                    str(item.get("session_id", "") or "").strip()
+                    for item in daemon_sessions
+                    if str(item.get("session_id", "") or "").strip()
+                )
             worker_session_ids = sorted(self._active_browser_session_ids)
             combined_session_ids = sorted(set(worker_session_ids + daemon_session_ids))
             return {
@@ -559,7 +733,7 @@ def create_daemon_app(
     log_level: str,
     worker_port: int,
     api_token: str,
-    admin_token: str,
+    control_token: str,
     idle_timeout_seconds: int,
     worker_policy: str,
     warmup_seconds: float = 0.0,
@@ -569,6 +743,8 @@ def create_daemon_app(
     daemon_instance_id = f"{daemon_pid}-{uuid.uuid4().hex[:8]}"
     daemon_started_at = time.time()
     session_manager = SessionManager(config_path=config_path)
+    manual_profile_manager = ManualProfileRuntimeManager(session_manager, config_path)
+    keepalive_manager = KeepaliveJobManager(config_path)
     worker_manager = WorkerManager(
         session_manager=session_manager,
         config_path=config_path,
@@ -586,9 +762,9 @@ def create_daemon_app(
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
-    _require_auth = bool(api_token)
-    _admin_token = str(admin_token or "").strip()
-    _require_admin_auth = bool(_admin_token)
+    _require_mcp_auth = bool(api_token)
+    _control_token = str(control_token or "").strip()
+    _require_control_auth = bool(_control_token)
 
     effective_warmup_seconds = max(0.0, float(warmup_seconds or 0.0))
 
@@ -607,22 +783,49 @@ def create_daemon_app(
         }
 
     def _is_management_path(path_text: str) -> bool:
+        return False
+
+    def _is_control_path(path_text: str) -> bool:
         path_text = str(path_text or "").strip()
-        if not path_text.startswith("/_daemon/"):
+        return path_text == "/_control" or path_text.startswith("/_control/")
+
+    def _is_mcp_scoped_path(path_text: str) -> bool:
+        path_text = str(path_text or "").strip()
+        if _is_control_path(path_text):
             return False
-        if path_text.startswith("/_daemon/automation/"):
+        if path_text in {"/", "/health"}:
             return False
-        if path_text.startswith("/_daemon/status"):
-            return False
-        if path_text.startswith("/_daemon/profiles") and "/reclaim" not in path_text:
-            return False
-        return True
+        if path_text.startswith("/_daemon/"):
+            return True
+        if path_text == public_path or path_text.startswith(f"{public_path.rstrip('/')}/"):
+            return True
+        return False
 
     class _AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
+            request_path = str(request.url.path or "").strip()
             auth_header = (request.headers.get("authorization") or "").strip()
             token_value = ""
-            if _require_auth:
+            if _is_control_path(request_path):
+                if _require_control_auth:
+                    if not auth_header:
+                        return JSONResponse(
+                            {"error": "Authentication required", "detail": "Missing Authorization header"},
+                            status_code=401,
+                        )
+                    parts = auth_header.split()
+                    if len(parts) != 2 or parts[0].lower() != "bearer":
+                        return JSONResponse(
+                            {"error": "Authentication required", "detail": "Authorization header must use Bearer scheme"},
+                            status_code=401,
+                        )
+                    token_value = parts[1]
+                    if not secrets.compare_digest(token_value, _control_token):
+                        return JSONResponse(
+                            {"error": "Authentication required", "detail": "Invalid control API token"},
+                            status_code=401,
+                        )
+            elif _is_mcp_scoped_path(request_path) and _require_mcp_auth:
                 if not auth_header:
                     return JSONResponse(
                         {"error": "Authentication required", "detail": "Missing Authorization header"},
@@ -635,27 +838,17 @@ def create_daemon_app(
                         status_code=401,
                     )
                 token_value = parts[1]
-                if not secrets.compare_digest(token_value, api_token) and not (_require_admin_auth and secrets.compare_digest(token_value, _admin_token)):
+                if not secrets.compare_digest(token_value, api_token):
                     return JSONResponse(
                         {"error": "Authentication required", "detail": "Invalid API token"},
                         status_code=401,
                     )
-            if _is_management_path(request.url.path):
-                if not _require_admin_auth:
-                    return JSONResponse(
-                        {"error": "Management API disabled", "detail": "Admin token is not configured for management endpoints"},
-                        status_code=403,
-                    )
-                if not token_value or not secrets.compare_digest(token_value, _admin_token):
-                    return JSONResponse(
-                        {"error": "Admin authentication required", "detail": "Management endpoints require the admin token"},
-                        status_code=403,
-                    )
-            request_path = str(request.url.path or "").strip()
             if (
                 not _daemon_ready()
-                and request_path not in {"/", "/health", "/_daemon/status"}
+                and request_path not in {"/", "/health", "/_daemon/status", "/_control/status", "/_control/ping"}
                 and not request_path.startswith("/_daemon/status")
+                and not request_path.startswith("/_control/status")
+                and not request_path.startswith("/_control/ping")
             ):
                 remaining_seconds = max(0.0, effective_warmup_seconds - (time.time() - daemon_started_at))
                 response = JSONResponse(_daemon_warmup_payload(), status_code=503)
@@ -669,6 +862,10 @@ def create_daemon_app(
         try:
             yield
         finally:
+            try:
+                keepalive_manager.request_stop()
+            except Exception:
+                pass
             worker_manager.shutdown()
 
     app = FastAPI(title="Chromium Advanced MCP Daemon", lifespan=lifespan)
@@ -712,6 +909,433 @@ def create_daemon_app(
             return status
         except Exception as exc:
             raise _as_http_error(exc) from exc
+
+    @app.get("/_control/status")
+    def control_status() -> Dict:
+        try:
+            session_manager.reconcile_stale_profile_occupancy()
+            session_manager.reap_expired_profile_occupancy()
+            return {
+                "ok": True,
+                "surface": "control",
+                "daemon_pid": daemon_pid,
+                "daemon_instance_id": daemon_instance_id,
+                "daemon_ready": _daemon_ready(),
+                "warmup_remaining_ms": max(
+                    0,
+                    int((effective_warmup_seconds - (time.time() - daemon_started_at)) * 1000),
+                ),
+            }
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.get("/_control/ping")
+    def control_ping() -> Dict:
+        return {
+            "ok": True,
+            "surface": "control",
+            "daemon_pid": daemon_pid,
+            "daemon_instance_id": daemon_instance_id,
+            "daemon_ready": _daemon_ready(),
+            "time": now_text(),
+        }
+
+    @app.get("/_control/dashboard")
+    def control_dashboard() -> Dict:
+        started_at = time.perf_counter()
+        try:
+            session_manager.reconcile_stale_profile_occupancy()
+            session_manager.reap_expired_profile_occupancy()
+            profiles = session_manager.list_profiles()
+            sessions = session_manager.list_sessions()
+            server_status = session_manager.get_runtime_status_snapshot()
+            busy_profiles = [item for item in profiles if str(item.get("busy_state", "idle")) != "idle"]
+            return {
+                "ok": True,
+                "surface": "control",
+                "daemon_pid": daemon_pid,
+                "daemon_instance_id": daemon_instance_id,
+                "daemon_ready": _daemon_ready(),
+                "profile_count": len(profiles),
+                "busy_profile_count": len(busy_profiles),
+                "active_session_count": len(sessions),
+                "profiles": profiles,
+                "sessions": sessions,
+                "server_status": server_status,
+                "events": session_manager.list_recent_occupancy_events(limit=50),
+                "status_build_ms": int((time.perf_counter() - started_at) * 1000),
+            }
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.get("/_control/profiles")
+    def control_profiles(include_runtime_snapshot: bool = False) -> Dict:
+        started_at = time.perf_counter()
+        try:
+            session_manager.reconcile_stale_profile_occupancy()
+            session_manager.reap_expired_profile_occupancy()
+            include_heavy_profile_details = bool(include_runtime_snapshot)
+            payload = {
+                "ok": True,
+                "surface": "control",
+                "profiles": session_manager.list_profiles(
+                    include_external_processes=include_heavy_profile_details,
+                    include_mirror_validation=include_heavy_profile_details,
+                ),
+                "events": session_manager.list_recent_occupancy_events(limit=50),
+                "status_build_ms": int((time.perf_counter() - started_at) * 1000),
+            }
+            if bool(include_runtime_snapshot):
+                payload["server_status"] = session_manager.get_runtime_status_snapshot()
+            return payload
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.get("/_control/profiles/{profile_name}")
+    def control_profile_status(profile_name: str, include_runtime_snapshot: bool = False) -> Dict:
+        try:
+            session_manager.reconcile_stale_profile_occupancy()
+            session_manager.reap_expired_profile_occupancy()
+            include_heavy_profile_details = bool(include_runtime_snapshot)
+            profile_payload = session_manager.get_profile_status_with_options(
+                profile_name,
+                include_external_processes=include_heavy_profile_details,
+                include_mirror_validation=include_heavy_profile_details,
+            )
+            payload = {
+                "ok": True,
+                "surface": "control",
+                "profile": profile_payload,
+            }
+            if bool(include_runtime_snapshot):
+                payload["server_status"] = session_manager.get_runtime_status_snapshot()
+            return payload
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.get("/_control/sessions")
+    def control_sessions() -> Dict:
+        try:
+            session_manager.reconcile_stale_profile_occupancy()
+            session_manager.reap_expired_profile_occupancy()
+            return {
+                "ok": True,
+                "surface": "control",
+                "sessions": session_manager.list_sessions(),
+            }
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.get("/_control/events")
+    def control_events(limit: int = 100) -> Dict:
+        bounded_limit = max(1, min(1000, int(limit or 100)))
+        try:
+            session_manager.reconcile_stale_profile_occupancy()
+            session_manager.reap_expired_profile_occupancy()
+            return {
+                "ok": True,
+                "surface": "control",
+                "events": session_manager.list_recent_occupancy_events(limit=bounded_limit),
+                "limit": bounded_limit,
+            }
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.get("/_control/keepalive")
+    def control_keepalive_status() -> Dict:
+        config = normalize_config(load_app_config(config_path))
+        keepalive = dict(config.get("keepalive", {}) if isinstance(config.get("keepalive", {}), dict) else {})
+        profiles = list(config.get("profiles", []) if isinstance(config.get("profiles", []), list) else [])
+        enabled_profiles = []
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            profile_name = str(item.get("profile_name", "") or "").strip()
+            if profile_name and bool(item.get("keepalive_enabled", False)):
+                enabled_profiles.append(
+                    {
+                        "profile_name": profile_name,
+                        "sites": dict(item.get("keepalive_sites", {}) if isinstance(item.get("keepalive_sites", {}), dict) else {}),
+                        "last_keepalive_at": str(item.get("last_keepalive_at", "") or ""),
+                        "last_keepalive_status": str(item.get("last_keepalive_status", "") or ""),
+                        "last_keepalive_message": str(item.get("last_keepalive_message", "") or ""),
+                    }
+                )
+        return {
+            "ok": True,
+            "surface": "control",
+            "keepalive": keepalive,
+            "enabled_profiles": enabled_profiles,
+            "runtime": keepalive_manager.get_status(),
+        }
+
+    @app.post("/_control/profiles/{profile_name}/launch")
+    async def control_launch_profile(profile_name: str) -> Dict:
+        try:
+            result = await asyncio.to_thread(manual_profile_manager.launch, unquote(profile_name))
+            return {"ok": True, "surface": "control", "result": result}
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_control/profiles/{profile_name}/close")
+    async def control_close_profile(profile_name: str) -> Dict:
+        try:
+            result = await asyncio.to_thread(manual_profile_manager.close, unquote(profile_name))
+            return {"ok": True, "surface": "control", "result": result}
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_control/keepalive/run")
+    async def control_keepalive_run(request: Request) -> Dict:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        payload = body if isinstance(body, dict) else {}
+        selected_profiles = payload.get("selected_profiles", [])
+        if not isinstance(selected_profiles, list):
+            raise HTTPException(status_code=400, detail="selected_profiles must be a list")
+        source = str(payload.get("source", "") or "manual").strip() or "manual"
+        try:
+            result = await asyncio.to_thread(
+                keepalive_manager.start,
+                selected_profiles=[str(item).strip() for item in selected_profiles if str(item).strip()],
+                source=source,
+            )
+            return {"ok": True, "surface": "control", "runtime": result}
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_control/keepalive/stop")
+    def control_keepalive_stop() -> Dict:
+        try:
+            return {"ok": True, "surface": "control", "runtime": keepalive_manager.request_stop()}
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.post("/_control/service/worker/start")
+    def control_worker_start() -> Dict:
+        try:
+            return {"ok": True, "surface": "control", "result": worker_manager.ensure_worker_running()}
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/_control/service/worker/stop")
+    def control_worker_stop() -> Dict:
+        try:
+            return {"ok": True, "surface": "control", "result": worker_manager.stop_worker("control_api_stop")}
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+
+    @app.get("/_control/logs")
+    def control_logs(limit: int = 200) -> Dict:
+        bounded_limit = max(1, min(1000, int(limit or 200)))
+        log_path = get_control_log_path(config_path)
+        items = read_recent_jsonl_events(log_path, limit=bounded_limit)
+        return {
+            "ok": True,
+            "surface": "control",
+            "log_path": log_path,
+            "limit": bounded_limit,
+            "items": items,
+        }
+
+    @app.get("/_control/log-settings")
+    def control_log_settings() -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config
+
+        config = normalize_config(load_app_config(config_path))
+        logging_settings = dict(config.get("logging", {}) if isinstance(config.get("logging", {}), dict) else {})
+        if "level" not in logging_settings:
+            logging_settings["level"] = "info"
+        if "retention_days" not in logging_settings:
+            logging_settings["retention_days"] = 7
+        return {
+            "ok": True,
+            "surface": "control",
+            "logging": logging_settings,
+        }
+
+    @app.put("/_control/log-settings")
+    async def control_update_log_settings(request: Request) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config, save_app_config
+
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        config = normalize_config(load_app_config(config_path))
+        config.setdefault("logging", {})
+        level = str(payload.get("level", config["logging"].get("level", "info"))).strip().lower() or "info"
+        if level not in {"debug", "info", "warning", "error"}:
+            raise HTTPException(status_code=400, detail="unsupported log level")
+        retention_days = max(1, min(365, int(payload.get("retention_days", config["logging"].get("retention_days", 7)) or 7)))
+        config["logging"]["level"] = level
+        config["logging"]["retention_days"] = retention_days
+        config = save_app_config(config, config_path)
+        append_jsonl_event(
+            get_control_log_path(config_path),
+            {
+                "time": now_text(),
+                "source": "control",
+                "level": "info",
+                "event": "log_settings_updated",
+                "message": "control log settings updated",
+                "detail": {"level": level, "retention_days": retention_days},
+            },
+        )
+        return {
+            "ok": True,
+            "surface": "control",
+            "logging": dict(config.get("logging", {})),
+        }
+
+    @app.get("/_control/plugins")
+    def control_plugins() -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config
+
+        config = normalize_config(load_app_config(config_path))
+        profile_plugin_map = dict(config.get("profile_plugins", {}) if isinstance(config.get("profile_plugins", {}), dict) else {})
+        return {
+            "ok": True,
+            "surface": "control",
+            "plugins": get_keepalive_plugin_records(config),
+            "profile_plugin_map": profile_plugin_map,
+        }
+
+    @app.post("/_control/plugins/preview")
+    async def control_preview_plugin(request: Request) -> Dict:
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        site_id = str(payload.get("site_id", "") or "").strip()
+        source_text = str(payload.get("source_text", "") or "")
+        if not site_id:
+            raise HTTPException(status_code=400, detail="site_id is required")
+        metadata = inspect_keepalive_plugin_source(site_id, source_text)
+        return {
+            "ok": True,
+            "surface": "control",
+            "metadata": metadata,
+        }
+
+    @app.post("/_control/plugins")
+    async def control_create_plugin(request: Request) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config
+
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        config = normalize_config(load_app_config(config_path))
+        site_id = str(payload.get("site_id", "") or "").strip()
+        if not site_id:
+            raise HTTPException(status_code=400, detail="site_id is required")
+        source_text = str(payload.get("source_text", "") or "")
+        if not source_text.strip():
+            source_text = build_keepalive_plugin_template(
+                site_id,
+                display_name=str(payload.get("display_name", "") or ""),
+                home_url=str(payload.get("home_url", "") or ""),
+            )
+        save_result = save_keepalive_plugin_source(site_id, source_text, config)
+        return {
+            "ok": True,
+            "surface": "control",
+            "plugin": save_result,
+        }
+
+    @app.put("/_control/plugins/{plugin_id}")
+    async def control_update_plugin(plugin_id: str, request: Request) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config, save_app_config, migrate_keepalive_site_id_references
+
+        normalized_plugin_id = str(unquote(plugin_id) or "").strip()
+        if not normalized_plugin_id:
+            raise HTTPException(status_code=400, detail="plugin_id is required")
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        source_text = str(payload.get("source_text", "") or "")
+        if not source_text.strip():
+            raise HTTPException(status_code=400, detail="source_text is required")
+        config = normalize_config(load_app_config(config_path))
+        save_result = save_keepalive_plugin_source(normalized_plugin_id, source_text, config)
+        previous_site_id = str(save_result.get("previous_site_id", "") or normalized_plugin_id)
+        current_site_id = str(save_result.get("site_id", "") or previous_site_id)
+        if previous_site_id and current_site_id and previous_site_id != current_site_id:
+            config, _ = migrate_keepalive_site_id_references(config, previous_site_id, current_site_id)
+            config = save_app_config(config, config_path)
+        return {
+            "ok": True,
+            "surface": "control",
+            "plugin": save_result,
+        }
+
+    @app.delete("/_control/plugins/{plugin_id}")
+    def control_delete_plugin(plugin_id: str) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config
+
+        normalized_plugin_id = str(unquote(plugin_id) or "").strip()
+        if not normalized_plugin_id:
+            raise HTTPException(status_code=400, detail="plugin_id is required")
+        config = normalize_config(load_app_config(config_path))
+        path = delete_keepalive_plugin_source(normalized_plugin_id, config)
+        return {
+            "ok": True,
+            "surface": "control",
+            "plugin_id": normalized_plugin_id,
+            "path": path,
+        }
+
+    @app.get("/_control/profiles/{profile_name}/plugins")
+    def control_profile_plugins(profile_name: str) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config
+
+        config = normalize_config(load_app_config(config_path))
+        normalized_profile_name = str(unquote(profile_name) or "").strip()
+        profile_plugin_map = dict(config.get("profile_plugins", {}) if isinstance(config.get("profile_plugins", {}), dict) else {})
+        selected = profile_plugin_map.get(normalized_profile_name, [])
+        if not isinstance(selected, list):
+            selected = []
+        return {
+            "ok": True,
+            "surface": "control",
+            "profile_name": normalized_profile_name,
+            "plugin_ids": [str(item).strip() for item in selected if str(item).strip()],
+        }
+
+    @app.put("/_control/profiles/{profile_name}/plugins")
+    async def control_update_profile_plugins(profile_name: str, request: Request) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config, save_app_config
+
+        normalized_profile_name = str(unquote(profile_name) or "").strip()
+        if not normalized_profile_name:
+            raise HTTPException(status_code=400, detail="profile_name is required")
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        plugin_ids = payload.get("plugin_ids", [])
+        if not isinstance(plugin_ids, list):
+            raise HTTPException(status_code=400, detail="plugin_ids must be a list")
+        normalized_plugin_ids = []
+        for item in plugin_ids:
+            value = str(item or "").strip()
+            if value and value not in normalized_plugin_ids:
+                normalized_plugin_ids.append(value)
+        config = normalize_config(load_app_config(config_path))
+        config.setdefault("profile_plugins", {})
+        config["profile_plugins"][normalized_profile_name] = normalized_plugin_ids
+        config = save_app_config(config, config_path)
+        append_jsonl_event(
+            get_control_log_path(config_path),
+            {
+                "time": now_text(),
+                "source": "control",
+                "level": "info",
+                "event": "profile_plugins_updated",
+                "message": "profile plugin associations updated",
+                "detail": {"profile_name": normalized_profile_name, "plugin_ids": normalized_plugin_ids},
+            },
+        )
+        return {
+            "ok": True,
+            "surface": "control",
+            "profile_name": normalized_profile_name,
+            "plugin_ids": normalized_plugin_ids,
+        }
 
     @app.get("/_daemon/profiles")
     def daemon_profiles() -> Dict:
@@ -1169,7 +1793,7 @@ def main() -> None:
     parser.add_argument("--worker-port", default=os.environ.get("CHROMIUM_MCP_WORKER_PORT", "28889"))
     parser.add_argument("--idle-timeout-seconds", default=os.environ.get("CHROMIUM_MCP_IDLE_TIMEOUT_SECONDS", "60"))
     parser.add_argument("--api-token", default=os.environ.get("CHROMIUM_MCP_API_TOKEN", "").strip())
-    parser.add_argument("--admin-token", default=os.environ.get("CHROMIUM_MCP_ADMIN_TOKEN", "").strip())
+    parser.add_argument("--control-token", default=os.environ.get("CHROMIUM_CONTROL_API_TOKEN", "").strip())
     parser.add_argument("--worker-policy", default=os.environ.get("CHROMIUM_MCP_WORKER_POLICY", "").strip())
     parser.add_argument("--config-path", default=os.environ.get("CHROMIUM_MCP_CONFIG_PATH", "").strip())
     args = parser.parse_args()
@@ -1187,14 +1811,14 @@ def main() -> None:
             config["mcp"]["api_token"] = configured_token
             config = save_app_config(config, config_path)
         args.api_token = configured_token
-    if not args.admin_token:
-        configured_admin_token = str(config.get("mcp", {}).get("admin_token", "")).strip()
-        if not configured_admin_token:
-            configured_admin_token = resolve_mcp_admin_token(config)
-            config.setdefault("mcp", {})
-            config["mcp"]["admin_token"] = configured_admin_token
+    if not args.control_token:
+        configured_control_token = str(config.get("control", {}).get("api_token", "")).strip()
+        if not configured_control_token:
+            configured_control_token = resolve_control_api_token(config)
+            config.setdefault("control", {})
+            config["control"]["api_token"] = configured_control_token
             config = save_app_config(config, config_path)
-        args.admin_token = configured_admin_token
+        args.control_token = configured_control_token
     if not args.worker_policy:
         args.worker_policy = str(config.get("mcp", {}).get("worker_policy", "sticky")).strip() or "sticky"
     
@@ -1213,7 +1837,7 @@ def main() -> None:
             worker_port=int(args.worker_port or 28889),
             idle_timeout_seconds=int(args.idle_timeout_seconds or 60),
             api_token=str(args.api_token or "").strip(),
-            admin_token=str(args.admin_token or "").strip(),
+            control_token=str(args.control_token or "").strip(),
             worker_policy=str(args.worker_policy or "sticky").strip() or "sticky",
             warmup_seconds=DAEMON_WARMUP_SECONDS,
         )

@@ -243,16 +243,23 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:28888/_daemon/status' -Headers @{ Autho
 
 If `mcp.api_token` is configured, every daemon request must send that bearer token. There is no localhost exemption.
 
-Management endpoints are intentionally separate:
+Control endpoints are intentionally separate:
 
-- `mcp.admin_token` is for management endpoints only.
-- `/_daemon/worker/start`
-- `/_daemon/worker/stop`
-- `/_daemon/profiles/{profile_name}/reclaim`
-- `/_daemon/reap-expired`
+- `control.api_token` is for GUI/control endpoints only.
+- `/_control/status`
+- `/_control/dashboard`
+- `/_control/profiles`
+- `/_control/sessions`
+- `/_control/keepalive`
+- `/_control/logs`
+- `/_control/log-settings`
+- `/_control/plugins`
+- `/_control/profiles/{profile_name}/plugins`
+- `/_control/service/worker/start`
+- `/_control/service/worker/stop`
 
-Do not assume the business token can call those endpoints. If `mcp.admin_token`
-is configured, those routes must use the admin bearer token instead.
+Do not assume the MCP token can call those endpoints. If `control.api_token`
+is configured, those routes must use the control bearer token instead.
 
 Worker lifecycle is controlled by `mcp.worker_policy`:
 
@@ -300,7 +307,7 @@ Client configuration reminder:
 
 - If the daemon has `mcp.api_token` configured, every MCP client must send `Authorization: Bearer <token>`.
 - There is no localhost or `127.0.0.1` bypass.
-- If you need management HTTP calls, configure and use the separate `mcp.admin_token` instead of reusing the business token by assumption.
+- If you need GUI/control HTTP calls, configure and use the separate `control.api_token` instead of reusing the MCP token by assumption.
 - For Codex, the typical config shape is:
 
 ```toml

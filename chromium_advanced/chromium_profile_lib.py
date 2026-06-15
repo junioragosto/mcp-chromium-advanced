@@ -393,7 +393,16 @@ def build_default_config() -> Dict:
             "headless": False,
             "start_minimized": True,
             "api_token": "",
-            "admin_token": "",
+        },
+        "control": {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "path": "/_control",
+            "api_token": "",
+        },
+        "logging": {
+            "level": "info",
+            "retention_days": 7,
         },
         "launch": {
             "new_window": True,
@@ -453,6 +462,7 @@ def build_default_config() -> Dict:
             "last_run_message": "",
             "last_run_profile_count": 0,
         },
+        "profile_plugins": {},
     }
 
 
@@ -1349,14 +1359,22 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["mcp"]["start_minimized"] = bool(loaded_mcp.get("start_minimized"))
         if "api_token" in loaded_mcp and loaded_mcp.get("api_token") is not None:
             normalized["mcp"]["api_token"] = str(loaded_mcp.get("api_token")).strip()
-        if "admin_token" in loaded_mcp and loaded_mcp.get("admin_token") is not None:
-            normalized["mcp"]["admin_token"] = str(loaded_mcp.get("admin_token")).strip()
         if "port" in loaded_mcp:
             normalized["mcp"]["port"] = loaded_mcp.get("port")
         if "worker_port" in loaded_mcp:
             normalized["mcp"]["worker_port"] = loaded_mcp.get("worker_port")
         if "idle_timeout_seconds" in loaded_mcp:
             normalized["mcp"]["idle_timeout_seconds"] = loaded_mcp.get("idle_timeout_seconds")
+
+    loaded_control = loaded.get("control", {})
+    if isinstance(loaded_control, dict):
+        for key in ("host", "path"):
+            if key in loaded_control and loaded_control.get(key) is not None:
+                normalized["control"][key] = str(loaded_control.get(key)).strip()
+        if "enabled" in loaded_control:
+            normalized["control"]["enabled"] = bool(loaded_control.get("enabled"))
+        if "api_token" in loaded_control and loaded_control.get("api_token") is not None:
+            normalized["control"]["api_token"] = str(loaded_control.get("api_token")).strip()
 
     loaded_launch = loaded.get("launch", {})
     if isinstance(loaded_launch, dict):
@@ -1383,6 +1401,13 @@ def normalize_config(config: Optional[Dict]) -> Dict:
         extra_args = loaded_launch.get("extra_args", [])
         if isinstance(extra_args, list):
             normalized["launch"]["extra_args"] = [str(item).strip() for item in extra_args if str(item).strip()]
+
+    loaded_logging = loaded.get("logging", {})
+    if isinstance(loaded_logging, dict):
+        if "level" in loaded_logging and loaded_logging.get("level") is not None:
+            normalized["logging"]["level"] = str(loaded_logging.get("level")).strip()
+        if "retention_days" in loaded_logging:
+            normalized["logging"]["retention_days"] = loaded_logging.get("retention_days")
 
     loaded_keepalive = loaded.get("keepalive", {})
     legacy_keepalive_sites = normalize_keepalive_site_flags(
@@ -1446,6 +1471,21 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             if isinstance(item, dict) and str(item.get("profile_name", "")).strip()
         ])
 
+    loaded_profile_plugins = loaded.get("profile_plugins", {})
+    if isinstance(loaded_profile_plugins, dict):
+        normalized_map = {}
+        for profile_name, plugin_ids in loaded_profile_plugins.items():
+            normalized_profile_name = str(profile_name or "").strip()
+            if not normalized_profile_name or not isinstance(plugin_ids, list):
+                continue
+            values = []
+            for plugin_id in plugin_ids:
+                value = str(plugin_id or "").strip()
+                if value and value not in values:
+                    values.append(value)
+            normalized_map[normalized_profile_name] = values
+        normalized["profile_plugins"] = normalized_map
+
     normalized["profiles"] = sort_profiles(normalized["profiles"])
     normalized["app"]["language"] = normalize_language_code(normalized["app"].get("language", detect_default_language()))
     normalized["app"]["browser_engine"] = normalize_browser_engine_name(
@@ -1461,7 +1501,6 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     normalized["mcp"]["headless"] = bool(normalized["mcp"].get("headless", False))
     normalized["mcp"]["start_minimized"] = bool(normalized["mcp"].get("start_minimized", True))
     normalized["mcp"]["api_token"] = str(normalized["mcp"].get("api_token", "")).strip()
-    normalized["mcp"]["admin_token"] = str(normalized["mcp"].get("admin_token", "")).strip()
     normalized["mcp"]["transport"] = str(normalized["mcp"].get("transport", "streamable-http")).strip() or "streamable-http"
     normalized["mcp"]["host"] = str(normalized["mcp"].get("host", "127.0.0.1")).strip() or "127.0.0.1"
     normalized["mcp"]["path"] = str(normalized["mcp"].get("path", "/mcp")).strip() or "/mcp"
@@ -1480,6 +1519,17 @@ def normalize_config(config: Optional[Dict]) -> Dict:
         10,
         int(normalized["mcp"].get("idle_timeout_seconds", 60)),
     )
+    normalized["control"]["enabled"] = bool(normalized["control"].get("enabled", True))
+    normalized["control"]["api_token"] = str(normalized["control"].get("api_token", "")).strip()
+    normalized["control"]["host"] = str(normalized["control"].get("host", "127.0.0.1")).strip() or "127.0.0.1"
+    normalized["control"]["path"] = str(normalized["control"].get("path", "/_control")).strip() or "/_control"
+    if not normalized["control"]["path"].startswith("/"):
+        normalized["control"]["path"] = "/" + normalized["control"]["path"]
+    normalized["logging"]["level"] = str(normalized["logging"].get("level", "info")).strip().lower() or "info"
+    if normalized["logging"]["level"] not in {"debug", "info", "warning", "error"}:
+        normalized["logging"]["level"] = "info"
+    normalized["logging"]["retention_days"] = max(1, min(365, int(normalized["logging"].get("retention_days", 7))))
+    normalized["profile_plugins"] = dict(normalized.get("profile_plugins", {}) if isinstance(normalized.get("profile_plugins", {}), dict) else {})
     normalized["keepalive"]["headless"] = bool(normalized["keepalive"].get("headless", False))
     normalized["keepalive"]["page_timeout_seconds"] = max(10, int(normalized["keepalive"].get("page_timeout_seconds", 45)))
     normalized["keepalive"]["between_profiles_seconds"] = max(0, int(normalized["keepalive"].get("between_profiles_seconds", 5)))
@@ -2722,7 +2772,6 @@ from chromium_advanced.occupancy_registry import (  # noqa: E402
 from chromium_advanced.mcp_runtime_config import (  # noqa: E402
     is_mcp_localhost_listening,
     mcp_auth_required,
-    resolve_mcp_admin_token,
     resolve_mcp_api_token,
     resolve_mcp_headless,
     resolve_mcp_start_minimized,

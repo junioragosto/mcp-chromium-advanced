@@ -71,28 +71,38 @@ The daemon now separates business access from management access.
 
 - `api_token`
   Used by normal MCP clients and daemon automation callers for browser work.
-- `admin_token`
-  Required for management endpoints such as worker lifecycle control and force reclaim.
+- `control.api_token`
+  Required for GUI/control endpoints such as dashboard, logs, keepalive state, plugin CRUD, and worker lifecycle control.
 
 Security boundary:
 
-- `admin_token` is intentionally independent from `api_token`.
-- If `admin_token` is absent, management endpoints stay disabled instead of silently accepting the business token.
+- `control.api_token` is intentionally independent from `mcp.api_token`.
+- If `control.api_token` is absent, control endpoints stay disabled instead of silently accepting the MCP token.
 - GUI and daemon bootstrap now generate distinct values for both tokens when persistence needs to seed them.
 
 Current endpoint boundary:
 
-- Business surface:
+- MCP/business surface:
   - `/mcp`
   - `/_daemon/status`
   - `/_daemon/profiles`
   - `/_daemon/profiles/{profile_name}`
   - `/_daemon/automation/*`
-- Admin-only surface:
-  - `/_daemon/worker/start`
-  - `/_daemon/worker/stop`
-  - `/_daemon/profiles/{profile_name}/reclaim`
-  - `/_daemon/reap-expired`
+- GUI/control surface:
+  - `/_control/ping`
+  - `/_control/status`
+  - `/_control/dashboard`
+  - `/_control/profiles`
+  - `/_control/profiles/{profile_name}`
+  - `/_control/sessions`
+  - `/_control/events`
+  - `/_control/keepalive`
+  - `/_control/logs`
+  - `/_control/log-settings`
+  - `/_control/plugins`
+  - `/_control/profiles/{profile_name}/plugins`
+  - `/_control/service/worker/start`
+  - `/_control/service/worker/stop`
 
 The worker runtime policy is configurable:
 
@@ -368,9 +378,9 @@ The daemon stays available between tasks. The browser worker is started only whe
 
 Operational notes:
 
-- If `mcp.api_token` is configured, every daemon request must send `Authorization: Bearer <token>`. There is no localhost bypass.
-- If `mcp.admin_token` is not configured, admin-only daemon endpoints remain disabled instead of falling back to `mcp.api_token`.
-- GUI status polling also uses the same bearer token, so the GUI and external MCP clients follow one authentication rule.
+- If `mcp.api_token` is configured, every MCP/business daemon request must send `Authorization: Bearer <token>`. There is no localhost bypass.
+- If `control.api_token` is configured, every GUI/control request to `/_control/*` must send `Authorization: Bearer <token>`. There is no localhost bypass there either.
+- `mcp.api_token` cannot call `/_control/*`, and `control.api_token` cannot call MCP/business routes.
 - The daemon is intended to stay stable while the worker is short-lived and lazily started.
 - A worker reclaimed because of `idle_timeout` is a normal managed lifecycle event, not a crash.
 - If the configured Chromium binary root already has live browser processes, session startup is intentionally blocked with states such as `external_chromium_running`.
@@ -536,6 +546,11 @@ For this release line:
 - each target machine is expected to configure its own Chromium binary and ChromeDriver paths after launch
 - release artifacts bundle the GUI app, daemon, worker runtime, `resources/`, skill templates, example config, and release docs
 - release artifacts also bundle the latest fingerprint plugin zip from `omegaee/my-fingerprint` together with release metadata
+- app icons are now generated as platform-specific assets from one transparent rounded master:
+  - Windows: `resources/chromium_profile_manager.ico`
+  - macOS: `resources/chromium_profile_manager.icns`
+  - Linux: `resources/linux_icons/`
+  - master PNG: `resources/chromium_profile_manager.png`
 
 This keeps release engineering simple while browser/runtime asset management is still being standardized and still gives operators a usable install bundle.
 
@@ -543,6 +558,8 @@ The release build entrypoints are now:
 
 - local cross-platform packager:
   `python scripts/build_release.py --artifact-name <name>`
+- icon asset generator:
+  `python scripts/generate_app_icons.py`
 - GitHub Actions workflow:
   `.github/workflows/build-release.yml`
 

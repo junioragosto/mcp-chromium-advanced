@@ -230,11 +230,22 @@ def can_connect(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
-def fetch_json(url: str, timeout: float = 1.5, headers: Optional[Dict[str, str]] = None) -> Dict:
+def fetch_json(
+    url: str,
+    timeout: float = 1.5,
+    headers: Optional[Dict[str, str]] = None,
+    method: str = "GET",
+    json_payload: Optional[Dict] = None,
+) -> Dict:
     request_headers = {"Accept": "application/json"}
     if headers:
         request_headers.update({str(k): str(v) for k, v in headers.items() if k and v is not None})
-    request = urllib.request.Request(url, headers=request_headers)
+    body = None
+    normalized_method = str(method or "GET").strip().upper() or "GET"
+    if json_payload is not None:
+        request_headers["Content-Type"] = "application/json"
+        body = json.dumps(json_payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(url, headers=request_headers, data=body, method=normalized_method)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = response.read().decode("utf-8", errors="replace")
     data = json.loads(payload)

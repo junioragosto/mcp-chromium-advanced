@@ -19,9 +19,9 @@ For the Chromium Profile Manager service on this machine:
   `http://127.0.0.1:28888/mcp`
 - daemon auth:
   if `mcp.api_token` is configured, every daemon request must send `Authorization: Bearer <token>` with no localhost bypass
-- daemon admin auth:
-  management endpoints use `mcp.admin_token`, which may differ from the business token
-  if `mcp.admin_token` is absent, management endpoints stay disabled instead of falling back to `mcp.api_token`
+- daemon control auth:
+  GUI/control endpoints use `control.api_token`, which may differ from the business token
+  if `control.api_token` is absent, `/_control/*` endpoints stay disabled instead of falling back to `mcp.api_token`
 - important configuration boundary:
   this skill alone does not register an MCP server; the WSL-side Codex config must also define `mcp_servers.browserIdentity`
 
@@ -137,7 +137,7 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - Verify that the Windows service is listening on a WSL-reachable host such as `0.0.0.0` or a specific LAN address.
 - If WSL cannot reach the service, check Windows firewall rules and listening host configuration before debugging MCP semantics.
 - If auth is enabled on Windows, include the bearer token on every WSL-side connectivity check and MCP request.
-- Do not assume the business token can call management routes. `/_daemon/worker/*`, force reclaim, and expiry-reap operations require the admin token when the daemon is configured with one.
+- Do not assume the MCP token can call control routes. `/_control/*` operations require the control token when the daemon is configured with one.
 - After connectivity is confirmed, follow the same identity confirmation and occupancy rules as the normal browser identity MCP workflow.
 - After connectivity is confirmed, do not infer a target website account from the GUI profile account label; verify the actual site login inside the target website when account correctness matters.
 - After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, `browser_diagnose_page`, `browser_get_action_trace`, and `get_mcp_tool_trace` over screenshot-only diagnosis.

@@ -44,10 +44,10 @@ If `mcp.api_token` is set in the GUI/config, every MCP request must send:
 
 - `mcp.api_token`
   Required for normal MCP/browser business calls
-- `mcp.admin_token`
-  Required for daemon management endpoints such as worker control and reclaim
+- `control.api_token`
+  Required for GUI/control endpoints such as dashboard, logs, keepalive state, plugin CRUD, and worker control
 
-If `admin_token` is empty, admin endpoints remain disabled.
+If `control.api_token` is empty, `/_control/*` endpoints remain disabled.
 
 ## Browser / Driver Requirements
 

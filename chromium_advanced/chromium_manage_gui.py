@@ -54,7 +54,6 @@ from chromium_advanced.chromium_profile_lib import (
     APP_DISPLAY_NAME,
     APP_VERSION,
     LEGACY_CHATGPT_PROMPT,
-    KeepAliveStopController,
     build_keepalive_plugin_template,
     build_profile_detail_text,
     delete_keepalive_plugin_source,
@@ -68,8 +67,6 @@ from chromium_advanced.chromium_profile_lib import (
     ensure_profile_bookmarks_initialized,
     get_default_config_path,
     get_default_split_user_data_profiles_root,
-    get_chromium_process_map_by_profile,
-    get_chromium_processes_for_profile,
     get_hidden_subprocess_kwargs,
     get_keepalive_site_icon_path,
     get_keepalive_site_ids,
@@ -79,25 +76,19 @@ from chromium_advanced.chromium_profile_lib import (
     read_recent_jsonl_events,
     is_legacy_default_mirror_root,
     load_json_file,
-    find_running_chromium_processes,
     get_project_root,
     get_runtime_launch_cwd,
     get_state_storage_dir,
-    launch_profile,
     load_app_config,
     next_profile_name,
     now_text,
     normalize_language_code,
     profile_sort_key,
     save_app_config,
-    save_keepalive_plugin_source,
     migrate_keepalive_site_id_references,
     sync_profiles_with_user_data,
-    terminate_chromium_processes,
-    update_profile_launch_time,
     warm_keepalive_site_icon_cache,
     write_json_atomic,
-    run_keepalive_job,
 )
 from chromium_advanced.browser_engines.constants import BROWSER_ENGINE_OPTIONS, DEFAULT_BROWSER_ENGINE
 from chromium_advanced.browser_engines.factory import normalize_browser_engine_name
@@ -123,12 +114,13 @@ from chromium_advanced.gui.gui_runtime import (
     terminate_project_mcp_processes,
 )
 from chromium_advanced.gui.gui_state import (
-    build_mcp_auth_headers,
+    build_control_auth_headers,
+    build_control_ping_url,
+    build_control_status_url,
     build_mcp_auth_warning_state,
     build_bottom_stats_text,
     build_mcp_endpoint,
     build_mcp_process_arguments as build_mcp_process_arguments_helper,
-    build_mcp_status_url,
     build_mcp_status_view_model,
     build_keepalive_schedule_view_model,
     query_mcp_status_snapshot,
@@ -147,11 +139,9 @@ from chromium_advanced.gui.gui_state import (
     build_keepalive_plugin_table_rows,
     build_keepalive_plugin_selection_view_model,
     build_keepalive_plugin_table_view_model,
-    build_keepalive_worker_message_plan,
     build_mcp_startup_failure_plan,
     build_mcp_startup_plan,
     build_mcp_stop_plan,
-    collect_stale_manual_occupancy_profiles,
     get_mcp_trace_path as get_mcp_trace_path_helper,
     get_profile_status_color_hex,
     load_profile_occupancy_cache as load_profile_occupancy_cache_helper,
@@ -168,16 +158,9 @@ from chromium_advanced.gui.gui_widgets import (
     create_centered_checkbox_widget,
     create_profile_action_buttons_widget,
 )
-from chromium_advanced.gui.gui_workers import KeepAliveWorker
 from chromium_advanced.i18n import load_language_options, load_translations
-from chromium_advanced.mcp_runtime_config import resolve_mcp_admin_token, resolve_mcp_api_token
-from chromium_advanced.occupancy_registry import (
-    clear_profile_occupancy,
-    get_occupancy_events_path,
-    list_profile_occupancy_entries,
-    occupancy_entry_is_expired,
-    write_profile_occupancy,
-)
+from chromium_advanced.mcp_runtime_config import resolve_control_api_token, resolve_mcp_api_token
+from chromium_advanced.occupancy_registry import get_occupancy_events_path, list_profile_occupancy_entries, occupancy_entry_is_expired
 
 
 SYSTEM_TYPE = platform.system()
@@ -193,6 +176,7 @@ MCP_STATUS_QUERY_TIMEOUT_SECONDS = 0.6
 MCP_STATUS_CACHE_TTL_SECONDS = 1.0
 MCP_RECENT_HEALTH_GRACE_SECONDS = 30.0
 MCP_WATCHDOG_RESTART_FAILURES = 6
+CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS = 15.0
 OCCUPANCY_EVENTS_POLL_MS = 4000
 SCHEDULE_TRIGGER_WINDOW_SECONDS = 90
 UI_REFRESH_DEBOUNCE_MS = 75
@@ -205,28 +189,6 @@ I18N = load_translations()
 WINDOW_STATE_SAVE_DELAY_MS = 400
 
 
-def _write_gui_profile_occupancy(profile_name: str, scene_type: str, state: str, owner_label: str = "", engine_name: str = "", session_id: str = "") -> None:
-    write_profile_occupancy(
-        profile_name,
-        scene_type=scene_type,
-        state=state,
-        owner_label=owner_label,
-        engine_name=engine_name,
-        session_id=session_id,
-        details={"source": "gui"},
-        event_source="gui",
-    )
-
-
-def _clear_gui_profile_occupancy(profile_name: str) -> None:
-    clear_profile_occupancy(
-        profile_name,
-        event_state="released",
-        details={"source": "gui", "cleared": True},
-        event_source="gui",
-    )
-
-
 class ChromiumManagerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -237,11 +199,6 @@ class ChromiumManagerWindow(QMainWindow):
         )
         self.config_mtime = self.get_config_mtime()
         self.selected_profile_name = ""
-        self.keepalive_worker: Optional[KeepAliveWorker] = None
-        self.keepalive_target_profiles: List[str] = []
-        self.keepalive_running_profile_name = ""
-        self.keepalive_log_prefix = ""
-        self.keepalive_stop_requested = False
         self.external_profile_process_signature = ""
         self.external_profile_process_map: Dict[str, List[int]] = {}
         self.profile_occupancy_cache: Dict[str, Dict] = {}
@@ -263,6 +220,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_last_query_at = 0.0
         self.mcp_status_last_ok_at = 0.0
         self.mcp_status_consecutive_failures = 0
+        self.control_profiles_cache: Dict = {}
+        self.control_profiles_last_query_at = 0.0
         self.window_state_dirty = False
         self.occupancy_event_file_offset = 0
         self.pending_ui_refresh_flags: Dict[str, bool] = {}
@@ -319,16 +278,17 @@ class ChromiumManagerWindow(QMainWindow):
 
     def ensure_mcp_api_token_persisted(self):
         self.config.setdefault("mcp", {})
+        self.config.setdefault("control", {})
         token = str(self.config["mcp"].get("api_token", "")).strip()
-        admin_token = str(self.config["mcp"].get("admin_token", "")).strip()
+        control_token = str(self.config["control"].get("api_token", "")).strip()
         changed = False
         if not token:
             token = resolve_mcp_api_token(self.config)
             self.config["mcp"]["api_token"] = token
             changed = True
-        if not admin_token:
-            admin_token = resolve_mcp_admin_token(self.config)
-            self.config["mcp"]["admin_token"] = admin_token
+        if not control_token:
+            control_token = resolve_control_api_token(self.config)
+            self.config["control"]["api_token"] = control_token
             changed = True
         if changed:
             self.config = save_app_config(self.config, self.config_path)
@@ -923,10 +883,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_api_token_edit.setToolTip(self.tr("mcp_api_token_tooltip"))
         self.btn_regenerate_api_token = QPushButton()
         self.btn_regenerate_api_token.clicked.connect(self.regenerate_api_token)
-        self.mcp_admin_token_label = QLabel("Admin Token")
-        self.mcp_admin_token_edit = QLineEdit()
-        self.mcp_admin_token_edit.setReadOnly(True)
-        self.mcp_admin_token_edit.setEchoMode(QLineEdit.Normal)
+        self.control_token_label = QLabel("Control Token")
+        self.control_token_edit = QLineEdit()
+        self.control_token_edit.setReadOnly(True)
+        self.control_token_edit.setEchoMode(QLineEdit.Normal)
         self.mcp_auth_warning_label = QLabel()
         self.mcp_auth_warning_label.setStyleSheet("color: #e67e22; font-weight: bold;")
         self.mcp_auth_warning_label.setWordWrap(True)
@@ -935,7 +895,7 @@ class ChromiumManagerWindow(QMainWindow):
         token_row.addWidget(self.mcp_api_token_edit, 1)
         token_row.addWidget(self.btn_regenerate_api_token)
         self.mcp_layout.addRow(self.mcp_api_token_label, token_row)
-        self.mcp_layout.addRow(self.mcp_admin_token_label, self.mcp_admin_token_edit)
+        self.mcp_layout.addRow(self.control_token_label, self.control_token_edit)
         self.mcp_layout.addRow("", self.mcp_auth_warning_label)
         self.config_layout.addWidget(self.mcp_group)
 
@@ -990,6 +950,7 @@ class ChromiumManagerWindow(QMainWindow):
                 self.mcp_status_cache,
                 mcp_status_text,
                 self.tr,
+                self.control_profiles_cache,
             )
         )
 
@@ -1083,58 +1044,6 @@ class ChromiumManagerWindow(QMainWindow):
         self.pending_mcp_log_lines = []
         self.mcp_log_output.clear()
 
-    def on_keepalive_worker_log(self, prefix: str, message: str):
-        self.append_log(message, prefix=prefix)
-
-    def on_keepalive_worker_message(self, kind: str, payload: Dict):
-        plan = build_keepalive_worker_message_plan(
-            kind=kind,
-            payload=payload or {},
-            keepalive_log_prefix=self.keepalive_log_prefix,
-            default_source_label=self.tr("keepalive_source_default"),
-            engine_name=normalize_browser_engine_name(
-                self.config.get("app", {}).get("browser_engine", DEFAULT_BROWSER_ENGINE)
-            ),
-            now_date_text=datetime.datetime.now().strftime("%Y-%m-%d"),
-            trf=self.trf,
-        )
-        if kind == "__PROFILE_START__":
-            self.keepalive_running_profile_name = str(plan.get("profile_name", "") or "")
-        if str(plan.get("summary_log", "")).strip():
-            self.append_log(str(plan["summary_log"]), prefix=str(plan["log_prefix"]))
-        if str(plan.get("error_log", "")).strip():
-            self.append_log(str(plan["error_log"]), prefix=str(plan["log_prefix"]))
-        if bool(plan.get("write_occupancy")):
-            occupancy_payload = dict(plan.get("occupancy_payload", {}) or {})
-            _write_gui_profile_occupancy(
-                str(occupancy_payload.get("profile_name", "") or ""),
-                scene_type=str(occupancy_payload.get("scene_type", "keepalive") or "keepalive"),
-                state=str(occupancy_payload.get("state", "active") or "active"),
-                owner_label=str(occupancy_payload.get("owner_label", "") or ""),
-                engine_name=str(occupancy_payload.get("engine_name", "") or ""),
-            )
-        if bool(plan.get("mark_scheduled_date")):
-            self.config = load_app_config(self.config_path)
-            self.config["keepalive"]["last_scheduled_run_date"] = str(plan.get("scheduled_date", ""))
-            self.config = save_app_config(self.config, self.config_path)
-        if bool(plan.get("clear_occupancy")) and self.keepalive_running_profile_name:
-            _clear_gui_profile_occupancy(self.keepalive_running_profile_name)
-        if bool(plan.get("reset_keepalive_runtime")):
-            self.keepalive_worker = None
-            self.keepalive_target_profiles = []
-            self.keepalive_running_profile_name = ""
-            self.keepalive_log_prefix = ""
-            self.keepalive_stop_requested = False
-        if bool(plan.get("enable_keepalive_buttons")):
-            self.set_keepalive_buttons_enabled(True)
-        if bool(plan.get("load_occupancy_cache")):
-            self.profile_occupancy_cache = self.load_profile_occupancy_cache()
-        if bool(plan.get("reload_config")):
-            self.reload_config_from_disk()
-            return
-        if bool(plan.get("request_ui_refresh")):
-            self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
-
     def set_keepalive_buttons_enabled(self, enabled: bool):
         self.btn_add.setEnabled(enabled)
         self.btn_edit.setEnabled(enabled)
@@ -1161,7 +1070,16 @@ class ChromiumManagerWindow(QMainWindow):
         return self.serialize_external_profile_process_map(process_map)
 
     def build_external_profile_process_map(self) -> Dict[str, List[int]]:
-        raw_map = get_chromium_process_map_by_profile(self.config)
+        profiles_payload = self.query_control_profiles(force=True)
+        profiles = profiles_payload.get("profiles", []) if isinstance(profiles_payload.get("profiles", []), list) else []
+        raw_map: Dict[str, List[int]] = {}
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            profile_name = str(item.get("profile_name", "") or "").strip()
+            process_count = int(item.get("external_process_count", 0) or 0)
+            if profile_name and process_count > 0:
+                raw_map[profile_name] = list(range(1, process_count + 1))
         return build_external_profile_process_map(self.config, raw_map)
 
     def serialize_external_profile_process_map(self, process_map: Dict[str, List[int]]) -> str:
@@ -1177,13 +1095,11 @@ class ChromiumManagerWindow(QMainWindow):
             tr=self.tr,
         )
         if not bool(plan["signature_changed"]):
-            self.reconcile_manual_occupancy(process_map)
             return
         self.external_profile_process_signature = str(plan["signature"])
         self.external_profile_process_map = process_map
         for message in plan["transition_messages"]:
             self.append_log(message)
-        self.reconcile_manual_occupancy(process_map)
         if bool(plan["needs_ui_refresh"]):
             self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
 
@@ -1211,11 +1127,9 @@ class ChromiumManagerWindow(QMainWindow):
         self.current_language = normalize_language_code(
             self.config.get("app", {}).get("language", detect_default_language())
         )
-        self.external_profile_process_map = self.build_external_profile_process_map()
-        self.external_profile_process_signature = self.serialize_external_profile_process_map(
-            self.external_profile_process_map
-        )
-        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
+        self.external_profile_process_map = {}
+        self.external_profile_process_signature = ""
+        self.profile_occupancy_cache = {}
         self.load_app_settings_to_ui()
         self.retranslate_ui()
         self.refresh_keepalive_plugin_table()
@@ -1226,7 +1140,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
         self.refresh_scheduler_status()
-        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
+        self.query_control_profiles(force=True)
         self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, delay_ms=0)
 
     def reload_config_from_disk(self):
@@ -1257,61 +1171,38 @@ class ChromiumManagerWindow(QMainWindow):
             occupancy_entry_is_expired(occupancy),
         )
 
-    def reconcile_manual_occupancy(self, process_map: Optional[Dict[str, List[int]]] = None) -> None:
-        process_map = process_map if isinstance(process_map, dict) else self.external_profile_process_map
-        stale_profiles = collect_stale_manual_occupancy_profiles(self.profile_occupancy_cache, process_map)
-        if not stale_profiles:
-            return
-        for profile_name in stale_profiles:
-            _clear_gui_profile_occupancy(profile_name)
-            self.append_log(
-                self.tr(
-                    "log_profile_manual_occupancy_released",
-                    "{profile_name} manual occupancy was cleared because no matching Chromium process remained.",
-                ).format(profile_name=profile_name)
-            )
-        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
-
     def format_occupancy_event_text(self, payload: Dict) -> str:
         return format_occupancy_event_text(payload)
 
     def on_occupancy_events_timer(self):
-        path = get_occupancy_events_path()
-        try:
-            if not os.path.exists(path):
-                self.occupancy_event_file_offset = 0
-                return
-            file_size = os.path.getsize(path)
-            if file_size < self.occupancy_event_file_offset:
-                self.occupancy_event_file_offset = 0
-            with open(path, "r", encoding="utf-8") as handle:
-                handle.seek(self.occupancy_event_file_offset)
-                lines = handle.readlines()
-                self.occupancy_event_file_offset = handle.tell()
-        except Exception:
-            return
-
-        if not lines:
+        payload = self.query_control_events(limit=20)
+        events = payload.get("events", []) if isinstance(payload.get("events", []), list) else []
+        if not events:
             return
 
         emitted = False
-        for raw_line in lines[-20:]:
-            raw_line = str(raw_line or "").strip()
-            if not raw_line:
-                continue
-            try:
-                payload = json.loads(raw_line)
-            except Exception:
+        for payload in events[-20:]:
+            if not isinstance(payload, dict):
                 continue
             self.append_log(self.format_occupancy_event_text(payload), prefix="OCC")
             emitted = True
         if emitted:
-            self.profile_occupancy_cache = self.load_profile_occupancy_cache()
+            self.query_control_profiles(force=True)
             self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
 
     def refresh_occupancy_tab(self):
-        entries = self.load_profile_occupancy_cache()
-        recent_events = read_recent_jsonl_events(get_occupancy_events_path(), limit=80)
+        profiles_payload = self.query_control_profiles(force=True)
+        entries = {}
+        profiles = profiles_payload.get("profiles", []) if isinstance(profiles_payload.get("profiles", []), list) else []
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            profile_name = str(item.get("profile_name", "") or "").strip()
+            occupancy = item.get("occupancy", {}) if isinstance(item.get("occupancy", {}), dict) else {}
+            if profile_name and occupancy:
+                entries[profile_name] = occupancy
+        events_payload = self.query_control_events(limit=80)
+        recent_events = events_payload.get("events", []) if isinstance(events_payload.get("events", []), list) else []
         payload = build_occupancy_tab_payload(
             entries,
             recent_events,
@@ -1338,8 +1229,7 @@ class ChromiumManagerWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, self.tr("running_title"), str(exc))
             return
-        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
-        self.refresh_external_profile_process_state()
+        self.query_control_profiles(force=True)
         self.refresh_occupancy_tab()
         self.append_log(
             self.tr(
@@ -1352,13 +1242,27 @@ class ChromiumManagerWindow(QMainWindow):
         )
 
     def get_profile_status_display(self, profile_name: str) -> Dict[str, str]:
+        control_profile = self.get_control_profile_entry(profile_name)
         return build_profile_status_display(
             profile_name,
             self.profile_occupancy_cache,
             self.external_profile_process_map,
             self.is_profile_keepalive_running,
             self.tr,
+            control_profile,
         )
+
+    def get_control_profile_entry(self, profile_name: str) -> Dict:
+        profile_name = str(profile_name or "").strip()
+        if not profile_name:
+            return {}
+        profiles = self.control_profiles_cache.get("profiles", []) if isinstance(self.control_profiles_cache, dict) else []
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("profile_name", "") or "").strip() == profile_name:
+                return item
+        return {}
 
     def sync_profiles(self):
         self.config = sync_profiles_with_user_data(self.config)
@@ -1389,6 +1293,7 @@ class ChromiumManagerWindow(QMainWindow):
 
     def update_selected_profile_status(self):
         profile = self.get_selected_profile()
+        control_profile = self.get_control_profile_entry(profile.get("profile_name", "") if profile else "")
         self.selected_profile_status.setPlainText(
             build_selected_profile_status_text(
                 profile,
@@ -1399,29 +1304,38 @@ class ChromiumManagerWindow(QMainWindow):
                 self.external_profile_process_map,
                 self.is_profile_keepalive_running,
                 self.tr,
+                control_profile,
             )
         )
 
     def is_profile_keepalive_running(self, profile_name: str) -> bool:
         profile_name = str(profile_name or "").strip()
-        if not profile_name or self.keepalive_worker is None:
+        if not profile_name:
             return False
-        if self.keepalive_running_profile_name == profile_name:
+        runtime = self.query_control_keepalive_runtime()
+        if not bool(runtime.get("running", False)):
+            return False
+        current_profile_name = str(runtime.get("current_profile_name", "") or "").strip()
+        selected_profiles = [str(item).strip() for item in runtime.get("selected_profiles", []) if str(item).strip()]
+        if current_profile_name and current_profile_name == profile_name:
             return True
-        return len(self.keepalive_target_profiles) == 1 and self.keepalive_target_profiles[0] == profile_name
+        return profile_name in selected_profiles
 
     def is_single_profile_keepalive_active(self) -> bool:
-        return self.keepalive_worker is not None and len(self.keepalive_target_profiles) == 1
+        runtime = self.query_control_keepalive_runtime()
+        selected_profiles = [str(item).strip() for item in runtime.get("selected_profiles", []) if str(item).strip()]
+        return bool(runtime.get("running", False)) and len(selected_profiles) == 1
 
     def is_profile_keepalive_ui_locked(self, profile_name: str) -> bool:
         profile_name = str(profile_name or "").strip()
-        if not profile_name or self.keepalive_worker is None:
+        if not profile_name:
             return False
-        if self.is_profile_keepalive_running(profile_name):
-            return True
-        if not self.keepalive_target_profiles:
+        runtime = self.query_control_keepalive_runtime()
+        if not bool(runtime.get("running", False)):
             return False
-        return profile_name in self.keepalive_target_profiles
+        selected_profiles = [str(item).strip() for item in runtime.get("selected_profiles", []) if str(item).strip()]
+        current_profile_name = str(runtime.get("current_profile_name", "") or "").strip()
+        return profile_name == current_profile_name or profile_name in selected_profiles
 
     def status_color_for_profile(self, profile: Dict) -> Optional[QColor]:
         color_hex = get_profile_status_color_hex(profile)
@@ -1435,7 +1349,7 @@ class ChromiumManagerWindow(QMainWindow):
         payloads = build_profile_site_selector_payloads(
             profile=profile,
             keepalive_site_ids=get_keepalive_site_ids(self.config),
-            keepalive_running_globally=self.keepalive_worker is not None,
+            keepalive_running_globally=bool(self.query_control_keepalive_runtime().get("running", False)),
             get_site_label=lambda site_name: self.tr(f"site_name_{site_name}", get_keepalive_site_label(site_name, self.config)),
             get_site_icon_path=lambda site_name: get_keepalive_site_icon_path(site_name, self.config, fetch=False),
             site_checkbox_tooltip=self.tr("site_checkbox_tooltip"),
@@ -1489,7 +1403,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.schedule_table_refresh()
 
     def refresh_keepalive_plugin_table(self):
-        self.keepalive_plugin_records = get_keepalive_plugin_records(self.config)
+        plugins_payload = self.query_control_plugins()
+        plugin_records = plugins_payload.get("plugins", []) if isinstance(plugins_payload.get("plugins", []), list) else []
+        self.keepalive_plugin_records = plugin_records if plugin_records else get_keepalive_plugin_records(self.config)
+        keepalive_running = bool(self.query_control_keepalive_runtime().get("running", False))
         view_model = build_keepalive_plugin_table_view_model(
             self.keepalive_plugin_records,
             self.selected_plugin_site_id,
@@ -1537,7 +1454,7 @@ class ChromiumManagerWindow(QMainWindow):
         record = self.get_selected_keepalive_plugin_record()
         view_model = build_keepalive_plugin_selection_view_model(
             record,
-            keepalive_worker_present=self.keepalive_worker is not None,
+            keepalive_worker_present=bool(self.query_control_keepalive_runtime().get("running", False)),
             tr=self.tr,
         )
         self.selected_plugin_site_id = str(view_model.get("selected_plugin_site_id", "") or "")
@@ -1592,7 +1509,13 @@ class ChromiumManagerWindow(QMainWindow):
                 display_name=payload.get("display_name", ""),
                 home_url=payload.get("home_url", ""),
             )
-            save_result = save_keepalive_plugin_source(site_id, source_text, self.config)
+            save_result = fetch_json(
+                self.get_control_plugins_url(),
+                method="POST",
+                headers=self.get_mcp_auth_headers(),
+                json_payload={"site_id": site_id, "source_text": source_text},
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+            ).get("plugin", {})
         except Exception as exc:
             QMessageBox.critical(self, self.tr("error_generic_title"), self.trf("plugin_error_create_failed", error=exc))
             return
@@ -1613,7 +1536,13 @@ class ChromiumManagerWindow(QMainWindow):
         if not record or record.get("builtin"):
             return
         try:
-            save_result = save_keepalive_plugin_source(record.get("site_id", ""), self.plugin_source_editor.toPlainText(), self.config)
+            save_result = fetch_json(
+                self.get_control_plugin_url(record.get("site_id", "")),
+                method="PUT",
+                headers=self.get_mcp_auth_headers(),
+                json_payload={"source_text": self.plugin_source_editor.toPlainText()},
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+            ).get("plugin", {})
         except Exception as exc:
             QMessageBox.critical(self, self.tr("error_generic_title"), self.trf("plugin_error_save_failed", error=exc))
             return
@@ -1643,7 +1572,12 @@ class ChromiumManagerWindow(QMainWindow):
         if answer != QMessageBox.Yes:
             return
         try:
-            path = delete_keepalive_plugin_source(site_id, self.config)
+            path = fetch_json(
+                self.get_control_plugin_url(site_id),
+                method="DELETE",
+                headers=self.get_mcp_auth_headers(),
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+            ).get("path", "")
         except Exception as exc:
             QMessageBox.critical(self, self.tr("error_generic_title"), self.trf("plugin_error_delete_failed", error=exc))
             return
@@ -1665,16 +1599,24 @@ class ChromiumManagerWindow(QMainWindow):
         view_model = build_profile_table_view_model(
             profiles,
             selected_profile_name=self.selected_profile_name,
-            get_status_payload=self.get_profile_status_display,
+            get_status_payload=lambda profile_name: build_profile_status_display(
+                profile_name,
+                self.profile_occupancy_cache,
+                self.external_profile_process_map,
+                self.is_profile_keepalive_running,
+                self.tr,
+                self.get_control_profile_entry(profile_name),
+            ),
             build_action_state=lambda profile_name: build_profile_row_action_state(
                 profile_name,
                 self.external_profile_process_map,
                 self.is_profile_keepalive_running,
                 self.is_profile_keepalive_ui_locked,
-                self.keepalive_worker is not None,
+                bool(self.query_control_keepalive_runtime().get("running", False)),
                 self.tr,
+                self.get_control_profile_entry(profile_name),
             ),
-            keepalive_running_globally=self.keepalive_worker is not None,
+            keepalive_running_globally=bool(self.query_control_keepalive_runtime().get("running", False)),
             tr=self.tr,
         )
         self.table.setUpdatesEnabled(False)
@@ -1831,11 +1773,12 @@ class ChromiumManagerWindow(QMainWindow):
             QMessageBox.warning(self, self.tr("error_remove_failed_title"), self.tr("error_invalid_profile_name"))
             return
 
-        if self.keepalive_worker is not None:
+        if bool(self.query_control_keepalive_runtime().get("running", False)):
             QMessageBox.information(self, self.tr("info_title"), self.tr("info_keepalive_running_delete"))
             return
 
-        running_processes = get_chromium_processes_for_profile(self.config, profile_name)
+        control_profile = self.get_control_profile_entry(profile_name)
+        running_processes = int(control_profile.get("external_process_count", 0) or 0)
         if running_processes:
             QMessageBox.information(self, self.tr("close_chromium_title"), self.tr("close_chromium_before_delete"))
             return
@@ -1883,9 +1826,6 @@ class ChromiumManagerWindow(QMainWindow):
     def launch_profile_by_name(self, profile_name: str):
         if not profile_name:
             return
-        engine_name = normalize_browser_engine_name(
-            self.config.get("app", {}).get("browser_engine", DEFAULT_BROWSER_ENGINE)
-        )
         try:
             if ensure_profile_bookmarks_initialized(self.config, profile_name):
                 self.append_log(self.trf("log_profile_bookmarks_synced", profile_name=profile_name))
@@ -1893,48 +1833,39 @@ class ChromiumManagerWindow(QMainWindow):
             self.append_log(self.trf("log_profile_bookmarks_sync_failed", profile_name=profile_name, error=exc))
 
         try:
-            result = launch_profile(profile_name, self.config)
+            response = self.control_launch_profile(profile_name)
         except Exception as exc:
             QMessageBox.critical(self, self.tr("error_launch_failed_title"), str(exc))
             self.append_log(self.trf("log_profile_launch_failed", profile_name=profile_name, error=exc))
             return
 
-        _write_gui_profile_occupancy(
-            profile_name,
-            scene_type="manual",
-            state="active",
-            owner_label="GUI launch",
-            engine_name=engine_name,
-        )
-
-        self.config = update_profile_launch_time(self.config, profile_name)
-        self.config = save_app_config(self.config, self.config_path)
         self.selected_profile_name = profile_name
-        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
+        self.query_control_profiles(force=True)
         self.schedule_table_refresh()
         self.update_selected_profile_status()
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
-        details = stdout or stderr or f"returncode={result.returncode}"
-        details = f"engine={engine_name}; {details}"
+        result = dict(response.get("result", {}) if isinstance(response.get("result", {}), dict) else {})
+        stdout = str(result.get("stdout", "") or "").strip()
+        stderr = str(result.get("stderr", "") or "").strip()
+        returncode = int(result.get("returncode", 0) or 0)
+        details = stdout or stderr or f"returncode={returncode}"
         self.append_log(self.trf("log_profile_launched", profile_name=profile_name, details=details))
-        if result.returncode != 0:
+        if returncode != 0:
             QMessageBox.warning(self, self.tr("warn_launch_return_title"), details)
 
     def close_profile_by_name(self, profile_name: str):
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             return
-        processes = get_chromium_processes_for_profile(self.config, profile_name)
-        if not processes:
-            self.refresh_external_profile_process_state()
+        try:
+            response = self.control_close_profile(profile_name)
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("running_title"), str(exc))
             return
-        terminated = terminate_chromium_processes(processes, logger=None)
+        result = dict(response.get("result", {}) if isinstance(response.get("result", {}), dict) else {})
         self.selected_profile_name = profile_name
-        _clear_gui_profile_occupancy(profile_name)
-        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
-        self.refresh_external_profile_process_state()
+        self.query_control_profiles(force=True)
         details = self.tr("profile_close_none", "no matching Chromium process found")
+        terminated = int(result.get("terminated_process_count", 0) or 0)
         if terminated:
             details = self.tr("profile_close_killed_count", "terminated {count} Chromium process(es)").format(count=terminated)
         self.append_log(
@@ -1948,7 +1879,8 @@ class ChromiumManagerWindow(QMainWindow):
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             return
-        if get_chromium_processes_for_profile(self.config, profile_name):
+        control_profile = self.get_control_profile_entry(profile_name)
+        if int(control_profile.get("external_process_count", 0) or 0) > 0:
             self.close_profile_by_name(profile_name)
             return
         self.launch_profile_by_name(profile_name)
@@ -1975,19 +1907,20 @@ class ChromiumManagerWindow(QMainWindow):
             self.request_keepalive_stop(profile_name)
             return
         self.selected_profile_name = profile_name
-        self.start_keepalive_worker([profile_name], f"manual:profile:{profile_name}")
+        self.start_keepalive_run([profile_name], f"manual:profile:{profile_name}")
 
     def request_keepalive_stop(self, profile_name: str = ""):
-        if self.keepalive_worker is None:
+        runtime = self.query_control_keepalive_runtime()
+        if not bool(runtime.get("running", False)):
             return
-        if self.keepalive_stop_requested:
-            return
-        self.keepalive_stop_requested = True
         self.append_log(
             self.trf("log_keepalive_stop_requested", profile_suffix=(f": {profile_name}" if profile_name else "")),
-            prefix=self.keepalive_log_prefix or self.tr("keepalive_source_default"),
+            prefix=self.tr("keepalive_source_default"),
         )
-        self.keepalive_worker.request_stop()
+        try:
+            self.control_stop_keepalive()
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("running_title"), str(exc))
         self.schedule_table_refresh()
 
     def save_keepalive_settings(self):
@@ -2336,7 +2269,7 @@ class ChromiumManagerWindow(QMainWindow):
 
         api_token = str(settings.get("api_token", ""))
         self.mcp_api_token_edit.setText(api_token)
-        self.mcp_admin_token_edit.setText(str(settings.get("admin_token", "")))
+        self.control_token_edit.setText(str(self.config.get("control", {}).get("api_token", "")))
         self._refresh_api_token_warning(api_token)
         self.mcp_service_checkbox.setChecked(bool(settings.get("enabled", False)))
         self.mcp_service_checkbox.blockSignals(False)
@@ -2371,13 +2304,14 @@ class ChromiumManagerWindow(QMainWindow):
     def regenerate_api_token(self):
         import secrets
         new_token = secrets.token_hex(24)
-        new_admin_token = secrets.token_hex(24)
+        new_control_token = secrets.token_hex(24)
         self.config.setdefault("mcp", {})
+        self.config.setdefault("control", {})
         self.config["mcp"]["api_token"] = new_token
-        self.config["mcp"]["admin_token"] = new_admin_token
+        self.config["control"]["api_token"] = new_control_token
         self.config = save_app_config(self.config, self.config_path)
         self.mcp_api_token_edit.setText(new_token)
-        self.mcp_admin_token_edit.setText(new_admin_token)
+        self.control_token_edit.setText(new_control_token)
         self._refresh_api_token_warning(new_token)
         self.append_log(self.tr("log_api_token_regenerated"))
 
@@ -2444,15 +2378,15 @@ class ChromiumManagerWindow(QMainWindow):
         return get_mcp_trace_path_helper()
 
     def get_mcp_status_url(self) -> str:
-        return build_mcp_status_url(self.config.get("mcp", {}))
+        return build_control_ping_url(self.config.get("control", {}), self.config.get("mcp", {}))
 
     def get_mcp_auth_headers(self) -> Dict[str, str]:
-        settings = self.config.get("mcp", {}) if isinstance(self.config, dict) else {}
-        return build_mcp_auth_headers(settings, admin=False)
+        settings = self.config.get("control", {}) if isinstance(self.config, dict) else {}
+        return build_control_auth_headers(settings)
 
     def get_mcp_admin_auth_headers(self) -> Dict[str, str]:
-        settings = self.config.get("mcp", {}) if isinstance(self.config, dict) else {}
-        return build_mcp_auth_headers(settings, admin=True)
+        settings = self.config.get("control", {}) if isinstance(self.config, dict) else {}
+        return build_control_auth_headers(settings)
 
     def get_mcp_connect_host_port(self):
         return resolve_mcp_connect_host_port(self.config.get("mcp", {}))
@@ -2490,6 +2424,183 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_consecutive_failures = int(result["consecutive_failures"])
         return result["status"]
 
+    def get_control_profiles_url(self) -> str:
+        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
+        if base.endswith("/status"):
+            return base[: -len("/status")] + "/profiles?include_runtime_snapshot=false"
+        return base.rstrip("/") + "/profiles?include_runtime_snapshot=false"
+
+    def get_control_events_url(self, limit: int = 80) -> str:
+        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
+        bounded_limit = max(1, int(limit or 80))
+        if base.endswith("/status"):
+            return base[: -len("/status")] + f"/events?limit={bounded_limit}"
+        return base.rstrip("/") + f"/events?limit={bounded_limit}"
+
+    def get_control_profile_url(self, profile_name: str, include_runtime_snapshot: bool = False) -> str:
+        from urllib.parse import quote
+
+        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
+        encoded_profile_name = quote(str(profile_name or "").strip(), safe="")
+        query_text = "true" if include_runtime_snapshot else "false"
+        if base.endswith("/status"):
+            return base[: -len("/status")] + f"/profiles/{encoded_profile_name}?include_runtime_snapshot={query_text}"
+        return base.rstrip("/") + f"/profiles/{encoded_profile_name}?include_runtime_snapshot={query_text}"
+
+    def get_control_keepalive_url(self) -> str:
+        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
+        if base.endswith("/status"):
+            return base[: -len("/status")] + "/keepalive"
+        return base.rstrip("/") + "/keepalive"
+
+    def get_control_keepalive_run_url(self) -> str:
+        return self.get_control_keepalive_url().rstrip("/") + "/run"
+
+    def get_control_keepalive_stop_url(self) -> str:
+        return self.get_control_keepalive_url().rstrip("/") + "/stop"
+
+    def get_control_profile_launch_url(self, profile_name: str) -> str:
+        from urllib.parse import quote
+
+        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
+        encoded_profile_name = quote(str(profile_name or "").strip(), safe="")
+        if base.endswith("/status"):
+            return base[: -len("/status")] + f"/profiles/{encoded_profile_name}/launch"
+        return base.rstrip("/") + f"/profiles/{encoded_profile_name}/launch"
+
+    def get_control_profile_close_url(self, profile_name: str) -> str:
+        from urllib.parse import quote
+
+        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
+        encoded_profile_name = quote(str(profile_name or "").strip(), safe="")
+        if base.endswith("/status"):
+            return base[: -len("/status")] + f"/profiles/{encoded_profile_name}/close"
+        return base.rstrip("/") + f"/profiles/{encoded_profile_name}/close"
+
+    def get_control_plugins_url(self) -> str:
+        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
+        if base.endswith("/status"):
+            return base[: -len("/status")] + "/plugins"
+        return base.rstrip("/") + "/plugins"
+
+    def get_control_plugin_url(self, plugin_id: str) -> str:
+        from urllib.parse import quote
+
+        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
+        encoded_plugin_id = quote(str(plugin_id or "").strip(), safe="")
+        if base.endswith("/status"):
+            return base[: -len("/status")] + f"/plugins/{encoded_plugin_id}"
+        return base.rstrip("/") + f"/plugins/{encoded_plugin_id}"
+
+    def query_control_profiles(self, force: bool = False) -> Dict:
+        now_ts = time.monotonic()
+        if (
+            not force
+            and self.control_profiles_cache
+            and self.control_profiles_last_query_at > 0
+            and (now_ts - self.control_profiles_last_query_at) < CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS
+        ):
+            return self.control_profiles_cache
+        try:
+            payload = fetch_json(
+                self.get_control_profiles_url(),
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+                headers=self.get_mcp_auth_headers(),
+            )
+            if isinstance(payload, dict):
+                self.control_profiles_cache = payload
+                self.control_profiles_last_query_at = now_ts
+                profiles = payload.get("profiles", [])
+                if isinstance(profiles, list):
+                    mapped = {}
+                    for item in profiles:
+                        if not isinstance(item, dict):
+                            continue
+                        profile_name = str(item.get("profile_name", "") or "").strip()
+                        if profile_name:
+                            mapped[profile_name] = dict(
+                                item.get("occupancy", {}) if isinstance(item.get("occupancy", {}), dict) else {}
+                            )
+                    if mapped:
+                        self.profile_occupancy_cache = mapped
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return self.control_profiles_cache if isinstance(self.control_profiles_cache, dict) else {}
+
+    def query_control_events(self, limit: int = 80) -> Dict:
+        try:
+            payload = fetch_json(
+                self.get_control_events_url(limit=limit),
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+                headers=self.get_mcp_auth_headers(),
+            )
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def query_control_keepalive(self) -> Dict:
+        try:
+            payload = fetch_json(
+                self.get_control_keepalive_url(),
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+                headers=self.get_mcp_auth_headers(),
+            )
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def query_control_keepalive_runtime(self) -> Dict:
+        payload = self.query_control_keepalive()
+        runtime = payload.get("runtime", {}) if isinstance(payload.get("runtime", {}), dict) else {}
+        return runtime
+
+    def control_launch_profile(self, profile_name: str) -> Dict:
+        return fetch_json(
+            self.get_control_profile_launch_url(profile_name),
+            method="POST",
+            headers=self.get_mcp_auth_headers(),
+            timeout=max(2.0, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+        )
+
+    def control_close_profile(self, profile_name: str) -> Dict:
+        return fetch_json(
+            self.get_control_profile_close_url(profile_name),
+            method="POST",
+            headers=self.get_mcp_auth_headers(),
+            timeout=max(2.0, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+        )
+
+    def control_start_keepalive(self, selected_profiles: List[str], source: str) -> Dict:
+        return fetch_json(
+            self.get_control_keepalive_run_url(),
+            method="POST",
+            headers=self.get_mcp_auth_headers(),
+            json_payload={
+                "selected_profiles": [str(item).strip() for item in (selected_profiles or []) if str(item).strip()],
+                "source": str(source or "manual"),
+            },
+            timeout=max(2.0, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+        )
+
+    def control_stop_keepalive(self) -> Dict:
+        return fetch_json(
+            self.get_control_keepalive_stop_url(),
+            method="POST",
+            headers=self.get_mcp_auth_headers(),
+            timeout=max(2.0, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+        )
+
+    def query_control_plugins(self) -> Dict:
+        try:
+            payload = fetch_json(
+                self.get_control_plugins_url(),
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+                headers=self.get_mcp_auth_headers(),
+            )
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
     def refresh_mcp_status_ui(self):
         self.mcp_endpoint_label.setText(self.get_mcp_endpoint())
         self.mcp_worker_endpoint_label.setText(self.get_mcp_worker_endpoint())
@@ -2508,6 +2619,7 @@ class ChromiumManagerWindow(QMainWindow):
         )
         self.mcp_status_label.setText(view_model["label"])
         self.mcp_status_detail_label.setText(view_model["detail"])
+        self.query_control_profiles()
         self.refresh_bottom_stats()
 
     def apply_initial_mcp_state(self):
@@ -2565,6 +2677,7 @@ class ChromiumManagerWindow(QMainWindow):
         settings = self.config.get("mcp", {})
         return build_mcp_process_arguments_helper(
             settings,
+            self.config.get("control", {}),
             self.config_path,
             MCP_TRANSPORT_OPTIONS,
             bool(getattr(sys, "frozen", False)),
@@ -2695,7 +2808,6 @@ class ChromiumManagerWindow(QMainWindow):
             )
 
     def on_mcp_watchdog_timer(self):
-        self.refresh_external_profile_process_state()
         self.request_ui_refresh(mcp_status=True)
         if not self.is_mcp_expected_enabled():
             return
@@ -2879,7 +2991,7 @@ class ChromiumManagerWindow(QMainWindow):
             self.hide_to_tray()
             return
 
-        if self.keepalive_worker is not None:
+        if bool(self.query_control_keepalive_runtime().get("running", False)):
             self.force_exit_requested = False
             QMessageBox.information(self, self.tr("info_title"), self.tr("info_keepalive_running_exit"))
             event.ignore()
@@ -2899,7 +3011,10 @@ class ChromiumManagerWindow(QMainWindow):
         previous_status = self.config.get("keepalive", {}).get("last_run_status")
         previous_run_at = self.config.get("keepalive", {}).get("last_run_at")
         self.reload_config_if_changed()
-        keepalive = self.config["keepalive"]
+        keepalive_payload = self.query_control_keepalive()
+        keepalive = dict(
+            keepalive_payload.get("keepalive", {}) if isinstance(keepalive_payload.get("keepalive", {}), dict) else self.config["keepalive"]
+        )
         self.global_last_run.setText(keepalive.get("last_run_at", "") or "-")
         self.global_last_status.setText(keepalive.get("last_run_status", "") or "-")
         self.global_last_message.setText(keepalive.get("last_run_message", "") or "-")
@@ -2917,9 +3032,7 @@ class ChromiumManagerWindow(QMainWindow):
             now_dt=now_dt,
             schedule_dt=schedule_dt,
             last_scheduled_date=last_scheduled_date,
-            keepalive_running=bool(
-                self.keepalive_worker is not None and getattr(self.keepalive_worker, "source", "").startswith("internal-schedule")
-            ),
+            keepalive_running=bool(self.query_control_keepalive_runtime().get("running", False)),
             triggered_today_text=today_text,
             format_datetime=format_datetime_for_ui,
             should_trigger_schedule=should_trigger_keepalive_schedule,
@@ -2935,7 +3048,7 @@ class ChromiumManagerWindow(QMainWindow):
 
         self.refresh_scheduler_status()
 
-        if self.keepalive_worker is not None:
+        if bool(self.query_control_keepalive_runtime().get("running", False)):
             return
 
         enabled_profiles = self.get_enabled_keepalive_profiles()
@@ -2949,20 +3062,21 @@ class ChromiumManagerWindow(QMainWindow):
         if not should_trigger_keepalive_schedule(now_dt, schedule_dt, last_scheduled_date):
             return
 
-        self.start_keepalive_worker([], "internal-schedule", persist_ui_settings=False)
+        self.start_keepalive_run([], "internal-schedule", persist_ui_settings=False)
 
     def run_keepalive_for_selected(self):
         selected_profiles = self.get_selected_profile_names()
         if not selected_profiles:
             QMessageBox.information(self, self.tr("info_title"), self.tr("info_select_profile_first"))
             return
-        self.start_keepalive_worker(selected_profiles, "manual:selected")
+        self.start_keepalive_run(selected_profiles, "manual:selected")
 
     def run_keepalive_for_all(self):
-        self.start_keepalive_worker([], "manual:all")
+        self.start_keepalive_run([], "manual:all")
 
-    def start_keepalive_worker(self, selected_profiles: List[str], source: str, persist_ui_settings: bool = True):
-        if self.keepalive_worker is not None:
+    def start_keepalive_run(self, selected_profiles: List[str], source: str, persist_ui_settings: bool = True):
+        runtime = self.query_control_keepalive_runtime()
+        if bool(runtime.get("running", False)):
             if not source.startswith("internal-schedule"):
                 QMessageBox.information(self, self.tr("running_title"), self.tr("info_keepalive_already_running"))
             return
@@ -2972,16 +3086,17 @@ class ChromiumManagerWindow(QMainWindow):
         engine_name = normalize_browser_engine_name(
             self.config.get("app", {}).get("browser_engine", DEFAULT_BROWSER_ENGINE)
         )
-        self.keepalive_log_prefix = describe_keepalive_source(source, [item for item in selected_profiles if item])
-        self.append_log(f"{self.tr('log_keepalive_started')} (engine={engine_name})", prefix=self.keepalive_log_prefix)
-        self.keepalive_target_profiles = self.resolve_keepalive_target_profiles(selected_profiles)
-        self.keepalive_running_profile_name = ""
-        self.keepalive_stop_requested = False
+        keepalive_log_prefix = describe_keepalive_source(source, [item for item in selected_profiles if item])
+        self.append_log(f"{self.tr('log_keepalive_started')} (engine={engine_name})", prefix=keepalive_log_prefix)
         self.set_keepalive_buttons_enabled(False)
-        self.keepalive_worker = KeepAliveWorker(self.config_path, selected_profiles, source, self, self.tr)
-        self.keepalive_worker.log_signal.connect(self.on_keepalive_worker_log)
-        self.keepalive_worker.payload_signal.connect(self.on_keepalive_worker_message)
-        self.keepalive_worker.start()
+        try:
+            self.control_start_keepalive(selected_profiles, source)
+        except Exception as exc:
+            self.set_keepalive_buttons_enabled(True)
+            QMessageBox.warning(self, self.tr("running_title"), str(exc))
+            return
+        self.query_control_profiles(force=True)
+        self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
 
 
 def main():

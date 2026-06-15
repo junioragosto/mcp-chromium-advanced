@@ -23,9 +23,9 @@ For the Chromium Profile Manager service used on this machine:
   `http://127.0.0.1:28888/mcp`
 - daemon auth:
   if `mcp.api_token` is configured, every business request must send `Authorization: Bearer <token>` with no localhost bypass
-- daemon admin auth:
-  management endpoints use `mcp.admin_token`, which may differ from the business token
-  if `mcp.admin_token` is absent, management endpoints stay disabled instead of falling back to `mcp.api_token`
+- daemon control auth:
+  GUI/control endpoints use `control.api_token`, which may differ from the business token
+  if `control.api_token` is absent, `/_control/*` endpoints stay disabled instead of falling back to `mcp.api_token`
 - daemon model:
   a stable daemon listens on `28888`
 - worker model:
@@ -67,7 +67,7 @@ For multi-step tasks, keep one session open for the whole task. Do not repeatedl
 - Always close or release the session after the task completes unless the user explicitly asks to keep it open.
 - For one task with many browser steps, prefer one `start_profile_session(...)`, many page actions, then one `close_profile_session(...)`.
 - If direct daemon HTTP verification is needed, include the configured bearer token on every request instead of assuming localhost is trusted.
-- Do not assume the same token can call management endpoints. `/_daemon/worker/*`, force reclaim, and expiry-reap operations require the admin token when the daemon is configured with one.
+- Do not assume the same token can call control endpoints. `/_control/*` operations require the control token when the daemon is configured with one.
 
 ## Parameter Mapping
 

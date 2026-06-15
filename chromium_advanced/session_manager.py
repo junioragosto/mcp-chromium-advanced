@@ -380,6 +380,8 @@ class SessionManager:
                 continue
             if profile_name in live_profiles:
                 continue
+            external_processes = get_chromium_processes_for_profile(config, profile_name)
+            has_external_processes = bool(external_processes)
             profile_lock_path = get_profile_runtime_lock_path(config, profile_name)
             lock_payload = {}
             if profile_lock_path:
@@ -395,6 +397,7 @@ class SessionManager:
             owner_pid_dead = owner_pid > 0 and not is_process_alive(owner_pid)
             lock_pid_dead = lock_pid > 0 and not is_process_alive(lock_pid)
             lock_missing = not bool(profile_lock_path and os.path.exists(profile_lock_path))
+            gui_owned_without_runtime = scene_type in {"manual", "keepalive"} and not has_external_processes and lock_missing
             if scene_type == "mcp":
                 if not (owner_pid_dead or lock_pid_dead):
                     continue
@@ -404,6 +407,9 @@ class SessionManager:
                 if not (owner_pid_dead and (lock_missing or lock_pid <= 0 or lock_pid_dead)):
                     continue
                 results.append(self.reclaim_profile(profile_name, reason="stale_profile_occupancy"))
+                continue
+            if gui_owned_without_runtime:
+                results.append(self.reclaim_profile(profile_name, reason="stale_gui_occupancy"))
                 continue
             if owner_pid_dead or lock_pid_dead:
                 results.append(self.reclaim_profile(profile_name, reason="stale_profile_occupancy"))
@@ -558,12 +564,20 @@ class SessionManager:
             "available_profiles": available_profiles,
         }
 
-    def list_profiles(self) -> List[Dict]:
+    def list_profiles(
+        self,
+        *,
+        include_external_processes: bool = True,
+        include_mirror_validation: bool = True,
+    ) -> List[Dict]:
         config = normalize_config(self._load_config())
         manager = self._mirror_manager(config)
         occupancy_map = self.list_profile_occupancy()
-        external_busy = self._get_external_busy_details(config)
-        running_by_profile = self._group_running_processes_by_profile(external_busy.get("running_processes", []))
+        external_busy = {}
+        running_by_profile = {}
+        if include_external_processes:
+            external_busy = self._get_external_busy_details(config)
+            running_by_profile = self._group_running_processes_by_profile(external_busy.get("running_processes", []))
         with self._lock:
             self._purge_dead_sessions_locked(probe_browser=False)
             profile_sessions = {
@@ -580,7 +594,9 @@ class SessionManager:
             active_summary = sessions[0].to_summary(refresh=False) if sessions else {}
             live_session_count = sum(1 for session in sessions if session.runtime_mode == "live_root")
             isolated_session_count = 0
-            mirror_validation = manager.validate_profile_snapshot(profile_name)
+            mirror_validation = {}
+            if include_mirror_validation:
+                mirror_validation = manager.validate_profile_snapshot(profile_name)
             occupancy = occupancy_map.get(profile_name, {})
             profile_lock_path = get_profile_runtime_lock_path(config, profile_name)
             profile_lock_active = bool(profile_lock_path and os.path.exists(profile_lock_path))
@@ -622,6 +638,8 @@ class SessionManager:
                     "occupancy_state": str(occupancy.get("state", "") or ""),
                     "occupancy_scene_type": str(occupancy.get("scene_type", "") or ""),
                     "occupancy_owner_label": str(occupancy.get("owner_label", "") or ""),
+                    "profile_lock_active": profile_lock_active,
+                    "external_process_count": len(profile_processes),
                     "mirror_available": bool(mirror_validation.get("available")),
                     "mirror_generated_at": mirror_validation.get("generated_at", ""),
                     "mirror_root_available": bool(mirror_validation.get("root_available")),
@@ -631,11 +649,23 @@ class SessionManager:
         return results
 
     def get_profile_status(self, profile_name: str) -> Dict:
+        return self.get_profile_status_with_options(profile_name)
+
+    def get_profile_status_with_options(
+        self,
+        profile_name: str,
+        *,
+        include_external_processes: bool = True,
+        include_mirror_validation: bool = True,
+    ) -> Dict:
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             raise ValueError("profile_name is required")
 
-        for item in self.list_profiles():
+        for item in self.list_profiles(
+            include_external_processes=include_external_processes,
+            include_mirror_validation=include_mirror_validation,
+        ):
             if item.get("profile_name") == profile_name:
                 return item
         raise ValueError(f"profile not found: {profile_name}")

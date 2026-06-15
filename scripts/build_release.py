@@ -211,7 +211,8 @@ def build_posix_binaries():
     ensure_clean_dir(DIST_ROOT)
 
     data_sep = pyinstaller_data_separator()
-    icon_path = PROJECT_ROOT / "resources" / "chromium_profile_manager.ico"
+    windows_icon_path = PROJECT_ROOT / "resources" / "chromium_profile_manager.ico"
+    macos_icon_path = PROJECT_ROOT / "resources" / "chromium_profile_manager.icns"
     gui_common = [
         sys.executable,
         "-m",
@@ -236,8 +237,10 @@ def build_posix_binaries():
         "--add-data",
         f"resources{data_sep}resources",
     ]
-    if sys.platform.startswith("win") and icon_path.exists():
-        gui_common.extend(["--icon", str(icon_path)])
+    if sys.platform == "darwin" and macos_icon_path.exists():
+        gui_common.extend(["--icon", str(macos_icon_path)])
+    elif sys.platform.startswith("win") and windows_icon_path.exists():
+        gui_common.extend(["--icon", str(windows_icon_path)])
     for hidden_import in common_hidden_imports():
         gui_common.extend(["--hidden-import", hidden_import])
     gui_common.append(str(PROJECT_ROOT / "run_gui.py"))
