@@ -189,6 +189,8 @@ worker 运行策略现在也是显式可配的：
 - `browser_verify_text(...)`、`browser_verify_dialog(...)`、`browser_verify_element(...)` 会统一补 `verified`、`matched`
 - `browser_describe_target(...)`、`browser_list_candidates(...)` 会补一个轻量的 `target_summary`
 
+在默认 `patchright` 主路径上，候选排序现在也更偏语义优先，而不只是接近 DOM 顺序。弹层项、搜索/筛选控件、可能的主动作控件会获得更强的排序信号，复杂前端里的后续一步命中率会更高。
+
 对于强动态页面，这一轮还补了两类更通用的等待能力：
 
 - `wait_for_page_stable(...)`

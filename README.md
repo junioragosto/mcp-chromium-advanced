@@ -240,6 +240,8 @@ Managed verification results are also more uniform now:
 - `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
 - `browser_describe_target(...)` and `browser_list_candidates(...)` now expose a lightweight `target_summary` for easier upstream reasoning
 
+On the default `patchright` path, candidate ordering is also now more intentionally semantic instead of only DOM-order-ish. Popup items, filter/search controls, and likely primary actions receive stronger ranking signals so complex frontend follow-up steps are more likely to hit on the first pass.
+
 ## Managed automation scripts
 
 The project now has a second formal consumer path besides MCP: managed local scripts.

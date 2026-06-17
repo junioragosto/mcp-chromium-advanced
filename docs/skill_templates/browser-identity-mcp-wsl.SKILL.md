@@ -122,6 +122,8 @@ Managed verification surfaces are also more uniform from WSL:
 - `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
 - `browser_describe_target(...)` and `browser_list_candidates(...)` expose a lightweight `target_summary`
 
+On the default `patchright` path, candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries from WSL as well.
+
 Runtime isolation option from WSL:
 
 - `runtime_options.incognito=true`

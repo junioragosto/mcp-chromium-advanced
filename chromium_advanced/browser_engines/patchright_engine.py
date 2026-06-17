@@ -22,6 +22,9 @@ from chromium_advanced.mcp_runtime_config import resolve_mcp_headless, resolve_m
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
 SNAPSHOT_REF_EXTRACT_PATTERN = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
 DEBUG_EVENT_LIMIT = 400
+SEARCH_KEYWORDS = ("search", "find", "filter", "query", "keyword")
+FILTER_KEYWORDS = ("filter", "sort", "status", "type", "label", "category", "newest", "latest")
+PRIMARY_ACTION_KEYWORDS = ("save", "submit", "apply", "confirm", "continue", "next", "open", "run", "create")
 
 
 def _safe_log(text: str) -> None:
@@ -219,6 +222,42 @@ def _candidate_sort_key(item: Dict) -> tuple:
         0 if tag_name in {"button", "a", "input", "textarea", "select", "option"} else 1,
         text_len,
     )
+
+
+def _semantic_candidate_score(item: Dict) -> int:
+    if not isinstance(item, dict):
+        return 0
+    score = 0
+    tag_name = str(item.get("tag_name", "") or "").strip().lower()
+    role = str(item.get("role", "") or "").strip().lower()
+    label = " ".join(
+        [
+            str(item.get("accessible_name", "") or ""),
+            str(item.get("aria_label", "") or ""),
+            str(item.get("text_preview", "") or ""),
+            str(item.get("text", "") or ""),
+            str(item.get("placeholder", "") or ""),
+        ]
+    ).strip().lower()
+    if any(token in label for token in PRIMARY_ACTION_KEYWORDS):
+        score += 120
+    if any(token in label for token in SEARCH_KEYWORDS):
+        score += 85
+    if any(token in label for token in FILTER_KEYWORDS):
+        score += 95
+    if role in {"menuitem", "option", "tab"}:
+        score += 70
+    if tag_name in {"button", "input", "select", "textarea", "a"}:
+        score += 25
+    if bool(item.get("in_overlay")):
+        score += 55
+    if bool(item.get("in_dialog")):
+        score += 35
+    if str(item.get("aria_expanded", "") or "").strip().lower() == "true":
+        score += 40
+    if str(item.get("aria_haspopup", "") or "").strip():
+        score += 30
+    return score
 
 
 class PatchrightBrowserSession(BrowserSession):
@@ -1123,7 +1162,12 @@ class PatchrightBrowserSession(BrowserSession):
                     continue
                 seen_targets.add(target)
                 candidates.append(entry)
-        candidates = sorted(candidates, key=_candidate_sort_key)[: max(1, int(limit))]
+        for entry in candidates:
+            entry["match_score"] = _semantic_candidate_score(entry)
+        candidates = sorted(
+            candidates,
+            key=lambda item: (-int(item.get("match_score", 0) or 0),) + _candidate_sort_key(item),
+        )[: max(1, int(limit))]
         return {
             **self.get_current_url(tab_id=self._get_tab_id(page)),
             "target": resolved_target,
