@@ -1,2 +1,3 @@
-DEFAULT_BROWSER_ENGINE = "selenium_uc"
-BROWSER_ENGINE_OPTIONS = ["selenium_uc", "patchright", "playwright_cli"]
+DEFAULT_BROWSER_ENGINE = "patchright"
+BROWSER_ENGINE_OPTIONS = ["patchright", "selenium_uc", "playwright_cli"]
+

@@ -1,6 +1,7 @@
 import copy
 import os
 import psutil
+import sys
 import threading
 import time
 import uuid
@@ -38,6 +39,24 @@ from chromium_advanced.occupancy_registry import (
 )
 
 
+def _safe_log(text: str) -> None:
+    message = str(text or "")
+    data = (message + "\n").encode("utf-8", errors="replace")
+    stream = getattr(sys, "stdout", None)
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        try:
+            buffer.write(data)
+            buffer.flush()
+            return
+        except Exception:
+            pass
+    try:
+        print(message, flush=True)
+    except Exception:
+        pass
+
+
 @dataclass
 class SessionRecord:
     session_id: str
@@ -50,6 +69,10 @@ class SessionRecord:
     runtime_root: str
     mirror_generated_at: str
     cleanup_runtime_on_close: bool
+    scene_type: str = "mcp"
+    owner_label: str = ""
+    task_scope: str = ""
+    reuse_scope: str = "session"
     profile_lock: object = None
     launch_pid: int = 0
     alive_probe_failures: int = 0
@@ -82,6 +105,10 @@ class SessionRecord:
             "runtime_mode": self.runtime_mode,
             "runtime_root": self.runtime_root,
             "mirror_generated_at": self.mirror_generated_at,
+            "scene_type": self.scene_type,
+            "owner_label": self.owner_label,
+            "task_scope": self.task_scope,
+            "reuse_scope": self.reuse_scope,
         }
 
 
@@ -89,7 +116,7 @@ class SessionManager:
     MCP_STALE_RECLAIM_GRACE_SECONDS = 15.0
     SESSION_ALIVE_PROBE_GRACE_SECONDS = 20.0
     SESSION_ALIVE_MAX_CONSECUTIVE_FAILURES = 3
-    EXTERNAL_BUSY_CACHE_TTL_SECONDS = 1.5
+    EXTERNAL_BUSY_CACHE_TTL_SECONDS = 5.0
     STARTING_PROFILE_STALE_SECONDS = 120.0
 
     def __init__(self, config_path: Optional[str] = None, config_override: Optional[Dict] = None):
@@ -101,6 +128,9 @@ class SessionManager:
         self._starting_profiles: Dict[str, float] = {}
         self._external_busy_cache: Dict = {}
         self._external_busy_cache_at = 0.0
+        self._status_snapshot_cache: Dict[str, Dict] = {}
+        self._status_snapshot_cache_at: Dict[str, float] = {}
+        self._status_snapshot_cache_ttl_seconds = 2.0
 
     def _load_config(self) -> Dict:
         if isinstance(self._config_override, dict):
@@ -109,6 +139,36 @@ class SessionManager:
 
     def _load_occupancy_registry(self) -> Dict:
         return load_profile_occupancy_registry(tolerate_lock_timeout=True)
+
+    def _invalidate_status_cache(self, profile_name: str = "") -> None:
+        with self._lock:
+            self._status_snapshot_cache.clear()
+            self._status_snapshot_cache_at.clear()
+            if profile_name:
+                self._status_snapshot_cache.pop(profile_name, None)
+                self._status_snapshot_cache_at.pop(profile_name, None)
+
+    def _cache_status_snapshot(self, profile_name: str, payload: Dict) -> Dict:
+        profile_name = str(profile_name or "").strip()
+        if not profile_name or not isinstance(payload, dict):
+            return payload
+        with self._lock:
+            self._status_snapshot_cache[profile_name] = dict(payload)
+            self._status_snapshot_cache_at[profile_name] = time.time()
+        return payload
+
+    def _get_cached_status_snapshot(self, profile_name: str) -> Dict:
+        profile_name = str(profile_name or "").strip()
+        if not profile_name:
+            return {}
+        with self._lock:
+            cached = dict(self._status_snapshot_cache.get(profile_name, {}))
+            cached_at = float(self._status_snapshot_cache_at.get(profile_name, 0.0) or 0.0)
+        if not cached:
+            return {}
+        if (time.time() - cached_at) > self._status_snapshot_cache_ttl_seconds:
+            return {}
+        return cached
 
     def _get_starting_profiles_snapshot(self) -> Dict[str, float]:
         with self._lock:
@@ -133,6 +193,7 @@ class SessionManager:
         if not isinstance(profiles, dict):
             profiles = {}
         active_profiles = {session.profile_name for session in self._sessions_by_id.values()}
+        cache_invalidated = False
         for profile_name in list(self._starting_profiles.keys()):
             if profile_name in active_profiles:
                 continue
@@ -141,6 +202,9 @@ class SessionManager:
             if occupancy_state == "starting":
                 continue
             self._starting_profiles.pop(profile_name, None)
+            cache_invalidated = True
+        if cache_invalidated:
+            self._invalidate_status_cache()
 
     def _visible_starting_profiles_locked(self) -> Dict[str, float]:
         self._reconcile_starting_profiles_locked()
@@ -191,6 +255,26 @@ class SessionManager:
             if profile_lock_path and os.path.exists(profile_lock_path):
                 filtered[normalized_name] = started_at
         return filtered
+
+    def _normalize_task_scope(self, scene_type: str, runtime_options: Optional[Dict], owner_label: str) -> str:
+        runtime_options = dict(runtime_options or {})
+        explicit = str(runtime_options.get("task_scope", "") or runtime_options.get("automation_task_id", "") or "").strip()
+        if explicit:
+            return explicit
+        normalized_scene = str(scene_type or "").strip().lower()
+        normalized_owner = str(owner_label or "").strip()
+        if normalized_scene == "automation" and normalized_owner:
+            return normalized_owner
+        return ""
+
+    def _normalize_reuse_scope(self, scene_type: str, runtime_options: Optional[Dict]) -> str:
+        runtime_options = dict(runtime_options or {})
+        explicit = str(runtime_options.get("reuse_scope", "") or "").strip().lower()
+        if explicit in {"session", "task"}:
+            return explicit
+        if str(scene_type or "").strip().lower() == "automation":
+            return "task"
+        return "session"
 
     def _register_profile_occupancy(
         self,
@@ -317,7 +401,8 @@ class SessionManager:
         removed_sessions: List[SessionRecord] = []
         with self._lock:
             self._starting_profiles.pop(profile_name, None)
-            for session in self._sessions_for_profile_locked(profile_name):
+        self._invalidate_status_cache(profile_name)
+        for session in self._sessions_for_profile_locked(profile_name):
                 removed = self._remove_session_locked(session.session_id)
                 if removed is not None:
                     removed_sessions.append(removed)
@@ -350,6 +435,7 @@ class SessionManager:
                 details={"reason": reason, "terminated_process_count": terminated_count},
                 event_source="session_manager_reclaim",
             )
+        self._invalidate_status_cache(profile_name)
         return {
             "profile_name": profile_name,
             "reason": reason,
@@ -661,12 +747,20 @@ class SessionManager:
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             raise ValueError("profile_name is required")
+        cached = self._get_cached_status_snapshot(profile_name)
+        if cached and bool(cached.get("include_external_processes", False)) == bool(include_external_processes) and bool(cached.get("include_mirror_validation", False)) == bool(include_mirror_validation):
+            return dict(cached.get("payload", {}))
 
         for item in self.list_profiles(
             include_external_processes=include_external_processes,
             include_mirror_validation=include_mirror_validation,
         ):
             if item.get("profile_name") == profile_name:
+                self._cache_status_snapshot(profile_name, {
+                    "include_external_processes": bool(include_external_processes),
+                    "include_mirror_validation": bool(include_mirror_validation),
+                    "payload": dict(item),
+                })
                 return item
         raise ValueError(f"profile not found: {profile_name}")
 
@@ -955,10 +1049,24 @@ class SessionManager:
         self.reconcile_stale_profile_occupancy()
         resolved_engine_name = resolve_browser_engine_name(config, engine_name)
         preflight = self.can_start_session(profile_name, engine_name=resolved_engine_name)
+        effective_scene_type = str(scene_type or "mcp").strip() or "mcp"
+        effective_owner_label = str(owner_label or "").strip()
+        task_scope = self._normalize_task_scope(effective_scene_type, runtime_options, effective_owner_label)
+        reuse_scope = self._normalize_reuse_scope(effective_scene_type, runtime_options)
 
         with self._lock:
             self._purge_dead_sessions_locked(probe_browser=False)
             reusable_session = self._reuse_candidate_locked(profile_name, resolved_engine_name, probe_browser=False)
+            if reusable_session is None and reuse_scope == "task" and task_scope:
+                for candidate in self._sessions_for_profile_locked(profile_name):
+                    if (
+                        candidate.engine_name == resolved_engine_name
+                        and candidate.scene_type == effective_scene_type
+                        and candidate.task_scope == task_scope
+                        and self._is_session_alive(candidate, probe_browser=False)
+                    ):
+                        reusable_session = candidate
+                        break
             if reuse_existing and reusable_session:
                 reusable_session.last_used_at = time.time()
                 return {
@@ -968,13 +1076,16 @@ class SessionManager:
                     "runtime_mode": reusable_session.runtime_mode,
                     "runtime_root": reusable_session.runtime_root,
                     "mirror_generated_at": reusable_session.mirror_generated_at,
+                    "scene_type": reusable_session.scene_type,
+                    "owner_label": reusable_session.owner_label,
+                    "task_scope": reusable_session.task_scope,
+                    "reuse_scope": reusable_session.reuse_scope,
                     "reused": True,
                 }
             if not preflight.get("allowed"):
                 raise RuntimeError(str(preflight.get("reason", "") or "browser session start blocked"))
             self._starting_profiles[profile_name] = time.time()
-            effective_scene_type = str(scene_type or "mcp").strip() or "mcp"
-            effective_owner_label = str(owner_label or "").strip()
+            self._invalidate_status_cache(profile_name)
             self._register_profile_occupancy(
                 profile_name,
                 scene_type=effective_scene_type,
@@ -996,9 +1107,8 @@ class SessionManager:
         try:
             if not profile_lock.try_acquire():
                 raise RuntimeError(f"profile runtime lock is already held: {profile_name}")
-            print(
-                f"[{now_text()}] [SESSION] start_session begin: profile={profile_name} engine={resolved_engine_name} mode={runtime_mode}",
-                flush=True,
+            _safe_log(
+                f"[{now_text()}] [SESSION] start_session begin: profile={profile_name} engine={resolved_engine_name} mode={runtime_mode}"
             )
             config_for_launch = copy.deepcopy(config)
             if isinstance(runtime_options, dict) and runtime_options:
@@ -1013,20 +1123,15 @@ class SessionManager:
                     engine_name=resolved_engine_name,
                 )
             ensure_profile_bookmarks_initialized(config_for_launch, profile_name)
-            print(
-                f"[{now_text()}] [SESSION] bookmarks ready: profile={profile_name}",
-                flush=True,
-            )
+            _safe_log(f"[{now_text()}] [SESSION] bookmarks ready: profile={profile_name}")
 
             engine = create_browser_engine(resolved_engine_name)
-            print(
-                f"[{now_text()}] [SESSION] engine created: profile={profile_name} engine={resolved_engine_name}",
-                flush=True,
+            _safe_log(
+                f"[{now_text()}] [SESSION] engine created: profile={profile_name} engine={resolved_engine_name}"
             )
             browser_session = ManagedBrowserSession(engine.create_session(config_for_launch, profile_name))
-            print(
-                f"[{now_text()}] [SESSION] browser session created: profile={profile_name} engine={resolved_engine_name} mode={runtime_mode}",
-                flush=True,
+            _safe_log(
+                f"[{now_text()}] [SESSION] browser session created: profile={profile_name} engine={resolved_engine_name} mode={runtime_mode}"
             )
             session_id = f"session-{uuid.uuid4().hex[:12]}"
             now = time.time()
@@ -1041,6 +1146,10 @@ class SessionManager:
                 runtime_root=runtime_root,
                 mirror_generated_at=mirror_generated_at,
                 cleanup_runtime_on_close=cleanup_runtime_on_close,
+                scene_type=effective_scene_type,
+                owner_label=effective_owner_label,
+                task_scope=task_scope,
+                reuse_scope=reuse_scope,
                 profile_lock=profile_lock,
                 launch_pid=int(getattr(browser_session, "pid", 0) or 0),
             )
@@ -1066,6 +1175,10 @@ class SessionManager:
                 "runtime_mode": runtime_mode,
                 "runtime_root": runtime_root,
                 "mirror_generated_at": mirror_generated_at,
+                "scene_type": effective_scene_type,
+                "owner_label": effective_owner_label,
+                "task_scope": task_scope,
+                "reuse_scope": reuse_scope,
                 "reused": False,
             }
         except Exception:
@@ -1082,6 +1195,7 @@ class SessionManager:
         finally:
             with self._lock:
                 self._starting_profiles.pop(profile_name, None)
+            self._invalidate_status_cache(profile_name)
 
     def get_session(
         self,
@@ -1149,6 +1263,7 @@ class SessionManager:
             removed_session = self._remove_session_locked(session.session_id)
             self._starting_profiles.pop(session.profile_name, None)
             after_ids = list(self._sessions_by_id.keys())
+            self._invalidate_status_cache(session.profile_name)
         if removed_session is None:
             return {
                 "session_id": str(session_id or "").strip(),

@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
+import threading
 import time
+from queue import Queue
 from typing import Any, Dict
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
@@ -19,6 +22,24 @@ from chromium_advanced.mcp_runtime_config import resolve_mcp_headless, resolve_m
 SNAPSHOT_REF_PATTERN = re.compile(r"^(?:f\d+)?e\d+$")
 SNAPSHOT_REF_EXTRACT_PATTERN = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
 DEBUG_EVENT_LIMIT = 400
+
+
+def _safe_log(text: str) -> None:
+    message = str(text or "")
+    data = (message + "\n").encode("utf-8", errors="replace")
+    stream = getattr(sys, "stdout", None)
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        try:
+            buffer.write(data)
+            buffer.flush()
+            return
+        except Exception:
+            pass
+    try:
+        print(message, flush=True)
+    except Exception:
+        pass
 
 
 def _load_patchright():
@@ -169,6 +190,7 @@ def _candidate_sort_key(item: Dict) -> tuple:
 
 class PatchrightBrowserSession(BrowserSession):
     def __init__(self, playwright_ctx, browser_context, page):
+        self.engine_name = "patchright"
         self._playwright_ctx = playwright_ctx
         self.context = browser_context
         self.page = page
@@ -1047,6 +1069,51 @@ class PatchrightBrowserSession(BrowserSession):
         except Exception as exc:
             return self._action_error_payload("wait_for", exc, selector=selector, by=by, text_filter=selector)
 
+    def wait_for_text(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        try:
+            page = self._resolve_page(tab_id=tab_id)
+            locator = page.get_by_text(str(text), exact=False).first
+            locator.wait_for(state="visible", timeout=int(timeout_seconds) * 1000)
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "found": True,
+                "text": str(text or ""),
+            }
+        except Exception as exc:
+            return self._action_error_payload("wait_for_text", exc, text_filter=str(text or ""))
+
+    def wait_for_text_gone(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        try:
+            page = self._resolve_page(tab_id=tab_id)
+            locator = page.get_by_text(str(text), exact=False).first
+            locator.wait_for(state="detached", timeout=int(timeout_seconds) * 1000)
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "gone": True,
+                "text": str(text or ""),
+            }
+        except Exception:
+            try:
+                page = self._resolve_page(tab_id=tab_id)
+                locator = page.get_by_text(str(text), exact=False).first
+                locator.wait_for(state="hidden", timeout=int(timeout_seconds) * 1000)
+                return {
+                    **self.get_current_url(tab_id=self._get_tab_id(page)),
+                    "gone": True,
+                    "text": str(text or ""),
+                }
+            except Exception as exc:
+                return self._action_error_payload("wait_for_text_gone", exc, text_filter=str(text or ""))
+
+    def wait_for_timeout(self, timeout_ms: int = 0, tab_id: str = "") -> Dict:
+        page = self._resolve_page(tab_id=tab_id)
+        page.wait_for_timeout(max(0, int(timeout_ms)))
+        return {
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
+            "waited": True,
+            "timeout_ms": max(0, int(timeout_ms)),
+        }
+
     def click(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
         try:
             page = self._resolve_page()
@@ -1060,6 +1127,22 @@ class PatchrightBrowserSession(BrowserSession):
             }
         except Exception as exc:
             return self._action_error_payload("click", exc, selector=selector, by=by, text_filter=selector)
+
+    def hover(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
+        try:
+            page = self._resolve_page()
+            locator = _selector_to_locator(page, selector, by).first
+            locator.wait_for(state="visible", timeout=int(timeout_seconds) * 1000)
+            locator.scroll_into_view_if_needed(timeout=int(timeout_seconds) * 1000)
+            locator.hover(timeout=int(timeout_seconds) * 1000)
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "hovered": True,
+                "selector": str(selector or "").strip(),
+                "post_action_context": self._post_action_context("hover", page=page),
+            }
+        except Exception as exc:
+            return self._action_error_payload("hover", exc, selector=selector, by=by, text_filter=selector)
 
     def click_target(
         self,
@@ -1216,6 +1299,91 @@ class PatchrightBrowserSession(BrowserSession):
             }
         except Exception as exc:
             return self._action_error_payload("press_key", exc, selector=selector, by=by, text_filter=selector or key)
+
+    def select_option(
+        self,
+        selector: str,
+        values: list[str] | None = None,
+        by: str = "css",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        try:
+            page = self._resolve_page()
+            locator = _selector_to_locator(page, selector, by).first
+            locator.wait_for(state="visible", timeout=int(timeout_seconds) * 1000)
+            normalized_values = [str(item) for item in (values or []) if str(item or "")]
+            result = locator.select_option(value=normalized_values, timeout=int(timeout_seconds) * 1000)
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "selected": True,
+                "selector": str(selector or "").strip(),
+                "values": list(result or normalized_values),
+                "post_action_context": self._post_action_context("select_option", page=page),
+            }
+        except Exception as exc:
+            return self._action_error_payload("select_option", exc, selector=selector, by=by, text_filter=selector)
+
+    def navigate_back(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        try:
+            page = self._resolve_page(tab_id=tab_id)
+            response = page.go_back(
+                wait_until="domcontentloaded" if bool(wait_for_ready) else None,
+                timeout=int(timeout_seconds) * 1000,
+            )
+            current = self.get_current_url(tab_id=self._get_tab_id(page))
+            current["navigated"] = "back"
+            current["history_changed"] = response is not None
+            current["post_action_context"] = self._post_action_context("navigate_back", page=page)
+            return current
+        except Exception as exc:
+            return self._action_error_payload("navigate_back", exc)
+
+    def navigate_forward(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        try:
+            page = self._resolve_page(tab_id=tab_id)
+            response = page.go_forward(
+                wait_until="domcontentloaded" if bool(wait_for_ready) else None,
+                timeout=int(timeout_seconds) * 1000,
+            )
+            current = self.get_current_url(tab_id=self._get_tab_id(page))
+            current["navigated"] = "forward"
+            current["history_changed"] = response is not None
+            current["post_action_context"] = self._post_action_context("navigate_forward", page=page)
+            return current
+        except Exception as exc:
+            return self._action_error_payload("navigate_forward", exc)
+
+    def drag_target(
+        self,
+        source_target: str,
+        dest_target: str,
+        source_element: str = "",
+        dest_element: str = "",
+        by: str = "css",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        try:
+            page = self._resolve_page()
+            source_locator = self._resolve_target_locator(source_target, by=by, element=source_element, page=page)
+            dest_locator = self._resolve_target_locator(dest_target, by=by, element=dest_element, page=page)
+            source_locator.scroll_into_view_if_needed(timeout=int(timeout_seconds) * 1000)
+            dest_locator.scroll_into_view_if_needed(timeout=int(timeout_seconds) * 1000)
+            source_locator.drag_to(dest_locator, timeout=int(timeout_seconds) * 1000)
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "dragged": True,
+                "source_target": str(source_target or "").strip(),
+                "dest_target": str(dest_target or "").strip(),
+                "post_action_context": self._post_action_context("drag_target", page=page),
+            }
+        except Exception as exc:
+            return self._action_error_payload(
+                "drag_target",
+                exc,
+                target=source_target,
+                by=by,
+                text_filter=str(dest_target or source_target or ""),
+            )
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:
         page = self._resolve_page(tab_id=tab_id)
@@ -1695,6 +1863,70 @@ class PatchrightBrowserSession(BrowserSession):
             self._playwright_ctx.stop()
 
 
+class PatchrightThreadBoundSession:
+    def __init__(self, session_factory):
+        self.engine_name = "patchright"
+        self._session_factory = session_factory
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            name="patchright-session-thread",
+            daemon=True,
+        )
+        self._tasks = Queue()
+        self._ready = threading.Event()
+        self._closed = False
+        self._raw_session = None
+        self._startup_error = None
+        self._thread.start()
+        self._ready.wait()
+        if self._startup_error is not None:
+            raise self._startup_error
+
+    def _thread_main(self) -> None:
+        try:
+            self._raw_session = self._session_factory()
+        except Exception as exc:
+            self._startup_error = exc
+            self._ready.set()
+            return
+        self._ready.set()
+        while True:
+            item = self._tasks.get()
+            if item is None:
+                break
+            method_name, args, kwargs, result_queue = item
+            try:
+                result = getattr(self._raw_session, method_name)(*args, **kwargs)
+                result_queue.put((True, result))
+            except Exception as exc:
+                result_queue.put((False, exc))
+
+    def _call(self, method_name: str, *args, **kwargs):
+        if self._closed and method_name != "close":
+            raise RuntimeError("patchright session is already closed")
+        result_queue = Queue(maxsize=1)
+        self._tasks.put((method_name, args, kwargs, result_queue))
+        ok, value = result_queue.get()
+        if ok:
+            return value
+        raise value
+
+    def __getattr__(self, item: str):
+        if item.startswith("_"):
+            raise AttributeError(item)
+        return lambda *args, **kwargs: self._call(item, *args, **kwargs)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._call("close")
+        finally:
+            self._closed = True
+            self._tasks.put(None)
+            self._thread.join(timeout=5)
+
+
 class PatchrightEngine(BrowserEngine):
     engine_name = "patchright"
 
@@ -1712,18 +1944,15 @@ class PatchrightEngine(BrowserEngine):
             raise FileNotFoundError(f"chromium browser not found: {chromium_binary or paths.get('chromium_dir', '')}")
         if not os.path.isdir(user_data_root):
             raise FileNotFoundError(f"Profile UserData root not found: {user_data_root}")
-        print(
-            (
-                f"[{now_text()}] [PATCHRIGHT] create_session begin: "
-                f"profile={profile_name} chromium={chromium_binary} user_data_root={user_data_root}"
-            ),
-            flush=True,
+        _safe_log(
+            f"[{now_text()}] [PATCHRIGHT] create_session begin: "
+            f"profile={profile_name} chromium={chromium_binary} user_data_root={user_data_root}"
         )
 
         # Keep Patchright on the smallest validated argument set first.
         # Its Chromium startup behavior differs from Selenium/uc, so not every
         # shared launch flag should be forwarded blindly.
-        args = [f"--profile-directory={profile_name}", *get_chromium_restore_prompt_suppression_args()]
+        args = [f"--profile-directory={profile_name}"]
         if start_minimized:
             args.append("--start-minimized")
         elif launch_settings.get("start_maximized", True):
@@ -1735,54 +1964,55 @@ class PatchrightEngine(BrowserEngine):
             args.append("--no-first-run")
         if launch_settings.get("no_default_browser_check", True):
             args.append("--no-default-browser-check")
+        args.extend(get_chromium_restore_prompt_suppression_args())
         extra_args = launch_settings.get("extra_args", [])
         if isinstance(extra_args, list):
             args.extend([item for item in extra_args if item])
 
-        last_error = None
-        playwright_ctx = None
-        browser_context = None
-        for attempt in range(1, 3):
-            try:
-                playwright_ctx = sync_playwright().start()
-                print(
-                    f"[{now_text()}] [PATCHRIGHT] playwright started: profile={profile_name} attempt={attempt}",
-                    flush=True,
-                )
-                browser_context = playwright_ctx.chromium.launch_persistent_context(
-                    user_data_dir=user_data_root,
-                    executable_path=chromium_binary,
-                    headless=bool(headless),
-                    args=args,
-                    no_viewport=True,
-                )
-                print(
-                    f"[{now_text()}] [PATCHRIGHT] persistent context launched: profile={profile_name} attempt={attempt}",
-                    flush=True,
-                )
-                break
-            except Exception as exc:
-                last_error = exc
-                print(
-                    f"[{now_text()}] [PATCHRIGHT] launch attempt failed: profile={profile_name} attempt={attempt} error={exc}",
-                    flush=True,
-                )
-                if playwright_ctx is not None:
-                    try:
-                        playwright_ctx.stop()
-                    except Exception:
-                        pass
-                    playwright_ctx = None
-                if attempt >= 2:
-                    raise
-                time.sleep(1.0)
-        if browser_context is None or playwright_ctx is None:
-            raise RuntimeError(f"Patchright failed to launch for profile {profile_name}: {last_error}")
-        page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
-        extensions_page = bool(launch_settings.get("open_extensions_page", False))
-        check_url = str(launch_settings.get("check_url", "")).strip()
-        if extensions_page:
-            page.goto("chrome://extensions", wait_until="domcontentloaded", timeout=45000)
-        if check_url:
-            page.goto(check_url, wait_until="domcontentloaded", timeout=45000)
-        return PatchrightBrowserSession(playwright_ctx, browser_context, page)
+        def _create_raw_session() -> PatchrightBrowserSession:
+            last_error = None
+            playwright_ctx = None
+            browser_context = None
+            for attempt in range(1, 3):
+                try:
+                    playwright_ctx = sync_playwright().start()
+                    _safe_log(
+                        f"[{now_text()}] [PATCHRIGHT] playwright started: profile={profile_name} attempt={attempt}"
+                    )
+                    browser_context = playwright_ctx.chromium.launch_persistent_context(
+                        user_data_dir=user_data_root,
+                        executable_path=chromium_binary,
+                        headless=bool(headless),
+                        args=args,
+                        no_viewport=True,
+                    )
+                    _safe_log(
+                        f"[{now_text()}] [PATCHRIGHT] persistent context launched: profile={profile_name} attempt={attempt}"
+                    )
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    _safe_log(
+                        f"[{now_text()}] [PATCHRIGHT] launch attempt failed: profile={profile_name} attempt={attempt} error={exc}"
+                    )
+                    if playwright_ctx is not None:
+                        try:
+                            playwright_ctx.stop()
+                        except Exception:
+                            pass
+                        playwright_ctx = None
+                    if attempt >= 2:
+                        raise
+                    time.sleep(1.0)
+            if browser_context is None or playwright_ctx is None:
+                raise RuntimeError(f"Patchright failed to launch for profile {profile_name}: {last_error}")
+            page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
+            extensions_page = bool(launch_settings.get("open_extensions_page", False))
+            check_url = str(launch_settings.get("check_url", "")).strip()
+            if extensions_page:
+                page.goto("chrome://extensions", wait_until="domcontentloaded", timeout=45000)
+            if check_url:
+                page.goto(check_url, wait_until="domcontentloaded", timeout=45000)
+            return PatchrightBrowserSession(playwright_ctx, browser_context, page)
+
+        return PatchrightThreadBoundSession(_create_raw_session)

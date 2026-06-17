@@ -49,20 +49,33 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 
 Recommended engine-selection policy remains the same from WSL:
 
-- default to `playwright_cli` for ordinary MCP task execution
+- default to `patchright` for ordinary MCP task execution and most real workflows
 - use `selenium_uc` for stealth-sensitive pages, recurring challenge/verification pages, or when gesture/coordinate fallback matters more than raw speed
-- use `patchright` for richer structured diagnostics and complex frontend inspection
+- use `playwright_cli` as a lightweight compatibility or diagnostic path, not as the normal default
 
 Important engine capability examples from WSL remain the same:
 
-- `playwright_cli`
-  best default for high-throughput ordinary browsing tasks
+- `patchright`
+  best default for structured extraction, complex frontend interaction, richer diagnostics, and the most complete mainstream action surface
 - `selenium_uc`
   prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs gesture unlock, drag, slider movement, or coordinate-level mouse fallback
-- `patchright`
-  prefer this when the task needs snapshot refs, stronger structured extraction, or deeper frontend diagnostics
+- `playwright_cli`
+  prefer this for lightweight compatibility flows and bounded diagnostics
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as engine-scoped capabilities, not as guaranteed fallback tools on every runtime
+
+Recently strengthened high-level actions from WSL are the same:
+
+- `wait_for_text(...)`
+- `wait_for_text_gone(...)`
+- `wait_for_timeout(...)`
+- `hover(...)`
+- `select_option(...)`
+- `navigate_back(...)`
+- `navigate_forward(...)`
+- `drag_target(...)`
+
+Prefer these before arbitrary `run_script(...)` when the interaction is a normal browser task.
 
 Runtime isolation option from WSL:
 
@@ -71,7 +84,7 @@ Runtime isolation option from WSL:
 
 How to switch engines explicitly:
 
-- `can_start_profile_session(profile_name="Profile 4", engine="playwright_cli")`
+- `can_start_profile_session(profile_name="Profile 4", engine="patchright")`
 - `start_profile_session(profile_name="Profile 4", engine="selenium_uc")`
 
 Do not assume the service is single-engine. This MCP exposes multiple browser backends behind one profile/session interface, and the caller is allowed to choose the engine per new session.

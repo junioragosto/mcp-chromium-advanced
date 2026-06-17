@@ -9,6 +9,8 @@ def normalize_browser_engine_name(value: str) -> str:
     text = str(value or "").strip().lower()
     if text in {"patchright", "playwright_patchright"}:
         return "patchright"
+    if text in {"selenium_uc", "selenium-uc", "seleniumuc", "uc"}:
+        return "selenium_uc"
     if text in {"playwright_cli", "playwright-cli", "playwrightcli"}:
         return "playwright_cli"
     return DEFAULT_BROWSER_ENGINE
@@ -34,3 +36,4 @@ def resolve_browser_engine_name(config: Dict, explicit_engine_name: str = "") ->
         return normalize_browser_engine_name(explicit_engine_name)
     app = config.get("app", {}) if isinstance(config, dict) else {}
     return normalize_browser_engine_name(app.get("browser_engine", DEFAULT_BROWSER_ENGINE))
+

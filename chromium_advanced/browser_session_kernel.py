@@ -53,9 +53,9 @@ class RuntimeCapabilities:
     def from_legacy(cls, raw: Dict[str, Any]) -> "RuntimeCapabilities":
         engine_name = str(raw.get("engine_name", "") or "unknown")
         runtime_profile = {
-            "playwright_cli": "fast",
-            "patchright": "diagnostic",
-            "selenium_uc": "compatible",
+            "patchright": "primary",
+            "selenium_uc": "stealth",
+            "playwright_cli": "lightweight",
         }.get(engine_name, "balanced")
         return cls(
             engine_name=engine_name,
@@ -119,9 +119,9 @@ class RuntimeCapabilities:
             "strategy": {
                 "preferred_mode": self.runtime_profile,
                 "best_for": {
-                    "fast": ["high-frequency actions", "low-token navigation"],
-                    "diagnostic": ["structured snapshots", "deep diagnostics", "coordinate interaction when supported"],
-                    "compatible": ["broad environment fallback", "legacy resilience", "gesture-style pages"],
+                    "primary": ["default MCP work", "structured extraction", "deep diagnostics"],
+                    "stealth": ["anti-detection browsing", "challenge tolerance", "gesture-style pages"],
+                    "lightweight": ["lower-overhead flows", "compatibility tasks", "bounded CLI diagnostics"],
                     "balanced": ["general browser automation"],
                 }.get(self.runtime_profile, ["general browser automation"]),
             },
@@ -644,28 +644,47 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         text: str = "",
         clear_first: bool = True,
         submit: bool = False,
+        dest_selector: str = "",
+        dest_by: str = "",
+        values: list[str] | None = None,
     ) -> str:
         escaped_selector = self._encode_js_string(selector)
         escaped_by = self._encode_js_string(by)
         escaped_action = self._encode_js_string(action)
         escaped_text = self._encode_js_string(text)
+        escaped_dest_selector = self._encode_js_string(dest_selector)
+        escaped_dest_by = self._encode_js_string(dest_by)
+        encoded_values = json.dumps([str(item) for item in (values or [])], ensure_ascii=False)
         return f"""
         {self._dom_runtime_helpers_js()}
         const selector = {escaped_selector};
         const by = {escaped_by}.toLowerCase();
         const action = {escaped_action};
         const text = {escaped_text};
+        const destSelector = {escaped_dest_selector};
+        const destBy = {escaped_dest_by}.toLowerCase();
+        const values = {encoded_values};
         const clearFirst = {str(bool(clear_first)).lower()};
         const submit = {str(bool(submit)).lower()};
         const el = queryAllDeep(selector, by)[0] || null;
         if (!el) {{
           return {{ ok: false, error: `Target not found: ${{selector}}`, error_type: 'ValueError' }};
         }}
+        const dispatchMouse = (node, type) => {{
+          node.dispatchEvent(new MouseEvent(type, {{ bubbles: true, cancelable: true, composed: true }}));
+        }};
         if (action === 'click') {{
           el.scrollIntoView({{ block: 'center', inline: 'center' }});
           if (typeof el.click === 'function') el.click();
           else el.dispatchEvent(new MouseEvent('click', {{ bubbles: true, cancelable: true, composed: true }}));
           return {{ ok: true, clicked: true, target: selector, by, details: describeElement(el) }};
+        }}
+        if (action === 'hover') {{
+          el.scrollIntoView({{ block: 'center', inline: 'center' }});
+          dispatchMouse(el, 'mouseover');
+          dispatchMouse(el, 'mouseenter');
+          dispatchMouse(el, 'mousemove');
+          return {{ ok: true, hovered: true, target: selector, by, details: describeElement(el) }};
         }}
         if (action === 'type') {{
           el.scrollIntoView({{ block: 'center', inline: 'center' }});
@@ -681,6 +700,40 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             if (el.form && typeof el.form.requestSubmit === 'function') el.form.requestSubmit();
           }}
           return {{ ok: true, typed: true, target: selector, by, value: 'value' in el ? String(el.value || '') : String(el.textContent || ''), details: describeElement(el) }};
+        }}
+        if (action === 'select_option') {{
+          if (!('options' in el) || typeof el.selectedOptions === 'undefined') {{
+            return {{ ok: false, error: `Target is not a selectable control: ${{selector}}`, error_type: 'ValueError' }};
+          }}
+          const requested = Array.isArray(values) ? values.map(item => String(item || '')) : [];
+          const matched = [];
+          for (const option of Array.from(el.options || [])) {{
+            const optionValue = String(option.value || '');
+            const optionLabel = String(option.label || option.textContent || '').trim();
+            const shouldSelect = requested.includes(optionValue) || requested.includes(optionLabel);
+            option.selected = shouldSelect;
+            if (shouldSelect) matched.push(optionValue || optionLabel);
+          }}
+          el.dispatchEvent(new Event('input', {{ bubbles: true, composed: true }}));
+          el.dispatchEvent(new Event('change', {{ bubbles: true, composed: true }}));
+          return {{ ok: true, selected: true, target: selector, by, values: matched, details: describeElement(el) }};
+        }}
+        if (action === 'drag') {{
+          const dest = queryAllDeep(destSelector, destBy)[0] || null;
+          if (!dest) {{
+            return {{ ok: false, error: `Target not found: ${{destSelector}}`, error_type: 'ValueError' }};
+          }}
+          el.scrollIntoView({{ block: 'center', inline: 'center' }});
+          dest.scrollIntoView({{ block: 'center', inline: 'center' }});
+          dispatchMouse(el, 'mousedown');
+          dispatchMouse(dest, 'mousemove');
+          dispatchMouse(dest, 'mouseup');
+          el.dispatchEvent(new DragEvent('dragstart', {{ bubbles: true, cancelable: true, composed: true }}));
+          dest.dispatchEvent(new DragEvent('dragenter', {{ bubbles: true, cancelable: true, composed: true }}));
+          dest.dispatchEvent(new DragEvent('dragover', {{ bubbles: true, cancelable: true, composed: true }}));
+          dest.dispatchEvent(new DragEvent('drop', {{ bubbles: true, cancelable: true, composed: true }}));
+          dest.dispatchEvent(new DragEvent('dragend', {{ bubbles: true, cancelable: true, composed: true }}));
+          return {{ ok: true, dragged: true, source_target: selector, dest_target: destSelector, by, details: describeElement(dest) }};
         }}
         return {{ ok: false, error: `Unsupported managed action: ${{action}}`, error_type: 'NotImplementedError' }};
         """
@@ -712,15 +765,29 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         text: str = "",
         clear_first: bool = True,
         submit: bool = False,
+        dest_selector: str = "",
+        dest_by: str = "",
+        values: list[str] | None = None,
     ) -> Dict[str, Any]:
         raw = self._run_script_result(
             self._managed_target_action_script(
                 selector,
                 by,
-                "click" if action_name == "click_target" else "type",
+                "click"
+                if action_name == "click_target"
+                else "hover"
+                if action_name == "hover"
+                else "select_option"
+                if action_name == "select_option"
+                else "drag"
+                if action_name == "drag_target"
+                else "type",
                 text=text,
                 clear_first=clear_first,
                 submit=submit,
+                dest_selector=dest_selector,
+                dest_by=dest_by,
+                values=values,
             )
         )
         if not isinstance(raw, dict):
@@ -740,6 +807,43 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         if action_name == "type_target_and_verify":
             result["verified"] = True
         return result
+
+    def _fallback_wait_for_text(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict[str, Any]:
+        deadline = time.time() + max(1, int(timeout_seconds))
+        last_text = ""
+        while time.time() < deadline:
+            page = self._raw.get_page_text(tab_id=tab_id) if tab_id else self._raw.get_page_text()
+            last_text = str(page.get("text", "") or "")
+            if str(text or "") in last_text:
+                current = self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()
+                return {**current, "found": True, "text": str(text or "")}
+            time.sleep(0.2)
+        raise TimeoutError(f'Timed out waiting for text: "{text}"')
+
+    def _fallback_wait_for_text_gone(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict[str, Any]:
+        deadline = time.time() + max(1, int(timeout_seconds))
+        while time.time() < deadline:
+            page = self._raw.get_page_text(tab_id=tab_id) if tab_id else self._raw.get_page_text()
+            page_text = str(page.get("text", "") or "")
+            if str(text or "") not in page_text:
+                current = self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()
+                return {**current, "gone": True, "text": str(text or "")}
+            time.sleep(0.2)
+        raise TimeoutError(f'Timed out waiting for text to disappear: "{text}"')
+
+    def _fallback_wait_for_timeout(self, timeout_ms: int = 0, tab_id: str = "") -> Dict[str, Any]:
+        delay = max(0, int(timeout_ms))
+        time.sleep(delay / 1000.0)
+        current = self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()
+        return {**current, "waited": True, "timeout_ms": delay}
+
+    def _fallback_navigate_history(self, direction: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict[str, Any]:
+        del wait_for_ready, timeout_seconds
+        script = "history.back();" if str(direction) == "back" else "history.forward();"
+        self._raw.run_script(script, tab_id=tab_id)
+        current = self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()
+        current["navigated"] = str(direction)
+        return current
 
     def _parse_snapshot_candidates(self, snapshot_text: str, limit: int = 25) -> list[Dict[str, Any]]:
         candidates: list[Dict[str, Any]] = []
@@ -1372,8 +1476,36 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             fallback=lambda: self._fallback_wait_for(selector, by=by, timeout_seconds=timeout_seconds, condition=condition),
         )
 
+    def wait_for_text(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        return self._dispatch(
+            "wait_for_text",
+            lambda: self._raw.wait_for_text(text, timeout_seconds=timeout_seconds, tab_id=tab_id),
+            fallback=lambda: self._fallback_wait_for_text(text, timeout_seconds=timeout_seconds, tab_id=tab_id),
+        )
+
+    def wait_for_text_gone(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        return self._dispatch(
+            "wait_for_text_gone",
+            lambda: self._raw.wait_for_text_gone(text, timeout_seconds=timeout_seconds, tab_id=tab_id),
+            fallback=lambda: self._fallback_wait_for_text_gone(text, timeout_seconds=timeout_seconds, tab_id=tab_id),
+        )
+
+    def wait_for_timeout(self, timeout_ms: int = 0, tab_id: str = "") -> Dict:
+        return self._dispatch(
+            "wait_for_timeout",
+            lambda: self._raw.wait_for_timeout(timeout_ms=timeout_ms, tab_id=tab_id),
+            fallback=lambda: self._fallback_wait_for_timeout(timeout_ms=timeout_ms, tab_id=tab_id),
+        )
+
     def click(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
         return self._dispatch("click", lambda: self._raw.click(selector, by, timeout_seconds))
+
+    def hover(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
+        return self._dispatch(
+            "hover",
+            lambda: self._raw.hover(selector, by, timeout_seconds),
+            fallback=lambda: self._execute_managed_target_action("hover", selector, by),
+        )
 
     def click_target(self, target: str, element: str = "", by: str = "css", timeout_seconds: int = 20, double_click: bool = False) -> Dict:
         resolved_target = target
@@ -1450,6 +1582,62 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         return self._dispatch(
             "press_key",
             lambda: self._raw.press_key(key, count=count, selector=selector, by=by, timeout_seconds=timeout_seconds),
+        )
+
+    def select_option(self, selector: str, values: list[str] | None = None, by: str = "css", timeout_seconds: int = 20) -> Dict:
+        normalized_values = [str(item) for item in (values or []) if str(item or "")]
+        return self._dispatch(
+            "select_option",
+            lambda: self._raw.select_option(selector, values=normalized_values, by=by, timeout_seconds=timeout_seconds),
+            fallback=lambda: self._execute_managed_target_action(
+                "select_option",
+                selector,
+                by,
+                values=normalized_values,
+            ),
+        )
+
+    def navigate_back(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        return self._dispatch(
+            "navigate_back",
+            lambda: self._raw.navigate_back(wait_for_ready=wait_for_ready, timeout_seconds=timeout_seconds, tab_id=tab_id),
+            fallback=lambda: self._fallback_navigate_history("back", wait_for_ready=wait_for_ready, timeout_seconds=timeout_seconds, tab_id=tab_id),
+        )
+
+    def navigate_forward(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        return self._dispatch(
+            "navigate_forward",
+            lambda: self._raw.navigate_forward(wait_for_ready=wait_for_ready, timeout_seconds=timeout_seconds, tab_id=tab_id),
+            fallback=lambda: self._fallback_navigate_history("forward", wait_for_ready=wait_for_ready, timeout_seconds=timeout_seconds, tab_id=tab_id),
+        )
+
+    def drag_target(
+        self,
+        source_target: str,
+        dest_target: str,
+        source_element: str = "",
+        dest_element: str = "",
+        by: str = "css",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        del source_element, dest_element, timeout_seconds
+        return self._dispatch(
+            "drag_target",
+            lambda: self._raw.drag_target(
+                source_target,
+                dest_target,
+                source_element=source_element,
+                dest_element=dest_element,
+                by=by,
+                timeout_seconds=timeout_seconds,
+            ),
+            fallback=lambda: self._execute_managed_target_action(
+                "drag_target",
+                source_target,
+                by,
+                dest_selector=dest_target,
+                dest_by=by,
+            ),
         )
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:

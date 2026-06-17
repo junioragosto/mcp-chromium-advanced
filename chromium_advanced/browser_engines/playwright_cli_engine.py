@@ -5,6 +5,7 @@ import shutil
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -38,6 +39,24 @@ PLAYWRIGHT_CLI_AUTOMATION_BLINK_FEATURE = "AutomationControlled"
 PLAYWRIGHT_CLI_BLINK_SENTINEL_ARG = "--no-first-run=--disable-blink-features-sentinel"
 PLAYWRIGHT_CLI_DEFAULT_TIMEOUT_SECONDS = 20
 PLAYWRIGHT_CLI_DIAGNOSTIC_TIMEOUT_SECONDS = 8
+
+
+def _safe_log(text: str) -> None:
+    message = str(text or "")
+    data = (message + "\n").encode("utf-8", errors="replace")
+    stream = getattr(sys, "stdout", None)
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        try:
+            buffer.write(data)
+            buffer.flush()
+            return
+        except Exception:
+            pass
+    try:
+        print(message, flush=True)
+    except Exception:
+        pass
 PLAYWRIGHT_CLI_RAW_RESULT_LIMIT = 20000
 PLAYWRIGHT_CLI_TEMP_PREFIX = "chromium-advanced-playwright-cli-"
 PLAYWRIGHT_CLI_TEMP_RETENTION = 8
@@ -1865,13 +1884,10 @@ class PlaywrightCliEngine(BrowserEngine):
             with open(config_path, "w", encoding="utf-8", newline="\n") as handle:
                 json.dump(cli_config, handle, ensure_ascii=False, indent=2)
 
-            print(
-                (
-                    f"[{now_text()}] [PLAYWRIGHT-CLI] create_session begin: "
-                    f"profile={profile_name} cli={cli_path} command={' '.join(cli_command)} chromium={chromium_binary} "
-                    f"user_data_root={user_data_root}"
-                ),
-                flush=True,
+            _safe_log(
+                f"[{now_text()}] [PLAYWRIGHT-CLI] create_session begin: "
+                f"profile={profile_name} cli={cli_path} command={' '.join(cli_command)} chromium={chromium_binary} "
+                f"user_data_root={user_data_root}"
             )
             command = [
                 *cli_command,
@@ -1919,9 +1935,8 @@ class PlaywrightCliEngine(BrowserEngine):
                 user_data_root=user_data_root,
                 profile_name=profile_name,
             )
-            print(
-                f"[{now_text()}] [PLAYWRIGHT-CLI] create_session ready: profile={profile_name} session={session_name}",
-                flush=True,
+            _safe_log(
+                f"[{now_text()}] [PLAYWRIGHT-CLI] create_session ready: profile={profile_name} session={session_name}"
             )
             return session
         except Exception:

@@ -35,13 +35,21 @@ function Invoke-ExternalChecked {
 function Copy-BuildOutput {
     param(
         [string]$SourcePath,
-        [string]$DestinationPath
+        [string]$DestinationPath,
+        [int]$MaxAttempts = 6,
+        [int]$RetryDelaySeconds = 2
     )
 
     New-Item -ItemType Directory -Force -Path $DestinationPath | Out-Null
-    & robocopy $SourcePath $DestinationPath /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
-    if ($LASTEXITCODE -gt 7) {
-        throw "robocopy failed from '$SourcePath' to '$DestinationPath' with exit code $LASTEXITCODE"
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        & robocopy $SourcePath $DestinationPath /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
+        if ($LASTEXITCODE -le 7) {
+            return
+        }
+        if ($attempt -ge $MaxAttempts) {
+            throw "robocopy failed from '$SourcePath' to '$DestinationPath' with exit code $LASTEXITCODE after $attempt attempts"
+        }
+        Start-Sleep -Seconds $RetryDelaySeconds
     }
 }
 
@@ -90,6 +98,9 @@ Invoke-ExternalChecked -StepName "Build ChromiumProfileManager" -Command {
       --collect-data "rich" `
       --collect-submodules "rich._unicode_data" `
       --add-data "resources;resources" `
+      --add-data "docs;docs" `
+      --add-data "README.md;." `
+      --add-data "README_zh.md;." `
       $guiScriptPath
 }
 
@@ -101,6 +112,7 @@ Invoke-ExternalChecked -StepName "Build ChromiumMcpDaemon" -Command {
       --onedir `
       --name "ChromiumMcpDaemon" `
       --copy-metadata "fastmcp" `
+      --collect-all "patchright" `
       --hidden-import "selenium.webdriver.common.action_chains" `
       --hidden-import "selenium.webdriver.common.actions.action_builder" `
       --hidden-import "selenium.webdriver.common.actions.pointer_input" `

@@ -88,7 +88,19 @@ class BrowserSession(Protocol):
     def wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict:
         ...
 
+    def wait_for_text(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        ...
+
+    def wait_for_text_gone(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        ...
+
+    def wait_for_timeout(self, timeout_ms: int = 0, tab_id: str = "") -> Dict:
+        ...
+
     def click(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
+        ...
+
+    def hover(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
         ...
 
     def click_target(
@@ -147,6 +159,32 @@ class BrowserSession(Protocol):
         ...
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:
+        ...
+
+    def select_option(
+        self,
+        selector: str,
+        values: list[str] | None = None,
+        by: str = "css",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        ...
+
+    def navigate_back(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        ...
+
+    def navigate_forward(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        ...
+
+    def drag_target(
+        self,
+        source_target: str,
+        dest_target: str,
+        source_element: str = "",
+        dest_element: str = "",
+        by: str = "css",
+        timeout_seconds: int = 20,
+    ) -> Dict:
         ...
 
     def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:

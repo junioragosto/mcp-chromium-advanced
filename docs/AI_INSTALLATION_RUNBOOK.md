@@ -44,13 +44,13 @@ MCP endpoint: http://127.0.0.1:28888/mcp
 
 Supported browser engines:
 
-- `playwright_cli`: recommended default for normal MCP work, lower overhead, good for mirror-isolated parallel sessions.
+- `patchright`: recommended default for normal MCP work when capability quality matters most, especially for structured extraction and complex frontends.
 - `selenium_uc`: best stealth-oriented option, useful when avoiding automation detection matters more than throughput.
-- `patchright`: strongest structured inspection/debug path, useful for complex frontend diagnosis.
+- `playwright_cli`: lightweight integrated option for lower-overhead compatibility flows, but no longer the default high-capability path.
 
 Practical engine-selection rule for AI operators:
 
-- choose `playwright_cli` for ordinary browsing, forms, navigation, screenshots, multi-tab work, and lower-overhead production calls
+- choose `patchright` for ordinary browsing, forms, navigation, screenshots, multi-tab work, and most production calls
 - choose `selenium_uc` when stealth or anti-detection tolerance is the first concern
 - choose `patchright` when the task depends on high-quality structured extraction or difficult complex-frontend diagnostics
 
@@ -79,7 +79,7 @@ playwright-cli --help
 
 Python requirement: `3.10+`.
 
-Node/npm are needed because the preferred `playwright_cli` engine depends on the Microsoft Playwright CLI executable being available on `PATH`.
+Node/npm are still needed when `playwright_cli` is used as a compatibility engine, but `patchright` is now the preferred default execution path.
 
 ## 3. Python Dependency Setup
 
@@ -173,7 +173,7 @@ Configure these fields in the GUI or config file:
 - `paths.user_data_root`: legacy shared-root path kept for migration compatibility.
 - `paths.user_data_profiles_root`: split-profile root used at runtime.
 - `paths.mirror_user_data_root`: backup snapshot directory, normally `<user_data_profiles_root>\mirror_disk`.
-- `app.browser_engine`: recommended `playwright_cli` for normal MCP work.
+- `app.browser_engine`: recommended `patchright` for normal MCP work.
 - `app.concurrency_mode`: use `per_profile_live` as the normal mode. Use `block` only if you intentionally want conservative single-session gating.
 - `mcp.enabled`: `true`.
 - `mcp.host`: normally `127.0.0.1`.
@@ -331,9 +331,9 @@ close_profile_session(session_id)
 
 Use this policy unless the user gives a different explicit instruction:
 
-- Use `playwright_cli` for ordinary browsing, forms, navigation, multi-tab work, screenshots, console/network checks, and parallel mirror-isolated workloads.
+- Use `patchright` for ordinary browsing, forms, navigation, multi-tab work, screenshots, structured extraction, and most production MCP flows.
 - Use `selenium_uc` for stealth-sensitive sites, or when the user reports automation banners/detection problems and accepts lower throughput.
-- Use `patchright` for complex frontend debugging, structured snapshots, target inspection, and rich diagnostics.
+- Use `playwright_cli` for lightweight compatibility paths, bounded diagnostics, or explicitly lower-overhead flows.
 - If the task specifically needs isolated validation without normal session carry-over, keep the selected profile the same and add `runtime_options.incognito=true`.
 
 Do not assume an engine switch affects an already running session. Close the current session and start a new one with the desired engine.

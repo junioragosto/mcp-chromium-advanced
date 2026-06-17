@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 from typing import Dict, List, Optional
 
 if __package__ in (None, ""):
@@ -170,7 +171,7 @@ LOG_FLUSH_INTERVAL_MS = 350
 CONFIG_MTIME_EPSILON = 0.0001
 MCP_PROCESS_STOP_TIMEOUT_MS = 3000
 MCP_WATCHDOG_INTERVAL_MS = 7000
-MCP_HEALTHCHECK_START_TIMEOUT_MS = 15000
+MCP_HEALTHCHECK_START_TIMEOUT_MS = 30000
 MCP_HEALTHCHECK_POLL_INTERVAL_MS = 250
 MCP_STATUS_QUERY_TIMEOUT_SECONDS = 0.6
 MCP_STATUS_CACHE_TTL_SECONDS = 1.0
@@ -187,6 +188,72 @@ CONCURRENCY_MODE_OPTIONS = ["per_profile_live", "block"]
 LANGUAGE_OPTIONS = load_language_options()
 I18N = load_translations()
 WINDOW_STATE_SAVE_DELAY_MS = 400
+BOOTSTRAP_MCP_PRELAUNCHED = False
+
+
+def append_gui_startup_diagnostic(message: str) -> None:
+    try:
+        log_dir = get_state_storage_dir()
+        log_path = os.path.join(log_dir, "gui_startup.log")
+        with open(log_path, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(f"[{now_text()}] {str(message).rstrip()}\n")
+    except Exception:
+        pass
+
+
+def fetch_mcp_status_snapshot_for_bootstrap(config: Dict) -> Dict:
+    host, port = resolve_mcp_connect_host_port(config.get("mcp", {}))
+    url = f"http://{host}:{int(port)}/_daemon/status"
+    return fetch_json(
+        url,
+        timeout=0.8,
+        headers=build_control_auth_headers(config.get("mcp", {})),
+    )
+
+
+def bootstrap_mcp_daemon_if_enabled() -> None:
+    global BOOTSTRAP_MCP_PRELAUNCHED
+    try:
+        config_path = get_default_config_path()
+        config = load_app_config(config_path)
+        settings = config.get("mcp", {}) if isinstance(config, dict) else {}
+        if not bool(settings.get("enabled", False)):
+            append_gui_startup_diagnostic("bootstrap skipped: mcp disabled")
+            return
+        try:
+            status = fetch_mcp_status_snapshot_for_bootstrap(config)
+            if isinstance(status, dict) and status:
+                append_gui_startup_diagnostic(
+                    f"bootstrap skipped: daemon already reachable pid={status.get('daemon_pid', 0)}"
+                )
+                return
+        except Exception as exc:
+            append_gui_startup_diagnostic(f"bootstrap precheck miss: {exc}")
+
+        program = sys.executable
+        if getattr(sys, "frozen", False):
+            program = get_frozen_companion_executable("ChromiumMcpDaemon")
+        command = [
+            program,
+            *build_mcp_process_arguments_helper(
+                settings,
+                config.get("control", {}),
+                config_path,
+                MCP_TRANSPORT_OPTIONS,
+                bool(getattr(sys, "frozen", False)),
+            ),
+        ]
+        subprocess.Popen(
+            command,
+            cwd=get_runtime_launch_cwd(program),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **get_hidden_subprocess_kwargs(),
+        )
+        BOOTSTRAP_MCP_PRELAUNCHED = True
+        append_gui_startup_diagnostic(f"bootstrap launched: {program}")
+    except Exception as exc:
+        append_gui_startup_diagnostic(f"bootstrap failed: {exc}")
 
 
 class ChromiumManagerWindow(QMainWindow):
@@ -217,6 +284,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_startup_token = 0
         self.mcp_startup_deadline: Optional[datetime.datetime] = None
         self.mcp_launch_pid = 0
+        self.mcp_launch_instance_id = ""
         self.mcp_status_last_query_at = 0.0
         self.mcp_status_last_ok_at = 0.0
         self.mcp_status_consecutive_failures = 0
@@ -226,6 +294,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.occupancy_event_file_offset = 0
         self.pending_ui_refresh_flags: Dict[str, bool] = {}
         self.keepalive_icon_refresh_scheduled = False
+        self.gui_bootstrap_in_progress = True
+        self.mcp_bootstrap_prelaunched = BOOTSTRAP_MCP_PRELAUNCHED
         self._single_instance_server: Optional[QLocalServer] = None
 
         self.ensure_mcp_api_token_persisted()
@@ -242,7 +312,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.setup_single_instance_server()
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
-        self.refresh_all()
+        self.refresh_all(initial_bootstrap=True)
         occupancy_events_path = get_occupancy_events_path()
         if os.path.exists(occupancy_events_path):
             try:
@@ -251,6 +321,7 @@ class ChromiumManagerWindow(QMainWindow):
                 self.occupancy_event_file_offset = 0
         self.warm_keepalive_icon_cache_async()
         QTimer.singleShot(0, self.apply_initial_mcp_state)
+        QTimer.singleShot(1200, self.complete_startup_refresh)
 
         self.scheduler_timer = QTimer(self)
         self.scheduler_timer.timeout.connect(self.on_scheduler_timer)
@@ -1122,7 +1193,7 @@ class ChromiumManagerWindow(QMainWindow):
             if str(item.get("profile_name", "")).strip() and bool(item.get("keepalive_enabled", False))
         ]
 
-    def refresh_all(self):
+    def refresh_all(self, initial_bootstrap: bool = False):
         self.load_config_from_disk()
         self.current_language = normalize_language_code(
             self.config.get("app", {}).get("language", detect_default_language())
@@ -1139,9 +1210,22 @@ class ChromiumManagerWindow(QMainWindow):
         self.load_mcp_settings_to_ui()
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
+        if not initial_bootstrap:
+            self.refresh_scheduler_status()
+            self.query_control_profiles(force=True)
+        self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, delay_ms=0)
+
+    def complete_startup_refresh(self):
+        self.gui_bootstrap_in_progress = False
+        if (
+            bool(self.config.get("mcp", {}).get("enabled", False))
+            and not self.query_mcp_status(force=True)
+            and not self.mcp_startup_in_progress
+        ):
+            self.start_mcp_service()
         self.refresh_scheduler_status()
         self.query_control_profiles(force=True)
-        self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, delay_ms=0)
+        self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True, delay_ms=0)
 
     def reload_config_from_disk(self):
         self.refresh_all()
@@ -2619,15 +2703,30 @@ class ChromiumManagerWindow(QMainWindow):
         )
         self.mcp_status_label.setText(view_model["label"])
         self.mcp_status_detail_label.setText(view_model["detail"])
-        self.query_control_profiles()
+        if not self.gui_bootstrap_in_progress and daemon_status:
+            self.query_control_profiles()
         self.refresh_bottom_stats()
 
     def apply_initial_mcp_state(self):
         if self.mcp_startup_applied:
             return
         self.mcp_startup_applied = True
-        if bool(self.config.get("mcp", {}).get("enabled", False)):
+        if not bool(self.config.get("mcp", {}).get("enabled", False)):
+            return
+        if self.mcp_bootstrap_prelaunched:
+            self.mcp_startup_in_progress = True
+            self.mcp_startup_token += 1
+            self.mcp_startup_deadline = datetime.datetime.now() + datetime.timedelta(
+                milliseconds=MCP_HEALTHCHECK_START_TIMEOUT_MS
+            )
+            self.append_mcp_log("Detected prelaunched daemon bootstrap; waiting for readiness", prefix="MCP")
+            QTimer.singleShot(0, lambda token=self.mcp_startup_token: self.check_mcp_health_after_start(token))
+            return
+        try:
             self.start_mcp_service()
+        except Exception as exc:
+            self.append_mcp_log(self.trf("log_mcp_error", error=exc), prefix="MCP-ERR")
+            self.finish_mcp_startup_failure()
 
     def ensure_mcp_process(self):
         if self.mcp_process is not None:
@@ -2645,6 +2744,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_stop_requested = True
         self.cleanup_mcp_process_residue()
         self.mcp_launch_pid = 0
+        self.mcp_launch_instance_id = ""
         self.mcp_owned_process = False
         self.mcp_status_cache = {}
         self.request_ui_refresh(mcp_status=True)
@@ -2653,8 +2753,14 @@ class ChromiumManagerWindow(QMainWindow):
         if startup_token != self.mcp_startup_token or not self.mcp_startup_in_progress:
             return
         try:
-            status = self.query_mcp_status(force=True, expected_pid=self.mcp_launch_pid)
+            status = self.query_mcp_status(
+                force=True,
+                expected_pid=self.mcp_launch_pid,
+                expected_instance_id=self.mcp_launch_instance_id,
+            )
             if status:
+                if not self.mcp_launch_instance_id:
+                    self.mcp_launch_instance_id = str(status.get("daemon_instance_id", "") or "").strip()
                 self.mcp_startup_in_progress = False
                 self.mcp_startup_deadline = None
                 self.request_ui_refresh(mcp_status=True)
@@ -2709,6 +2815,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_owned_process = bool(plan.get("set_owned_process", True))
         self.mcp_startup_in_progress = bool(plan.get("set_startup_in_progress", True))
         self.mcp_startup_token += 1
+        self.mcp_launch_instance_id = ""
         if bool(plan.get("reset_consecutive_failures")):
             self.mcp_status_consecutive_failures = 0
         self.mcp_startup_deadline = plan.get("startup_deadline")
@@ -2755,6 +2862,7 @@ class ChromiumManagerWindow(QMainWindow):
         if bool(plan.get("cleanup_residue", True)):
             self.cleanup_mcp_process_residue()
         self.mcp_launch_pid = int(plan.get("launch_pid", 0) or 0)
+        self.mcp_launch_instance_id = ""
         if bool(plan.get("update_checkbox", False)):
             self.mcp_service_checkbox.blockSignals(True)
             self.mcp_service_checkbox.setChecked(False)
@@ -3045,6 +3153,8 @@ class ChromiumManagerWindow(QMainWindow):
     def on_scheduler_timer(self):
         if self.is_ui_interaction_busy():
             return
+        if self.gui_bootstrap_in_progress:
+            return
 
         self.refresh_scheduler_status()
 
@@ -3133,6 +3243,8 @@ def main():
     app_icon = get_app_icon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
+
+    bootstrap_mcp_daemon_if_enabled()
 
     window = ChromiumManagerWindow()
     if not app_icon.isNull():

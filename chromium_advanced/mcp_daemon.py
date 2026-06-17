@@ -50,6 +50,8 @@ from chromium_advanced.chromium_profile_lib import (
 from chromium_advanced.mcp_runtime_config import resolve_control_api_token, resolve_mcp_api_token
 from chromium_advanced.occupancy_registry import list_profile_occupancy_entries
 from chromium_advanced.session_manager import SessionManager
+from chromium_advanced.engine_strategy import resolve_engine_strategy
+from chromium_advanced.action_pipeline import ActionPipeline
 
 
 HEALTHCHECK_TIMEOUT_SECONDS = 0.5
@@ -284,6 +286,16 @@ def normalize_path(path: str) -> str:
 def get_control_log_path(config_path: str) -> str:
     root = os.path.dirname(os.path.abspath(os.path.expanduser(str(config_path or "").strip() or get_default_config_path())))
     return os.path.join(root, CONTROL_LOG_FILE_NAME)
+
+
+def _load_strategy_config(session_manager, config_path: str) -> Dict:
+    loader = getattr(session_manager, "_load_config", None)
+    if callable(loader):
+        return normalize_config(loader())
+    try:
+        return normalize_config(load_app_config(config_path))
+    except Exception:
+        return normalize_config({})
 
 
 def acquire_single_instance_guard(name: str):
@@ -1393,22 +1405,32 @@ def create_daemon_app(
         except Exception:
             body = {}
         profile_name = str((body or {}).get("profile_name", "") or "").strip()
-        engine_name = str((body or {}).get("engine", "") or "").strip()
+        requested_engine_name = str((body or {}).get("engine", "") or "").strip()
         owner_label = str((body or {}).get("owner_label", "") or "automation").strip() or "automation"
-        reuse_existing = bool((body or {}).get("reuse_existing", False))
+        reuse_existing = bool((body or {}).get("reuse_existing", True))
         runtime_options = dict((body or {}).get("runtime_options") or {})
+        if "task_scope" in body and not runtime_options.get("task_scope"):
+            runtime_options["task_scope"] = str((body or {}).get("task_scope", "") or "").strip()
         heartbeat_timeout_seconds = int((body or {}).get("heartbeat_timeout_seconds", 180) or 180)
         runtime_options.setdefault("heartbeat_timeout_seconds", heartbeat_timeout_seconds)
         try:
+            config = _load_strategy_config(session_manager, config_path)
+            strategy = resolve_engine_strategy(
+                config,
+                explicit_engine_name=requested_engine_name,
+                action_name="acquire",
+                runtime_options=runtime_options,
+            )
             result = await asyncio.to_thread(
                 session_manager.start_session,
                 profile_name=profile_name,
                 reuse_existing=reuse_existing,
-                engine_name=engine_name,
+                engine_name=strategy.resolved_engine_name,
                 scene_type="automation",
                 owner_label=owner_label,
                 runtime_options=runtime_options,
             )
+            result["engine_strategy"] = strategy.to_dict()
             await asyncio.to_thread(
                 session_manager.refresh_profile_lease,
                 profile_name,
@@ -1418,7 +1440,11 @@ def create_daemon_app(
                 session_id=result.get("session_id", ""),
                 owner_pid=os.getpid(),
                 heartbeat_timeout_seconds=heartbeat_timeout_seconds,
-                details={"source": "daemon_automation_acquire", "runtime_options": runtime_options},
+                details={
+                    "source": "daemon_automation_acquire",
+                    "runtime_options": runtime_options,
+                    "engine_strategy": strategy.to_dict(),
+                },
                 reclaimable=True,
             )
             return result
@@ -1491,7 +1517,14 @@ def create_daemon_app(
             raise HTTPException(status_code=400, detail="session_id is required")
         if not action:
             raise HTTPException(status_code=400, detail="action is required")
-        args = dict((body or {}).get("args") or {})
+        raw_args = (body or {}).get("args")
+        raw_params = (body or {}).get("params")
+        if isinstance(raw_args, dict):
+            args = dict(raw_args)
+        elif isinstance(raw_params, dict):
+            args = dict(raw_params)
+        else:
+            args = {}
         try:
             browser_session = await asyncio.to_thread(
                 session_manager.resolve_session,
@@ -1504,68 +1537,7 @@ def create_daemon_app(
             raise _as_http_error(exc) from exc
 
         def _run_action() -> Dict:
-            if action == "navigate":
-                return browser_session.navigate(
-                    str(args.get("url", "") or ""),
-                    bool(args.get("wait_for_ready", True)),
-                    int(args.get("timeout_seconds", 20) or 20),
-                    tab_id=str(args.get("tab_id", "") or ""),
-                )
-            if action == "get_page_text":
-                return browser_session.get_page_text(tab_id=str(args.get("tab_id", "") or ""))
-            if action == "get_current_url":
-                return browser_session.get_current_url(tab_id=str(args.get("tab_id", "") or ""))
-            if action == "get_page_html":
-                return browser_session.get_page_html(tab_id=str(args.get("tab_id", "") or ""))
-            if action == "list_tabs":
-                return browser_session.list_tabs()
-            if action == "open_tab":
-                return browser_session.open_tab(
-                    url=str(args.get("url", "") or ""),
-                    activate=bool(args.get("activate", True)),
-                    wait_for_ready=bool(args.get("wait_for_ready", True)),
-                    timeout_seconds=int(args.get("timeout_seconds", 20) or 20),
-                )
-            if action == "activate_tab":
-                return browser_session.activate_tab(
-                    tab_id=str(args.get("tab_id", "") or ""),
-                    index=int(args.get("index", -1) or -1),
-                    title_contains=str(args.get("title_contains", "") or ""),
-                    url_contains=str(args.get("url_contains", "") or ""),
-                )
-            if action == "close_tab":
-                return browser_session.close_tab(
-                    tab_id=str(args.get("tab_id", "") or ""),
-                    index=int(args.get("index", -1) or -1),
-                )
-            if action == "click":
-                return browser_session.click(
-                    str(args.get("selector", "") or ""),
-                    str(args.get("by", "css") or "css"),
-                    int(args.get("timeout_seconds", 20) or 20),
-                )
-            if action == "type_text":
-                return browser_session.type_text(
-                    str(args.get("selector", "") or ""),
-                    str(args.get("text", "") or ""),
-                    str(args.get("by", "css") or "css"),
-                    bool(args.get("clear_first", True)),
-                    bool(args.get("submit", False)),
-                    int(args.get("timeout_seconds", 20) or 20),
-                )
-            if action == "press_key":
-                return browser_session.press_key(
-                    str(args.get("key", "") or ""),
-                    int(args.get("count", 1) or 1),
-                    str(args.get("selector", "") or ""),
-                    str(args.get("by", "css") or "css"),
-                    int(args.get("timeout_seconds", 20) or 20),
-                )
-            if action == "run_script":
-                return browser_session.run_script(
-                    str(args.get("script", "") or ""),
-                    tab_id=str(args.get("tab_id", "") or ""),
-                )
+            pipeline = ActionPipeline(browser_session)
             if action == "run_script_batch":
                 scripts = args.get("scripts") or []
                 if not isinstance(scripts, list) or not scripts:
@@ -1602,37 +1574,24 @@ def create_daemon_app(
                     "count": len(batch_results),
                     "stop_on_error": stop_on_error,
                     "items": batch_results,
+                    "action_pipeline": {
+                        "action_name": action,
+                        "pipeline_version": 1,
+                        "engine_name": getattr(browser_session, "engine_name", ""),
+                    },
                 }
-            if action == "get_console_messages":
-                return browser_session.get_console_messages(
-                    tab_id=str(args.get("tab_id", "") or ""),
-                    limit=int(args.get("limit", 100) or 100),
-                    level=str(args.get("level", "") or ""),
-                )
-            if action == "get_network_requests":
-                return browser_session.get_network_requests(
-                    tab_id=str(args.get("tab_id", "") or ""),
-                    limit=int(args.get("limit", 100) or 100),
-                    failed_only=bool(args.get("failed_only", False)),
-                )
-            if action == "screenshot":
-                return browser_session.screenshot(
-                    str(args.get("filename", "") or ""),
-                    tab_id=str(args.get("tab_id", "") or ""),
-                )
-            if action == "get_summary":
-                return browser_session.get_summary()
-            if action == "get_capabilities":
-                return browser_session.get_capabilities()
-            if action == "snapshot":
-                return browser_session.snapshot(
-                    target=str(args.get("target", "") or ""),
-                    by=str(args.get("by", "css") or "css"),
-                    depth=(int(args.get("depth", 0) or 0) or None),
-                    boxes=bool(args.get("boxes", False)),
-                    filename=str(args.get("filename", "") or ""),
-                    tab_id=str(args.get("tab_id", "") or ""),
-                )
+            if pipeline.supports(action):
+                result = pipeline.execute(action, args)
+                if isinstance(result, dict):
+                    result.setdefault(
+                        "action_pipeline",
+                        {
+                            "action_name": action,
+                            "pipeline_version": 1,
+                            "engine_name": getattr(browser_session, "engine_name", ""),
+                        },
+                    )
+                return result
             raise HTTPException(status_code=400, detail=f"unsupported automation action: {action}")
 
         try:

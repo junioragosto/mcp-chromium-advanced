@@ -189,20 +189,33 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 
 Recommended engine-selection policy for this project:
 
-- default to `playwright_cli` for ordinary MCP browsing tasks
+- default to `patchright` for ordinary MCP browsing tasks and most real production flows
 - switch to `selenium_uc` when stealth, anti-detection tolerance, recurring challenge pages, or gesture/coordinate fallback matter more than raw speed
-- switch to `patchright` when the task needs the richest structured diagnostics, snapshot/ref behavior, or deeper complex-frontend inspection
+- use `playwright_cli` as a lightweight compatibility or diagnostic path, not as the default high-capability path
 
 Important engine capability examples:
 
-- `playwright_cli`
-  best default for high-throughput browsing, ordinary click/type/navigate/tab work, and lower token overhead
+- `patchright`
+  best default for structured extraction, complex frontend interaction, richer diagnostics, more complete high-level action coverage, and mainstream MCP work
 - `selenium_uc`
   prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs coordinate-level mouse actions such as drag, gesture unlock, slider/pattern input, or vision-style XY fallback
-- `patchright`
-  prefer this when the task depends on snapshot refs, richer DOM diagnostics, stronger structured extraction, or difficult complex-frontend inspection
+- `playwright_cli`
+  prefer this for lightweight compatibility flows, bounded diagnostics, or lower-overhead tasks when the stronger `patchright` path is not required
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as a formal capability boundary rather than a generic fallback every engine should support
+
+Recently strengthened high-level actions:
+
+- `wait_for_text(...)`
+- `wait_for_text_gone(...)`
+- `wait_for_timeout(...)`
+- `hover(...)`
+- `select_option(...)`
+- `navigate_back(...)`
+- `navigate_forward(...)`
+- `drag_target(...)`
+
+Prefer these higher-level actions before falling back to arbitrary `run_script(...)` when the task is a mainstream browser interaction problem.
 
 Runtime isolation option:
 
@@ -211,9 +224,10 @@ Runtime isolation option:
 
 How to switch engines explicitly:
 
-- set `engine="playwright_cli"` on both `can_start_profile_session(...)` and `start_profile_session(...)`
+- rely on the GUI-configured default engine for normal work, which should now be `patchright`
 - set `engine="selenium_uc"` when a page needs gesture/drag/XY mouse actions
-- set `engine="patchright"` when a page needs snapshot/ref-style targeting or deeper structured diagnosis
+- set `engine="patchright"` explicitly when the caller wants to pin the strongest structured path
+- set `engine="playwright_cli"` only when a lightweight compatibility path is intentionally desired
 
 Example:
 
@@ -268,7 +282,7 @@ Important engine-switching boundary:
 - When a `playwright_cli` session closes, the manager should release the named session and clean owned daemon/browser processes; startup also prunes stale temp dirs that are not referenced by live processes. If a browser window remains, treat it as an orphan-process bug and inspect the runtime root/session name.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.
-- `playwright_cli` is the default high-throughput engine for the per-profile live runtime. It still obeys the same profile-occupancy rules as the other engines.
+- `patchright` is now the default engine for the per-profile live runtime. It still obeys the same profile-occupancy rules as the other engines.
 
 ## Example User Wording
 

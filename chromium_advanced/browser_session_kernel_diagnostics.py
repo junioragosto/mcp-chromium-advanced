@@ -418,6 +418,8 @@ class ManagedSessionDiagnosticsMixin:
             page = self._raw.get_current_url(tab_id=normalized_tab_id) if normalized_tab_id else self._raw.get_current_url()
         except Exception:
             page = {}
+        if not isinstance(page, dict):
+            page = {}
         try:
             tabs = list(self._raw.list_tabs().get("tabs", []))
         except Exception:
@@ -469,6 +471,8 @@ class ManagedSessionDiagnosticsMixin:
                 )
             except Exception:
                 normalized_page = {}
+        if not isinstance(normalized_page, dict):
+            normalized_page = {}
         if self._capabilities.engine_name == "playwright_cli" and not bool(modal_state.get("visible", False)):
             refreshed_modal_state = self._fallback_modal_state(tab_id=str(tab_id or "").strip())
             if bool(refreshed_modal_state.get("visible", False)):

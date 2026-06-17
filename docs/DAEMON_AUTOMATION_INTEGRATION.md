@@ -395,7 +395,7 @@ This integration surface is now suitable for fixed-script automation that needs:
 
 Additional practical boundary:
 
-- `playwright_cli` is a strong default for ordinary navigation/click/type/screenshot flows and lower-overhead daemon automation.
+- `patchright` is now the default engine for ordinary daemon automation when stronger extraction fidelity and diagnostics are preferred.
 - If the script depends on high-fidelity structured extraction from a complex dynamic frontend, `patchright` is still the better engine.
 - If the script needs to validate a no-login or isolated-session flow while still staying inside the same profile governance path, use `runtime_options.incognito=true`.
 

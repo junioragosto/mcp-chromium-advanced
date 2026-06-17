@@ -141,12 +141,12 @@ worker 运行策略现在也是显式可配的：
 
 推荐的实际策略：
 
-- `playwright_cli`
-  适合作为日常 MCP 任务默认引擎。启动轻、交互开销低，更适合当前按 Profile live 并发模型。
-- `selenium_uc`
-  更适合风控敏感站点、登录站点、伪装优先场景。目前项目里它仍然是 stealth 最强的一条路径。
 - `patchright`
-  更适合复杂前端诊断、结构化调试、多标签观察、snapshot/ref 相关能力要求更高的任务。
+  适合作为普通 MCP 任务默认引擎。结构化提取更强、诊断能力更完整，也更符合当前受管能力层的设计方向。
+- `selenium_uc`
+  更适合风控敏感站点、登录站点、challenge/伪装优先场景。目前项目里它仍然是 stealth 最强的一条路径。
+- `playwright_cli`
+  适合作为低开销、轻量级、兼容性导向的集成引擎，但不再是默认的高能力路径。
 
 关于切换引擎，有几个必须明确的边界：
 
@@ -437,7 +437,7 @@ MCP trace 也会写入轮转 JSONL 文件，GUI 的 MCP 状态面板中会显示
 
 ### Playwright CLI
 
-- 当前这台机器上，GUI 默认引擎设成 `playwright_cli` 时，它是日常 MCP 任务的优先引擎
+- 轻量级集成兼容引擎，不是默认的高能力主路径
 - 一旦从这里启动了会话，后续 tab / click / type / snapshot / diagnose 等动作都应该继续走本服务；同一个任务再切去别的浏览器 MCP，是调用侧/agent 的集成错误，不是支持的模式。
 - 更适合当前 per-profile live 运行时下的低开销任务执行
 - 原生 stealth 弱于 `selenium_uc`
@@ -475,11 +475,12 @@ keepalive 站点现在走插件化运行时。内置站点包括 `chatgpt`、`go
 
 这些文件是给 Codex 或其它 AI 工作流复用的模板，不是程序自动装载的运行目录。
 
-当前 skill / 模板文档应该明确告诉调用方三件事：
+skill 模板里应明确告诉 agent：
 
-- `playwright_cli` 是普通 MCP 浏览任务的默认优先引擎
-- 当任务更依赖高质量结构化抽取、复杂前端诊断时，应显式切到 `patchright`
-- 当任务要验证“同一个 Profile，但不要继承当前常规会话状态”时，可以传 `runtime_options.incognito=true`
+- `patchright` 是普通 MCP 任务的默认引擎，尤其适合结构化提取和复杂前端诊断。
+- `selenium_uc` 适合 stealth、反自动化压力较高、反复 challenge、手势/拖拽/坐标 fallback 等场景。
+- `playwright_cli` 是轻量级集成引擎，适合低开销流程，但不应被描述成默认的高能力路径。
+- 如果需要在同一个 Profile 治理路径下做隔离验证，可以使用 `runtime_options.incognito=true`。
 
 ## 隐私与安全
 

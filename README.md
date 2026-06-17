@@ -142,12 +142,12 @@ There are two ways to choose an engine:
 
 Recommended practical policy:
 
-- `playwright_cli`
-  Default choice for normal MCP work. Fast startup, lower interaction overhead, and the best fit for the new per-profile live concurrency model.
-- `selenium_uc`
-  Preferred for stealth-sensitive sites or workflows where avoiding automation detection matters more than raw throughput.
 - `patchright`
-  Preferred for complex frontend diagnosis, richer structured debugging, and the strongest snapshot/tab-aware inspection behavior.
+  Default choice for normal MCP work. Best structured extraction, stronger diagnostics, better multi-step interaction semantics, and the closest path to an official Playwright-MCP-style experience.
+- `selenium_uc`
+  Preferred for stealth-sensitive sites or workflows where avoiding automation detection, challenge handling, or coordinate/gesture fallback matters more than raw throughput.
+- `playwright_cli`
+  Lightweight integrated engine for lower-overhead flows and compatibility scenarios, but no longer the default high-capability path.
 
 Important switching rule:
 
@@ -155,6 +155,33 @@ Important switching rule:
 - Existing sessions keep the engine they were started with.
 - `reuse_existing=true` only reuses a compatible session for the same profile and the same engine.
 - Starting a new session with a different engine never hot-switches an existing session in place. Existing sessions keep their original engine.
+
+Current practical capability direction:
+
+- the project is intentionally moving toward a more official `playwright-mcp`-style interaction model
+- `patchright` is now the primary path for richer structured reasoning, stronger diagnostics, and smoother multi-step browsing
+- the managed session kernel increasingly exposes high-level actions through one stable contract instead of forcing callers to drop into arbitrary `run_script`
+
+Examples of newer high-level action coverage exposed through the managed layer:
+
+- selector wait:
+  `wait_for(...)`
+- text wait:
+  `wait_for_text(...)`
+- text disappearance wait:
+  `wait_for_text_gone(...)`
+- bounded pause:
+  `wait_for_timeout(...)`
+- hover:
+  `hover(...)`
+- select element option choice:
+  `select_option(...)`
+- browser history navigation:
+  `navigate_back(...)`, `navigate_forward(...)`
+- target-to-target drag:
+  `drag_target(...)`
+
+These additions are meant to reduce exploratory retries and make complex-page flows feel closer to official Playwright-style browser control.
 
 ## Managed automation scripts
 
@@ -494,7 +521,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 
 ### Playwright CLI
 
-- Current preferred engine for normal MCP task execution on this machine when the GUI default is set to `playwright_cli`
+- Lightweight integrated compatibility engine, not the default high-capability path
 - Once a session is started here, all follow-up tab/click/type/snapshot/diagnostic actions should stay on this MCP service. Cross-routing the same task into another browser MCP is an agent integration bug, not a supported pattern.
 - Best fit for lower-overhead task execution in the new per-profile live runtime
 - Native stealth is weaker than `selenium_uc`
@@ -584,7 +611,7 @@ These files are examples for Codex or other AI workflows that need to consume th
 
 The skill guidance should explicitly tell agents that:
 
-- `playwright_cli` is the normal default for ordinary MCP work
+- `patchright` is the default engine for ordinary MCP work when the task values stronger structured extraction and richer diagnostics
 - `patchright` should be selected when structured extraction or deep frontend diagnostics matter more than throughput
 - `selenium_uc` should be selected when stealth, anti-bot tolerance, recurring challenge pages, gesture flows, or coordinate fallback matter more than speed
 - `runtime_options.incognito=true` is available when a flow should be validated without inheriting the current regular-window session state
