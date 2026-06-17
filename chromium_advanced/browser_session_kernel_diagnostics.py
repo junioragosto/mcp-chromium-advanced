@@ -31,6 +31,25 @@ ANTI_BOT_WEAK_MARKERS = (
     "captcha",
 )
 
+STATUS_KEYWORDS = (
+    "queued",
+    "running",
+    "in progress",
+    "complete",
+    "completed",
+    "done",
+    "success",
+    "failed",
+    "failure",
+    "error",
+    "pending",
+    "processing",
+)
+
+SEARCH_KEYWORDS = ("search", "find", "filter", "query", "keyword")
+FILTER_KEYWORDS = ("filter", "sort", "status", "type", "label", "category", "newest", "latest")
+PRIMARY_ACTION_KEYWORDS = ("save", "submit", "apply", "confirm", "continue", "next", "open", "run", "create")
+
 
 class ManagedSessionDiagnosticsMixin:
     def _build_anti_bot_detection(self, page_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -372,8 +391,14 @@ class ManagedSessionDiagnosticsMixin:
         options: list[Dict[str, Any]] = []
         tabs: list[Dict[str, Any]] = []
         status_candidates: list[str] = []
+        search_controls: list[Dict[str, Any]] = []
+        filter_controls: list[Dict[str, Any]] = []
+        navigation_controls: list[Dict[str, Any]] = []
+        primary_actions: list[Dict[str, Any]] = []
+        interactive_labels_preview: list[str] = []
         region_counts = {"dialog": 0, "menu": 0, "listbox": 0, "tab": 0}
         scope_counts = {"overlay": 0, "dialog": 0, "expanded": 0}
+        role_counts: Dict[str, int] = {}
         control_type_counts = {
             "button": 0,
             "link": 0,
@@ -409,6 +434,8 @@ class ManagedSessionDiagnosticsMixin:
                 region_counts["listbox"] += 1
             if re.search(r"\btab\b", lowered_summary):
                 region_counts["tab"] += 1
+            if tag_name:
+                role_counts[tag_name] = int(role_counts.get(tag_name, 0) or 0) + 1
             if any(token in lowered_summary for token in ("list ", "listitem", "feed", "thread", "row", "collection")):
                 list_signal_count += 1
             if any(token in lowered_summary for token in ("table", "grid", "columnheader", "rowheader", "cell")):
@@ -422,23 +449,7 @@ class ManagedSessionDiagnosticsMixin:
             summary_status_source = label or normalized_summary
             if summary_status_source and len(summary_status_source) <= 160:
                 lowered_status = summary_status_source.lower()
-                if any(
-                    token in lowered_status
-                    for token in (
-                        "queued",
-                        "running",
-                        "in progress",
-                        "complete",
-                        "completed",
-                        "done",
-                        "success",
-                        "failed",
-                        "failure",
-                        "error",
-                        "pending",
-                        "processing",
-                    )
-                ):
+                if any(token in lowered_status for token in STATUS_KEYWORDS):
                     candidate_text = summary_status_source.strip()
                     if candidate_text and candidate_text not in status_candidates:
                         status_candidates.append(candidate_text)
@@ -454,6 +465,8 @@ class ManagedSessionDiagnosticsMixin:
                     "scope_hint": scope_hint,
                 }
                 interactive_controls.append(control)
+                if label and label not in interactive_labels_preview:
+                    interactive_labels_preview.append(label)
                 if tag_name in {"textbox", "input", "select", "checkbox", "radio"}:
                     form_controls.append(dict(control))
                     control_type_counts["input_like"] += 1
@@ -469,25 +482,17 @@ class ManagedSessionDiagnosticsMixin:
                 if tag_name == "tab":
                     tabs.append(dict(control))
                     control_type_counts["tab"] += 1
+                lowered_label = label.lower() if label else ""
+                if lowered_label and any(token in lowered_label for token in SEARCH_KEYWORDS):
+                    search_controls.append(dict(control))
+                if lowered_label and any(token in lowered_label for token in FILTER_KEYWORDS):
+                    filter_controls.append(dict(control))
+                if tag_name in {"link", "tab"}:
+                    navigation_controls.append(dict(control))
+                if lowered_label and any(token in lowered_label for token in PRIMARY_ACTION_KEYWORDS):
+                    primary_actions.append(dict(control))
                 if label and len(label) <= 120:
-                    lowered_label = label.lower()
-                    if any(
-                        token in lowered_label
-                        for token in (
-                            "queued",
-                            "running",
-                            "in progress",
-                            "complete",
-                            "completed",
-                            "done",
-                            "success",
-                            "failed",
-                            "failure",
-                            "error",
-                            "pending",
-                            "processing",
-                        )
-                    ):
+                    if any(token in lowered_label for token in STATUS_KEYWORDS):
                         if label not in status_candidates:
                             status_candidates.append(label)
         comments: list[Dict[str, Any]] = []
@@ -543,6 +548,7 @@ class ManagedSessionDiagnosticsMixin:
             "headings": headings,
             "interactive_controls": interactive_controls[:20],
             "interactive_control_count": len(interactive_controls),
+            "interactive_labels_preview": interactive_labels_preview[:20],
             "form_controls": form_controls[:20],
             "form_control_count": len(form_controls),
             "button_controls": buttons[:20],
@@ -552,6 +558,14 @@ class ManagedSessionDiagnosticsMixin:
             "option_controls": options[:20],
             "option_count": len(options),
             "tab_controls": tabs[:20],
+            "search_controls": search_controls[:12],
+            "search_control_count": len(search_controls),
+            "filter_controls": filter_controls[:12],
+            "filter_control_count": len(filter_controls),
+            "navigation_controls": navigation_controls[:12],
+            "navigation_control_count": len(navigation_controls),
+            "primary_actions": primary_actions[:12],
+            "primary_action_count": len(primary_actions),
             "custom_element_preview": custom_elements[:20],
             "custom_element_count": len(custom_elements),
             "comment_threads": comments[:12],
@@ -564,7 +578,13 @@ class ManagedSessionDiagnosticsMixin:
             "overlay_control_count": int(scope_counts["overlay"]),
             "list_signal_count": int(list_signal_count),
             "table_signal_count": int(table_signal_count),
+            "collection_signals": {
+                "list_signal_count": int(list_signal_count),
+                "table_signal_count": int(table_signal_count),
+                "comment_thread_count": len(comments),
+            },
             "status_candidates": status_candidates[:12],
+            "role_counts": dict(sorted(role_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))),
             "control_type_counts": dict(control_type_counts),
             "interaction_region": primary_region,
             "interaction_region_summary": {
@@ -599,38 +619,56 @@ class ManagedSessionDiagnosticsMixin:
             if str(item.get("tag_name", "") or "").lower() in {"textbox", "input", "select", "checkbox", "radio"}
         ]
         texts = []
+        role_counts: Dict[str, int] = {}
+        interactive_controls: list[Dict[str, Any]] = []
+        primary_actions: list[Dict[str, Any]] = []
+        search_like_controls: list[Dict[str, Any]] = []
+        status_controls: list[Dict[str, Any]] = []
         for item in candidates:
+            tag_name = str(item.get("tag_name", "") or "").lower()
+            if tag_name:
+                role_counts[tag_name] = int(role_counts.get(tag_name, 0) or 0) + 1
             label = str(item.get("text", "") or item.get("aria_label", "") or item.get("accessible_name", "") or "").strip()
             if label:
                 texts.append(label)
+            if tag_name in {"button", "link", "textbox", "input", "select", "option", "menuitem", "checkbox", "radio", "tab"}:
+                control = {
+                    "target": str(item.get("target", "") or item.get("ref", "") or ""),
+                    "ref": str(item.get("ref", "") or ""),
+                    "tag_name": tag_name,
+                    "label": label,
+                    "visible": bool(item.get("visible", False)),
+                    "enabled": bool(item.get("enabled", True)),
+                }
+                interactive_controls.append(control)
+                lowered_label = label.lower()
+                if lowered_label and any(token in lowered_label for token in PRIMARY_ACTION_KEYWORDS):
+                    primary_actions.append(dict(control))
+                if lowered_label and any(token in lowered_label for token in SEARCH_KEYWORDS + FILTER_KEYWORDS):
+                    search_like_controls.append(dict(control))
+                if lowered_label and any(token in lowered_label for token in STATUS_KEYWORDS):
+                    status_controls.append(dict(control))
         status_candidates = []
         for value in texts:
             lowered = value.lower()
-            if any(
-                token in lowered
-                for token in (
-                    "queued",
-                    "running",
-                    "in progress",
-                    "complete",
-                    "completed",
-                    "done",
-                    "success",
-                    "failed",
-                    "failure",
-                    "error",
-                    "pending",
-                    "processing",
-                )
-            ):
+            if any(token in lowered for token in STATUS_KEYWORDS):
                 if value not in status_candidates:
                     status_candidates.append(value)
+        region_kind = "generic"
+        role = str(base.get("role", "") or "").lower()
+        if role in {"dialog", "menu", "listbox", "tablist"}:
+            region_kind = role
+        elif options:
+            region_kind = "option_group"
+        elif input_like:
+            region_kind = "form"
         return {
             "target": str(base.get("target", "") or ""),
             "tag_name": str(base.get("tag_name", "") or ""),
             "role": str(base.get("role", "") or ""),
             "visible": bool(base.get("visible", False)),
             "enabled": bool(base.get("enabled", True)),
+            "region_kind": region_kind,
             "candidate_count": len(candidates),
             "button_count": len(buttons),
             "link_count": len(links),
@@ -638,6 +676,11 @@ class ManagedSessionDiagnosticsMixin:
             "input_like_count": len(input_like),
             "status_candidates": status_candidates[:12],
             "labels_preview": texts[:20],
+            "role_counts": dict(sorted(role_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))),
+            "interactive_controls": interactive_controls[:12],
+            "primary_actions": primary_actions[:8],
+            "search_like_controls": search_like_controls[:8],
+            "status_controls": status_controls[:8],
         }
 
     def _fallback_interaction_context(self, action_name: str = "inspect", tab_id: str = "") -> Dict[str, Any]:

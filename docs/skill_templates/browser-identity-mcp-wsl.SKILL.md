@@ -100,6 +100,28 @@ Recent managed-result normalization is the same from WSL:
 
 `browser_diagnose_page(...)` should be treated as a generic structured-page surface from WSL as well. Its `structured_page` block now summarizes interactive controls, form controls, custom elements, region density such as dialog/menu/listbox/tab, and a current interaction-region hint.
 
+That structured page model is now broader as well. It can additionally expose:
+
+- likely primary actions
+- search and filter style controls
+- navigation-oriented controls
+- collection signals for list/table/thread-heavy pages
+- lightweight role density and interactive label previews
+
+For target-local debugging from WSL, prefer `browser_diagnose_target(...)` when the task is about one control or local panel. Its `structured_region` block now includes:
+
+- `region_kind`
+- `interactive_controls`
+- `primary_actions`
+- `search_like_controls`
+- `status_controls`
+- `role_counts`
+
+Managed verification surfaces are also more uniform from WSL:
+
+- `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
+- `browser_describe_target(...)` and `browser_list_candidates(...)` expose a lightweight `target_summary`
+
 Runtime isolation option from WSL:
 
 - `runtime_options.incognito=true`

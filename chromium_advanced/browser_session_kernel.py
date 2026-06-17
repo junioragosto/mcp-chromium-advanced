@@ -1573,11 +1573,22 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         return result
 
     def list_candidates(self, target: str = "", by: str = "css", text_filter: str = "", limit: int = 25, include_boxes: bool = True, tab_id: str = "") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "list_candidates",
             lambda: self._raw.list_candidates(target=target, by=by, text_filter=text_filter, limit=limit, include_boxes=include_boxes, tab_id=tab_id),
             fallback=lambda: self._fallback_candidates(target=target, by=by, text_filter=text_filter, limit=limit, include_boxes=include_boxes, tab_id=tab_id),
         )
+        if isinstance(result, dict):
+            candidates = result.get("candidates", [])
+            if isinstance(candidates, list):
+                result.setdefault("count", len(candidates))
+                result.setdefault("target_summary", {
+                    "target": str(target or "").strip(),
+                    "by": str(by or "css"),
+                    "text_filter": str(text_filter or ""),
+                    "top_candidate_text": str((candidates[0] or {}).get("text", "") or (candidates[0] or {}).get("aria_label", "") or "") if candidates else "",
+                })
+        return result
 
     def wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict:
         result = self._dispatch(
@@ -2022,10 +2033,23 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         return self._augment_diagnosis_payload("diagnose_page", result)
 
     def verify_text(self, text: str) -> Dict:
-        return self._dispatch("verify_text", lambda: self._raw.verify_text(text))
+        result = self._dispatch("verify_text", lambda: self._raw.verify_text(text))
+        if isinstance(result, dict):
+            matched = bool(result.get("verified", result.get("found", False)))
+            result.setdefault("verified", matched)
+            result.setdefault("matched", matched)
+            result.setdefault("expected_text", str(text or ""))
+        return result
 
     def verify_dialog(self, accessible_name: str = "", text: str = "") -> Dict:
-        return self._dispatch("verify_dialog", lambda: self._raw.verify_dialog(accessible_name=accessible_name, text=text))
+        result = self._dispatch("verify_dialog", lambda: self._raw.verify_dialog(accessible_name=accessible_name, text=text))
+        if isinstance(result, dict):
+            matched = bool(result.get("verified", result.get("found", False)))
+            result.setdefault("verified", matched)
+            result.setdefault("matched", matched)
+            result.setdefault("expected_accessible_name", str(accessible_name or ""))
+            result.setdefault("expected_text", str(text or ""))
+        return result
 
     def verify_active_element(self, target: str = "", by: str = "css", element: str = "") -> Dict:
         return self._dispatch(
@@ -2049,11 +2073,22 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         )
 
     def describe_target(self, target: str, element: str = "", by: str = "css", include_box: bool = True) -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "describe_target",
             lambda: self._raw.describe_target(target=target, element=element, by=by, include_box=include_box),
             fallback=lambda: self._fallback_describe_target(target=target, element=element, by=by, include_box=include_box),
         )
+        if isinstance(result, dict):
+            result.setdefault("target_summary", {
+                "target": str(target or "").strip(),
+                "by": str(by or "css"),
+                "tag_name": str(result.get("tag_name", "") or ""),
+                "role": str(result.get("role", "") or ""),
+                "visible": bool(result.get("visible", False)),
+                "enabled": bool(result.get("enabled", True)),
+                "label": str(result.get("accessible_name", "") or result.get("aria_label", "") or result.get("text_preview", "") or result.get("text", "") or ""),
+            })
+        return result
 
     def diagnose_target(self, target: str, element: str = "", by: str = "css", text_filter: str = "", limit: int = 10) -> Dict:
         result = self._dispatch(
@@ -2064,7 +2099,14 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         return self._augment_diagnosis_payload("diagnose_target", result, target=target, by=by, text_filter=text_filter)
 
     def verify_element(self, role: str, accessible_name: str) -> Dict:
-        return self._dispatch("verify_element", lambda: self._raw.verify_element(role=role, accessible_name=accessible_name))
+        result = self._dispatch("verify_element", lambda: self._raw.verify_element(role=role, accessible_name=accessible_name))
+        if isinstance(result, dict):
+            matched = bool(result.get("verified", result.get("found", False)))
+            result.setdefault("verified", matched)
+            result.setdefault("matched", matched)
+            result.setdefault("expected_role", str(role or ""))
+            result.setdefault("expected_accessible_name", str(accessible_name or ""))
+        return result
 
     def highlight_target(self, target: str, element: str = "", by: str = "css", style: str = "") -> Dict:
         return self._dispatch("highlight_target", lambda: self._raw.highlight_target(target=target, element=element, by=by, style=style))

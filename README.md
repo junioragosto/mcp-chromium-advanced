@@ -216,6 +216,30 @@ The managed diagnostics path was also widened beyond comment/text extraction. `b
 - dialog/menu/listbox/tab density
 - current interaction region hints such as `overlay` or `dialog`
 
+The structured diagnostics model is now broader than that initial baseline. In current builds, `structured_page` can also expose:
+
+- likely primary actions such as save/apply/open/run style controls
+- search and filter style controls
+- navigation-oriented controls such as links and tabs
+- collection signals for list/table/thread-heavy pages
+- lightweight role density and interactive label previews
+
+For target-local diagnostics, `browser_diagnose_target(...)` now also returns a richer `structured_region` block with:
+
+- `region_kind`
+- `interactive_controls`
+- `primary_actions`
+- `search_like_controls`
+- `status_controls`
+- `role_counts`
+
+That target-local shape is the preferred generic debugging surface when the task is about one dynamic control, popup, filter menu, status chip, or local panel rather than the whole page.
+
+Managed verification results are also more uniform now:
+
+- `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
+- `browser_describe_target(...)` and `browser_list_candidates(...)` now expose a lightweight `target_summary` for easier upstream reasoning
+
 ## Managed automation scripts
 
 The project now has a second formal consumer path besides MCP: managed local scripts.

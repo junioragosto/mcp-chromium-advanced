@@ -165,6 +165,30 @@ worker 运行策略现在也是显式可配的：
 - dialog / menu / listbox / tab 密度
 - 当前交互区域提示，例如 `overlay`、`dialog`
 
+现在这一层又进一步泛化了。`structured_page` 还会尽量补充：
+
+- 可能的主动作控件，例如 save / apply / open / run 一类操作
+- 搜索与筛选类控件
+- 导航型控件，例如 link、tab
+- 列表 / 表格 / 线程型页面信号
+- 轻量 role 密度与交互标签预览
+
+对于局部目标诊断，`browser_diagnose_target(...)` 现在也会返回更丰富的 `structured_region`，包括：
+
+- `region_kind`
+- `interactive_controls`
+- `primary_actions`
+- `search_like_controls`
+- `status_controls`
+- `role_counts`
+
+如果任务关注的是某一个动态控件、弹层、筛选菜单、状态区块或局部面板，应该优先读 `structured_region`，而不是先退回整页文本。
+
+当前受管验证结果也更统一了：
+
+- `browser_verify_text(...)`、`browser_verify_dialog(...)`、`browser_verify_element(...)` 会统一补 `verified`、`matched`
+- `browser_describe_target(...)`、`browser_list_candidates(...)` 会补一个轻量的 `target_summary`
+
 对于强动态页面，这一轮还补了两类更通用的等待能力：
 
 - `wait_for_page_stable(...)`

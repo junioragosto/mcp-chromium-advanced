@@ -240,6 +240,28 @@ Recent managed-result normalization also means callers should expect stronger cr
 
 `browser_diagnose_page(...)` should also be treated as a more general structured-page primitive now, not only a text dump. Its `structured_page` block can summarize interactive controls, form controls, custom elements, region density such as dialog/menu/listbox/tab, and a current interaction-region hint.
 
+In current builds that structured page model is broader than the initial version. It can also surface:
+
+- likely primary actions
+- search and filter style controls
+- navigation-oriented controls
+- collection signals for list/table/thread-heavy pages
+- lightweight role density and interactive label previews
+
+For target-local debugging, prefer `browser_diagnose_target(...)` when the task is really about one control or one local region. Its `structured_region` block now includes:
+
+- `region_kind`
+- `interactive_controls`
+- `primary_actions`
+- `search_like_controls`
+- `status_controls`
+- `role_counts`
+
+Managed verification surfaces are also more uniform now:
+
+- `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
+- `browser_describe_target(...)` and `browser_list_candidates(...)` expose a lightweight `target_summary`
+
 Runtime isolation option:
 
 - `runtime_options.incognito=true`
