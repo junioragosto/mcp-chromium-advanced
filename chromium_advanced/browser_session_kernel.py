@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -310,6 +311,8 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             return "page_drift"
         if not alive or normalized == "session_not_alive":
             return "session_lost"
+        if normalized == "page_not_ready":
+            return "page_not_ready"
         if normalized in {"target_not_found", "target_not_interactable"}:
             return "target_resolution"
         if normalized == "timeout":
@@ -324,6 +327,8 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             return ["reactivate_expected_tab", "reopen_expected_url", "retry_on_sticky_tab", "diagnose_page"]
         if classification == "session_lost":
             return ["recreate_session", "reopen_target_page"]
+        if classification == "page_not_ready":
+            return ["wait_for_page_stable", "wait_for_text_change", "refresh_page_state", "diagnose_page"]
         if classification == "target_resolution":
             return ["refresh_candidates_or_snapshot", "retry_with_scoped_targeting", "diagnose_page"]
         if classification == "page_synchronization":
@@ -837,12 +842,90 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         current = self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()
         return {**current, "waited": True, "timeout_ms": delay}
 
+    def _fallback_wait_for_text_change(
+        self,
+        text: str = "",
+        previous_text: str = "",
+        timeout_seconds: int = 20,
+        tab_id: str = "",
+    ) -> Dict[str, Any]:
+        expected_text = str(text or "")
+        previous = str(previous_text or "")
+        deadline = time.time() + max(1, int(timeout_seconds))
+        last_text = ""
+        while time.time() < deadline:
+            payload = self._raw.get_page_text(tab_id=tab_id) if tab_id else self._raw.get_page_text()
+            current_text = str(payload.get("text", "") or "")
+            last_text = current_text
+            if expected_text:
+                changed = expected_text in current_text and expected_text not in previous
+            elif previous:
+                changed = current_text != previous
+            else:
+                changed = bool(current_text.strip())
+            if changed:
+                return {
+                    **(payload if isinstance(payload, dict) else self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()),
+                    "changed": True,
+                    "match_type": "text_changed",
+                    "text": current_text,
+                    "previous_text": previous,
+                    "observed_text": expected_text,
+                }
+            time.sleep(0.3)
+        raise TimeoutError(f"Timed out waiting for page text change. observed_text={expected_text!r} previous_text_len={len(previous)} last_text_len={len(last_text)}")
+
+    def _fallback_wait_for_page_stable(
+        self,
+        timeout_seconds: int = 20,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> Dict[str, Any]:
+        deadline = time.time() + max(1, int(timeout_seconds))
+        interval = max(50, int(poll_interval_ms)) / 1000.0
+        required_cycles = max(1, int(stable_cycles))
+        stable_count = 0
+        last_signature = ""
+        last_payload: Dict[str, Any] = {}
+        while time.time() < deadline:
+            page = self._raw.get_page_text(tab_id=tab_id) if tab_id else self._raw.get_page_text()
+            html = self._raw.get_page_html(tab_id=tab_id) if tab_id else self._raw.get_page_html()
+            text_value = str(page.get("text", "") or "")
+            html_value = str(html.get("html", "") or "")
+            signature_source = f"{str(page.get('url', '') or '')}\n{str(page.get('title', '') or '')}\n{text_value[:4000]}\n{len(html_value)}"
+            signature = hashlib.sha1(signature_source.encode("utf-8", errors="ignore")).hexdigest()
+            if signature == last_signature:
+                stable_count += 1
+            else:
+                stable_count = 1
+                last_signature = signature
+            last_payload = {
+                **(page if isinstance(page, dict) else {}),
+                "stable": stable_count >= required_cycles,
+                "stable_cycles": stable_count,
+                "required_stable_cycles": required_cycles,
+                "poll_interval_ms": max(50, int(poll_interval_ms)),
+                "text_length": len(text_value),
+                "html_length": len(html_value),
+                "page_signature": signature,
+            }
+            if stable_count >= required_cycles:
+                return last_payload
+            time.sleep(interval)
+        raise TimeoutError(f"Timed out waiting for page stability. stable_cycles={stable_count} required_stable_cycles={required_cycles}")
+
     def _fallback_navigate_history(self, direction: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict[str, Any]:
         del wait_for_ready, timeout_seconds
+        before = self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()
         script = "history.back();" if str(direction) == "back" else "history.forward();"
         self._raw.run_script(script, tab_id=tab_id)
         current = self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()
         current["navigated"] = str(direction)
+        current["history_changed"] = (
+            str(current.get("url", "") or "") != str(before.get("url", "") or "")
+            or str(current.get("title", "") or "") != str(before.get("title", "") or "")
+        )
         return current
 
     def _parse_snapshot_candidates(self, snapshot_text: str, limit: int = 25) -> list[Dict[str, Any]]:
@@ -1393,19 +1476,46 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         return self._dispatch("list_tabs", lambda: self._raw.list_tabs())
 
     def open_tab(self, url: str = "", activate: bool = True, wait_for_ready: bool = True, timeout_seconds: int = 20) -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "open_tab",
             lambda: self._raw.open_tab(url=url, activate=activate, wait_for_ready=wait_for_ready, timeout_seconds=timeout_seconds),
         )
+        if isinstance(result, dict):
+            result.setdefault("opened", True)
+            result.setdefault("activated", bool(activate))
+            tab = result.get("tab")
+            if isinstance(tab, dict):
+                result.setdefault("active_tab_id", str(tab.get("tab_id", "") or ""))
+                result.setdefault("tab_id", str(result.get("tab_id", "") or tab.get("tab_id", "") or ""))
+            if isinstance(result.get("tabs"), list):
+                result.setdefault("tab_count", len(result.get("tabs", [])))
+        return result
 
     def activate_tab(self, tab_id: str = "", index: int = -1, title_contains: str = "", url_contains: str = "") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "activate_tab",
             lambda: self._raw.activate_tab(tab_id=tab_id, index=index, title_contains=title_contains, url_contains=url_contains),
         )
+        if isinstance(result, dict):
+            result.setdefault("activated", True)
+            tab = result.get("tab")
+            if isinstance(tab, dict):
+                result.setdefault("active_tab_id", str(tab.get("tab_id", "") or ""))
+                result.setdefault("tab_id", str(result.get("tab_id", "") or tab.get("tab_id", "") or ""))
+            if isinstance(result.get("tabs"), list):
+                result.setdefault("tab_count", len(result.get("tabs", [])))
+        return result
 
     def close_tab(self, tab_id: str = "", index: int = -1) -> Dict:
-        return self._dispatch("close_tab", lambda: self._raw.close_tab(tab_id=tab_id, index=index))
+        result = self._dispatch("close_tab", lambda: self._raw.close_tab(tab_id=tab_id, index=index))
+        if isinstance(result, dict):
+            result.setdefault("closed", True)
+            closed_tab = result.get("closed_tab")
+            if isinstance(closed_tab, dict):
+                result.setdefault("closed_tab_id", str(closed_tab.get("tab_id", "") or ""))
+            if isinstance(result.get("tabs"), list):
+                result.setdefault("tab_count", len(result.get("tabs", [])))
+        return result
 
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         return self._dispatch(
@@ -1470,42 +1580,85 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         )
 
     def wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "wait_for",
             lambda: self._raw.wait_for(selector, by, timeout_seconds, condition),
             fallback=lambda: self._fallback_wait_for(selector, by=by, timeout_seconds=timeout_seconds, condition=condition),
         )
+        if isinstance(result, dict) and result.get("found"):
+            result.setdefault("condition", str(condition or "visible"))
+            result.setdefault("by", str(by or "css"))
+        return result
 
     def wait_for_text(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "wait_for_text",
             lambda: self._raw.wait_for_text(text, timeout_seconds=timeout_seconds, tab_id=tab_id),
             fallback=lambda: self._fallback_wait_for_text(text, timeout_seconds=timeout_seconds, tab_id=tab_id),
         )
+        if isinstance(result, dict) and result.get("found"):
+            result.setdefault("match_type", "text_visible")
+        return result
 
     def wait_for_text_gone(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "wait_for_text_gone",
             lambda: self._raw.wait_for_text_gone(text, timeout_seconds=timeout_seconds, tab_id=tab_id),
             fallback=lambda: self._fallback_wait_for_text_gone(text, timeout_seconds=timeout_seconds, tab_id=tab_id),
         )
+        if isinstance(result, dict) and result.get("gone"):
+            result.setdefault("match_type", "text_gone")
+        return result
+
+    def wait_for_text_change(self, text: str = "", previous_text: str = "", timeout_seconds: int = 20, tab_id: str = "") -> Dict:
+        start = time.time()
+        try:
+            result = self._fallback_wait_for_text_change(
+                text=text,
+                previous_text=previous_text,
+                timeout_seconds=timeout_seconds,
+                tab_id=tab_id,
+            )
+            return self._normalize_result("wait_for_text_change", result, used_fallback=True, duration_ms=int((time.time() - start) * 1000))
+        except Exception as exc:
+            return self._normalize_failure("wait_for_text_change", exc, used_fallback=True, duration_ms=int((time.time() - start) * 1000))
+
+    def wait_for_page_stable(self, timeout_seconds: int = 20, stable_cycles: int = 2, poll_interval_ms: int = 500, tab_id: str = "") -> Dict:
+        start = time.time()
+        try:
+            result = self._fallback_wait_for_page_stable(
+                timeout_seconds=timeout_seconds,
+                stable_cycles=stable_cycles,
+                poll_interval_ms=poll_interval_ms,
+                tab_id=tab_id,
+            )
+            return self._normalize_result("wait_for_page_stable", result, used_fallback=True, duration_ms=int((time.time() - start) * 1000))
+        except Exception as exc:
+            return self._normalize_failure("wait_for_page_stable", exc, used_fallback=True, duration_ms=int((time.time() - start) * 1000))
 
     def wait_for_timeout(self, timeout_ms: int = 0, tab_id: str = "") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "wait_for_timeout",
             lambda: self._raw.wait_for_timeout(timeout_ms=timeout_ms, tab_id=tab_id),
             fallback=lambda: self._fallback_wait_for_timeout(timeout_ms=timeout_ms, tab_id=tab_id),
         )
+        if isinstance(result, dict):
+            result.setdefault("waited", True)
+            result.setdefault("timeout_ms", max(0, int(timeout_ms)))
+        return result
 
     def click(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
         return self._dispatch("click", lambda: self._raw.click(selector, by, timeout_seconds))
 
     def hover(self, selector: str, by: str = "css", timeout_seconds: int = 20) -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "hover",
             lambda: self._raw.hover(selector, by, timeout_seconds),
             fallback=lambda: self._execute_managed_target_action("hover", selector, by),
         )
+        if isinstance(result, dict) and result.get("hovered"):
+            result.setdefault("by", str(by or "css"))
+        return result
 
     def click_target(self, target: str, element: str = "", by: str = "css", timeout_seconds: int = 20, double_click: bool = False) -> Dict:
         resolved_target = target
@@ -1572,11 +1725,19 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                         clear_first=clear_first,
                         submit=submit,
                     )
-        return self._dispatch(
+        result = self._dispatch(
             "type_target_and_verify",
             lambda: self._raw.type_target_and_verify(resolved_target, text, element=element, by=resolved_by, clear_first=clear_first, submit=submit, timeout_seconds=timeout_seconds),
             fallback=managed_fallback,
         )
+        if isinstance(result, dict) and result.get("typed"):
+            result.setdefault("verified", bool(result.get("verified", False)))
+            result.setdefault("submitted", bool(submit))
+            result.setdefault("by", str(resolved_by or by or "css"))
+            result.setdefault("target", str(resolved_target or target or "").strip())
+            result.setdefault("requested_target", str(target or "").strip())
+            result.setdefault("value", str(text or ""))
+        return result
 
     def press_key(self, key: str, count: int = 1, selector: str = "", by: str = "css", timeout_seconds: int = 20) -> Dict:
         return self._dispatch(
@@ -1586,7 +1747,7 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
 
     def select_option(self, selector: str, values: list[str] | None = None, by: str = "css", timeout_seconds: int = 20) -> Dict:
         normalized_values = [str(item) for item in (values or []) if str(item or "")]
-        return self._dispatch(
+        result = self._dispatch(
             "select_option",
             lambda: self._raw.select_option(selector, values=normalized_values, by=by, timeout_seconds=timeout_seconds),
             fallback=lambda: self._execute_managed_target_action(
@@ -1596,20 +1757,31 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 values=normalized_values,
             ),
         )
+        if isinstance(result, dict) and result.get("selected"):
+            result.setdefault("by", str(by or "css"))
+        return result
 
     def navigate_back(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "navigate_back",
             lambda: self._raw.navigate_back(wait_for_ready=wait_for_ready, timeout_seconds=timeout_seconds, tab_id=tab_id),
             fallback=lambda: self._fallback_navigate_history("back", wait_for_ready=wait_for_ready, timeout_seconds=timeout_seconds, tab_id=tab_id),
         )
+        if isinstance(result, dict):
+            result.setdefault("navigated", "back")
+            result.setdefault("history_changed", bool(str(result.get("url", "") or "") != "about:blank"))
+        return result
 
     def navigate_forward(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "navigate_forward",
             lambda: self._raw.navigate_forward(wait_for_ready=wait_for_ready, timeout_seconds=timeout_seconds, tab_id=tab_id),
             fallback=lambda: self._fallback_navigate_history("forward", wait_for_ready=wait_for_ready, timeout_seconds=timeout_seconds, tab_id=tab_id),
         )
+        if isinstance(result, dict):
+            result.setdefault("navigated", "forward")
+            result.setdefault("history_changed", bool(str(result.get("url", "") or "") != "about:blank"))
+        return result
 
     def drag_target(
         self,
@@ -1620,8 +1792,7 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         by: str = "css",
         timeout_seconds: int = 20,
     ) -> Dict:
-        del source_element, dest_element, timeout_seconds
-        return self._dispatch(
+        result = self._dispatch(
             "drag_target",
             lambda: self._raw.drag_target(
                 source_target,
@@ -1639,9 +1810,191 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 dest_by=by,
             ),
         )
+        if isinstance(result, dict) and result.get("dragged"):
+            result.setdefault("by", str(by or "css"))
+        return result
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:
-        return self._dispatch("run_script", lambda: self._raw.run_script(script, tab_id=tab_id))
+        result = self._dispatch("run_script", lambda: self._raw.run_script(script, tab_id=tab_id))
+        if isinstance(result, dict):
+            script_result = result.get("result")
+            if script_result is None:
+                result.setdefault("script_result_state", "null")
+                result.setdefault(
+                    "diagnostic_hint",
+                    "run_script returned null; the page may still be rendering, the queried node may not exist yet, or the script may not have returned a value.",
+                )
+            else:
+                result.setdefault("script_result_state", "value")
+        return result
+
+    def _target_watch_signature(self, details: Dict[str, Any]) -> str:
+        important = {
+            "tag_name": str(details.get("tag_name", "") or ""),
+            "role": str(details.get("role", "") or ""),
+            "text": str(details.get("text", "") or ""),
+            "text_preview": str(details.get("text_preview", "") or ""),
+            "value": str(details.get("value", "") or ""),
+            "aria_label": str(details.get("aria_label", "") or ""),
+            "accessible_name": str(details.get("accessible_name", "") or ""),
+            "placeholder": str(details.get("placeholder", "") or ""),
+            "title_attr": str(details.get("title_attr", "") or ""),
+            "visible": bool(details.get("visible")),
+            "enabled": bool(details.get("enabled", True)),
+            "aria_expanded": str(details.get("aria_expanded", "") or ""),
+            "aria_haspopup": str(details.get("aria_haspopup", "") or ""),
+            "control_type": str(details.get("control_type", "") or ""),
+        }
+        source = json.dumps(important, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha1(source.encode("utf-8", errors="ignore")).hexdigest()
+
+    def watch_target_state(
+        self,
+        target: str,
+        text: str = "",
+        previous_text: str = "",
+        element: str = "",
+        by: str = "css",
+        timeout_seconds: int = 20,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> Dict:
+        start = time.time()
+        normalized_target = str(target or "").strip()
+        normalized_text = str(text or "")
+        normalized_previous = str(previous_text or "")
+        normalized_element = str(element or "")
+        normalized_by = str(by or "css")
+        interval = max(50, int(poll_interval_ms)) / 1000.0
+        required_cycles = max(1, int(stable_cycles))
+        deadline = time.time() + max(1, int(timeout_seconds))
+        try:
+            initial = self.describe_target(
+                normalized_target,
+                element=normalized_element,
+                by=normalized_by,
+                include_box=False,
+            )
+            initial_text = str(initial.get("text", "") or initial.get("text_preview", "") or "")
+            baseline_text = normalized_previous or initial_text
+            last_signature = self._target_watch_signature(initial)
+            stable_count = 1
+            final_details = dict(initial)
+            last_observed_text = initial_text
+            text_changed = False
+            matched_target_text = False
+            while time.time() < deadline:
+                current = self.describe_target(
+                    normalized_target,
+                    element=normalized_element,
+                    by=normalized_by,
+                    include_box=False,
+                )
+                current_text = str(current.get("text", "") or current.get("text_preview", "") or "")
+                current_signature = self._target_watch_signature(current)
+                last_observed_text = current_text
+                changed_from_previous = current_text != baseline_text if baseline_text else bool(current_text.strip())
+                contains_target = bool(normalized_text and normalized_text in current_text)
+                text_changed = changed_from_previous or text_changed
+                matched_target_text = contains_target or matched_target_text
+                if current_signature == last_signature:
+                    stable_count += 1
+                else:
+                    stable_count = 1
+                    last_signature = current_signature
+                final_details = dict(current)
+                if (not normalized_text or contains_target) and changed_from_previous and stable_count >= required_cycles:
+                    break
+                if normalized_text and contains_target and stable_count >= required_cycles:
+                    text_changed = True
+                    matched_target_text = True
+                    break
+                time.sleep(interval)
+            else:
+                raise TimeoutError(
+                    f"Timed out waiting for target state change. target={normalized_target!r} by={normalized_by!r} "
+                    f"previous_text_len={len(baseline_text)} last_text_len={len(last_observed_text)}"
+                )
+
+            result = {
+                **final_details,
+                "watch_completed": True,
+                "watch_reason": "target_changed_and_stable",
+                "target": normalized_target,
+                "element": normalized_element,
+                "by": normalized_by,
+                "initial_text": initial_text,
+                "previous_text": baseline_text,
+                "final_text": last_observed_text,
+                "text_changed": bool(text_changed),
+                "target_text": normalized_text,
+                "text_contains_target": bool(matched_target_text),
+                "stable": stable_count >= required_cycles,
+                "stable_cycles": stable_count,
+                "required_stable_cycles": required_cycles,
+                "poll_interval_ms": max(50, int(poll_interval_ms)),
+                "target_signature": last_signature,
+                "details": final_details,
+                "text_diff": {
+                    "changed": last_observed_text != baseline_text,
+                    "previous_length": len(baseline_text),
+                    "final_length": len(last_observed_text),
+                },
+            }
+            return self._normalize_result("watch_target_state", result, used_fallback=True, duration_ms=int((time.time() - start) * 1000))
+        except Exception as exc:
+            return self._normalize_failure("watch_target_state", exc, used_fallback=True, duration_ms=int((time.time() - start) * 1000))
+
+    def watch_page_state(
+        self,
+        text: str = "",
+        previous_text: str = "",
+        timeout_seconds: int = 20,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> Dict:
+        start = time.time()
+        try:
+            initial_page = self._raw.get_page_text(tab_id=tab_id) if tab_id else self._raw.get_page_text()
+            initial_text = str(initial_page.get("text", "") or "")
+            if not previous_text:
+                previous_text = initial_text
+            change_result = self._fallback_wait_for_text_change(
+                text=text,
+                previous_text=previous_text,
+                timeout_seconds=timeout_seconds,
+                tab_id=tab_id,
+            )
+            stable_result = self._fallback_wait_for_page_stable(
+                timeout_seconds=max(1, int(timeout_seconds)),
+                stable_cycles=stable_cycles,
+                poll_interval_ms=poll_interval_ms,
+                tab_id=tab_id,
+            )
+            final_text = str(change_result.get("text", "") or stable_result.get("text", "") or "")
+            result = {
+                **(stable_result if isinstance(stable_result, dict) else {}),
+                "watch_completed": True,
+                "watch_reason": "text_changed_and_stable" if str(text or "").strip() else "page_stable_after_change",
+                "initial_text": initial_text,
+                "previous_text": str(previous_text or ""),
+                "final_text": final_text,
+                "text_changed": final_text != str(previous_text or ""),
+                "target_text": str(text or ""),
+                "text_contains_target": bool(str(text or "").strip() and str(text or "") in final_text),
+                "change_result": change_result,
+                "stable_result": stable_result,
+                "text_diff": {
+                    "changed": final_text != str(previous_text or ""),
+                    "previous_length": len(str(previous_text or "")),
+                    "final_length": len(final_text),
+                },
+            }
+            return self._normalize_result("watch_page_state", result, used_fallback=True, duration_ms=int((time.time() - start) * 1000))
+        except Exception as exc:
+            return self._normalize_failure("watch_page_state", exc, used_fallback=True, duration_ms=int((time.time() - start) * 1000))
 
     def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:
         return self._dispatch("get_console_messages", lambda: self._raw.get_console_messages(tab_id=tab_id, limit=limit, level=level))

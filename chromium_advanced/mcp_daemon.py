@@ -1580,6 +1580,34 @@ def create_daemon_app(
                         "engine_name": getattr(browser_session, "engine_name", ""),
                     },
                 }
+            direct_dispatch = {
+                "list_candidates": lambda: browser_session.list_candidates(
+                    target=str(args.get("target", "") or ""),
+                    by=str(args.get("by", "css") or "css"),
+                    text_filter=str(args.get("text_filter", "") or ""),
+                    limit=int(args.get("limit", 25) or 25),
+                    include_boxes=bool(args.get("include_boxes", True)),
+                    tab_id=str(args.get("tab_id", "") or ""),
+                ),
+                "get_page_errors": lambda: browser_session.get_page_errors(
+                    tab_id=str(args.get("tab_id", "") or ""),
+                    limit=int(args.get("limit", 100) or 100),
+                ),
+                "clear_debug_buffers": lambda: browser_session.clear_debug_buffers(
+                    tab_id=str(args.get("tab_id", "") or ""),
+                ),
+                "verify_text": lambda: browser_session.verify_text(
+                    str(args.get("text", "") or ""),
+                ),
+                "verify_dialog": lambda: browser_session.verify_dialog(
+                    accessible_name=str(args.get("accessible_name", "") or ""),
+                    text=str(args.get("text", "") or ""),
+                ),
+                "verify_element": lambda: browser_session.verify_element(
+                    role=str(args.get("role", "") or ""),
+                    accessible_name=str(args.get("accessible_name", "") or ""),
+                ),
+            }
             if pipeline.supports(action):
                 result = pipeline.execute(action, args)
                 if isinstance(result, dict):
@@ -1589,6 +1617,19 @@ def create_daemon_app(
                             "action_name": action,
                             "pipeline_version": 1,
                             "engine_name": getattr(browser_session, "engine_name", ""),
+                        },
+                    )
+                return result
+            if action in direct_dispatch:
+                result = direct_dispatch[action]()
+                if isinstance(result, dict):
+                    result.setdefault(
+                        "action_pipeline",
+                        {
+                            "action_name": action,
+                            "pipeline_version": 1,
+                            "engine_name": getattr(browser_session, "engine_name", ""),
+                            "dispatch_mode": "daemon_direct_fallback",
                         },
                     )
                 return result

@@ -499,6 +499,46 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         return {"session_id": session_id, **browser_session.wait_for_text_gone(text, int(timeout_seconds), tab_id=tab_id)}
 
     @server.tool(annotations=browser_read_annotations)
+    def wait_for_text_change(
+        session_id: str,
+        text: str = "",
+        previous_text: str = "",
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        tab_id: str = "",
+    ) -> dict:
+        """Wait until page text changes from a previous snapshot, or until a target text newly appears."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.wait_for_text_change(
+                text=text,
+                previous_text=previous_text,
+                timeout_seconds=int(timeout_seconds),
+                tab_id=tab_id,
+            ),
+        }
+
+    @server.tool(annotations=browser_read_annotations)
+    def wait_for_page_stable(
+        session_id: str,
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> dict:
+        """Wait until page url/title/text/html-length stop changing for a short polling window."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.wait_for_page_stable(
+                timeout_seconds=int(timeout_seconds),
+                stable_cycles=int(stable_cycles),
+                poll_interval_ms=int(poll_interval_ms),
+                tab_id=tab_id,
+            ),
+        }
+
+    @server.tool(annotations=browser_read_annotations)
     def wait_for_timeout(session_id: str, timeout_ms: int = 0, tab_id: str = "") -> dict:
         """Pause the active browser session for a bounded amount of time."""
         browser_session = session_manager.resolve_session(session_id)
@@ -738,6 +778,60 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             lambda: {"session_id": session_id, **session_manager.resolve_session(session_id).run_script(script, tab_id=tab_id)},
             session_id=session_id,
         )
+
+    @server.tool(annotations=browser_read_annotations)
+    def watch_page_state(
+        session_id: str,
+        text: str = "",
+        previous_text: str = "",
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> dict:
+        """Wait for text change and page stabilization, then return the initial/final state summary and diff hints."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.watch_page_state(
+                text=text,
+                previous_text=previous_text,
+                timeout_seconds=int(timeout_seconds),
+                stable_cycles=int(stable_cycles),
+                poll_interval_ms=int(poll_interval_ms),
+                tab_id=tab_id,
+            ),
+        }
+
+    @server.tool(annotations=browser_read_annotations)
+    def watch_target_state(
+        session_id: str,
+        target: str,
+        text: str = "",
+        previous_text: str = "",
+        element: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> dict:
+        """Watch a target-local text/value/state region until it changes and then stabilizes."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.watch_target_state(
+                target=target,
+                text=text,
+                previous_text=previous_text,
+                element=element,
+                by=by,
+                timeout_seconds=int(timeout_seconds),
+                stable_cycles=int(stable_cycles),
+                poll_interval_ms=int(poll_interval_ms),
+                tab_id=tab_id,
+            ),
+        }
 
     @server.tool(annotations=browser_script_annotations)
     def run_script_batch(

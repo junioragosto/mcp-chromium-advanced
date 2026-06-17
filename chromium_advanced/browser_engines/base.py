@@ -94,6 +94,24 @@ class BrowserSession(Protocol):
     def wait_for_text_gone(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         ...
 
+    def wait_for_text_change(
+        self,
+        text: str = "",
+        previous_text: str = "",
+        timeout_seconds: int = 20,
+        tab_id: str = "",
+    ) -> Dict:
+        ...
+
+    def wait_for_page_stable(
+        self,
+        timeout_seconds: int = 20,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> Dict:
+        ...
+
     def wait_for_timeout(self, timeout_ms: int = 0, tab_id: str = "") -> Dict:
         ...
 
@@ -159,6 +177,31 @@ class BrowserSession(Protocol):
         ...
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:
+        ...
+
+    def watch_page_state(
+        self,
+        text: str = "",
+        previous_text: str = "",
+        timeout_seconds: int = 20,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> Dict:
+        ...
+
+    def watch_target_state(
+        self,
+        target: str,
+        text: str = "",
+        previous_text: str = "",
+        element: str = "",
+        by: str = "css",
+        timeout_seconds: int = 20,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> Dict:
         ...
 
     def select_option(

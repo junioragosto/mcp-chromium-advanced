@@ -148,6 +148,36 @@ worker 运行策略现在也是显式可配的：
 - `playwright_cli`
   适合作为低开销、轻量级、兼容性导向的集成引擎，但不再是默认的高能力路径。
 
+当前这轮对齐官方 MCP 的收口重点，已经不只是“多几个动作”，而是把动作结果语义也统一下来：
+
+- tab 生命周期：
+  `open_tab(...)`、`activate_tab(...)`、`close_tab(...)` 现在会稳定回填 `opened`、`activated`、`closed`、`active_tab_id`、`closed_tab_id`、`tab_count`
+- wait 语义：
+  `wait_for(...)`、`wait_for_timeout(...)` 现在会稳定暴露 `condition`、`by`、`waited`、`timeout_ms`
+- 验证型输入：
+  `type_target_and_verify(...)` 现在会统一保留 `target`、`requested_target`、`by`、`value`、`verified`，更方便上层推理和诊断
+
+同时，`browser_diagnose_page(...)` 的 `structured_page` 也已经从“偏文本/评论提取”扩成更通用的页面结构模型，可以概括：
+
+- interactive controls
+- form controls
+- custom element 预览
+- dialog / menu / listbox / tab 密度
+- 当前交互区域提示，例如 `overlay`、`dialog`
+
+对于强动态页面，这一轮还补了两类更通用的等待能力：
+
+- `wait_for_page_stable(...)`
+  适合页面还在持续重渲染、文本和 HTML 长度还在变化的场景
+- `wait_for_text_change(...)`
+  适合等待状态文本、任务文本、区域文本从旧值变成新值，而不是只判断“有没有出现”
+- `watch_page_state(...)`
+  适合一次性拿到初始文本、等待变化、再等待页面稳定，并返回前后状态与 diff 摘要
+- `watch_target_state(...)`
+  适合盯住单个控件、状态位、菜单项或局部目标区域，等待其文本或状态变化后再稳定下来
+
+另外，如果 `run_script(...)` 返回 `result=null`，受管运行时现在会显式补上 `script_result_state="null"` 和诊断提示，不再把这种情况和普通成功混在一起。
+
 关于切换引擎，有几个必须明确的边界：
 
 - 修改 GUI 默认引擎，只影响之后新启动的会话。

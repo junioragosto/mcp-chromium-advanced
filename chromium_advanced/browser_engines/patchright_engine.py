@@ -99,13 +99,28 @@ def _describe_locator(locator) -> Dict:
         el => ({
           tag_name: (el.tagName || '').toLowerCase(),
           text: (el.innerText || el.textContent || '').trim(),
+          text_preview: String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180),
           id: el.id || '',
           name: el.getAttribute('name') || '',
           class: el.getAttribute('class') || '',
           aria_label: el.getAttribute('aria-label') || '',
+          aria_expanded: el.getAttribute('aria-expanded') || '',
+          aria_haspopup: el.getAttribute('aria-haspopup') || '',
           role: el.getAttribute('role') || '',
           value: 'value' in el ? (el.value || '') : '',
           href: el.getAttribute('href') || '',
+          placeholder: el.getAttribute('placeholder') || '',
+          title_attr: el.getAttribute('title') || '',
+          input_type: el.getAttribute('type') || '',
+          accessible_name: String(
+            el.getAttribute('aria-label') ||
+            el.getAttribute('placeholder') ||
+            el.getAttribute('title') ||
+            el.innerText ||
+            el.textContent ||
+            ''
+          ).replace(/\s+/g, ' ').trim(),
+          control_type: String(el.getAttribute('role') || el.getAttribute('type') || el.tagName || '').toLowerCase(),
           outer_html: el.outerHTML || ''
         })
         """
@@ -176,14 +191,32 @@ def _candidate_sort_key(item: Dict) -> tuple:
     has_href = bool(str(item.get("href", "") or "").strip())
     visible = bool(item.get("visible"))
     enabled = bool(item.get("enabled"))
+    accessible_name = str(item.get("accessible_name", "") or "").strip()
+    text_preview = str(item.get("text_preview", "") or "").strip()
+    role = str(item.get("role", "") or "").strip().lower()
+    control_type = str(item.get("control_type", "") or "").strip().lower()
+    aria_expanded = str(item.get("aria_expanded", "") or "").strip().lower()
+    aria_haspopup = str(item.get("aria_haspopup", "") or "").strip().lower()
+    tag_name = str(item.get("tag_name", "") or "").strip().lower()
+    in_overlay = bool(item.get("in_overlay")) or "overlay" in " ".join(str(x or "") for x in (item.get("scope_tags") or [] if isinstance(item.get("scope_tags"), list) else []))
+    in_dialog = bool(item.get("in_dialog"))
+    popup_like = role in {"menuitem", "option", "tab"} or control_type in {"menuitem", "option", "tab"} or aria_haspopup in {"menu", "listbox", "dialog", "grid", "tree"}
+    expanded = aria_expanded == "true"
+    has_text_signal = bool(accessible_name or text_preview)
     text_len = len(str(item.get("text", "") or ""))
     return (
         0 if visible else 1,
         0 if enabled else 1,
+        0 if popup_like else 1,
+        0 if expanded else 1,
+        0 if in_overlay else 1,
+        0 if in_dialog else 1,
         0 if interactive else 1,
+        0 if has_text_signal else 1,
         0 if has_aria else 1,
         0 if has_role else 1,
         0 if has_href else 1,
+        0 if tag_name in {"button", "a", "input", "textarea", "select", "option"} else 1,
         text_len,
     )
 
@@ -742,10 +775,40 @@ class PatchrightBrowserSession(BrowserSession):
                 const role = normalizeText(el.getAttribute('role') || '');
                 const placeholder = normalizeText(el.getAttribute('placeholder') || '');
                 const name = normalizeText(el.getAttribute('name') || '');
+                const titleAttr = normalizeText(el.getAttribute('title') || '');
+                const ariaExpanded = normalizeText(el.getAttribute('aria-expanded') || '');
+                const ariaHaspopup = normalizeText(el.getAttribute('aria-haspopup') || '');
+                const inputType = normalizeText(el.getAttribute('type') || '');
                 const value = 'value' in el ? normalizeText(el.value || '') : '';
                 const href = normalizeText(el.getAttribute('href') || '');
                 const tagName = normalizeText((el.tagName || '').toLowerCase());
-                const candidateText = normalizeText([text, ariaLabel, title, role, placeholder, name, value].join(' '));
+                const accessibleName = normalizeText(ariaLabel || placeholder || titleAttr || text || el.textContent || '');
+                const candidateText = normalizeText([text, ariaLabel, titleAttr, role, placeholder, name, value].join(' '));
+                const ancestorRoles = [];
+                let overlayDepth = 0;
+                let dialogDepth = 0;
+                let current = el.parentElement;
+                while (current) {
+                  const ancestorRole = normalizeText(current.getAttribute('role') || '');
+                  if (ancestorRole) {
+                    ancestorRoles.push(ancestorRole);
+                  }
+                  const className = normalizeText(current.getAttribute('class') || '');
+                  if (ancestorRole === 'dialog' || className.includes('dialog') || className.includes('modal')) {
+                    dialogDepth += 1;
+                  }
+                  if (
+                    ancestorRole === 'menu' ||
+                    ancestorRole === 'listbox' ||
+                    className.includes('overlay') ||
+                    className.includes('dropdown') ||
+                    className.includes('popup') ||
+                    className.includes('menu')
+                  ) {
+                    overlayDepth += 1;
+                  }
+                  current = current.parentElement;
+                }
                 if (!candidateText && !href && !role) {
                   continue;
                 }
@@ -757,15 +820,31 @@ class PatchrightBrowserSession(BrowserSession):
                   enabled: !el.hasAttribute('disabled') && el.getAttribute('aria-disabled') !== 'true',
                   tag_name: tagName,
                   text,
+                  text_preview: text.slice(0, 180),
                   id: normalizeText(el.id || ''),
                   name,
                   class: normalizeText(el.getAttribute('class') || ''),
                   aria_label: ariaLabel,
-                  title,
+                  title: titleAttr,
+                  title_attr: titleAttr,
                   role,
                   placeholder,
                   value,
                   href,
+                  aria_expanded: ariaExpanded,
+                  aria_haspopup: ariaHaspopup,
+                  input_type: inputType,
+                  accessible_name: accessibleName,
+                  control_type: normalizeText(role || inputType || tagName),
+                  overlay_ancestry: ancestorRoles.filter(value => value === 'menu' || value === 'listbox' || value === 'dialog'),
+                  in_overlay: overlayDepth > 0,
+                  in_dialog: dialogDepth > 0,
+                  scope_tags: [
+                    ...(overlayDepth > 0 ? ['overlay'] : []),
+                    ...(dialogDepth > 0 ? ['dialog'] : []),
+                    ...(ariaExpanded === 'true' ? ['expanded'] : []),
+                    ...(ariaHaspopup ? ['popup'] : []),
+                  ],
                   outer_html: el.outerHTML || '',
                   box: {
                     x: rect.x,
@@ -1078,6 +1157,7 @@ class PatchrightBrowserSession(BrowserSession):
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "found": True,
                 "text": str(text or ""),
+                "match_type": "text_visible",
             }
         except Exception as exc:
             return self._action_error_payload("wait_for_text", exc, text_filter=str(text or ""))
@@ -1101,6 +1181,7 @@ class PatchrightBrowserSession(BrowserSession):
                     **self.get_current_url(tab_id=self._get_tab_id(page)),
                     "gone": True,
                     "text": str(text or ""),
+                    "match_type": "text_detached",
                 }
             except Exception as exc:
                 return self._action_error_payload("wait_for_text_gone", exc, text_filter=str(text or ""))
@@ -1139,6 +1220,7 @@ class PatchrightBrowserSession(BrowserSession):
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "hovered": True,
                 "selector": str(selector or "").strip(),
+                "by": str(by or "css"),
                 "post_action_context": self._post_action_context("hover", page=page),
             }
         except Exception as exc:
@@ -1317,6 +1399,7 @@ class PatchrightBrowserSession(BrowserSession):
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "selected": True,
                 "selector": str(selector or "").strip(),
+                "by": str(by or "css"),
                 "values": list(result or normalized_values),
                 "post_action_context": self._post_action_context("select_option", page=page),
             }
@@ -1374,6 +1457,7 @@ class PatchrightBrowserSession(BrowserSession):
                 "dragged": True,
                 "source_target": str(source_target or "").strip(),
                 "dest_target": str(dest_target or "").strip(),
+                "by": str(by or "css"),
                 "post_action_context": self._post_action_context("drag_target", page=page),
             }
         except Exception as exc:

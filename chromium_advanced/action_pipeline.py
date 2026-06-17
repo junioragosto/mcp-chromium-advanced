@@ -12,6 +12,7 @@ class ActionPipeline:
             "get_current_url": self._get_current_url,
             "get_page_html": self._get_page_html,
             "list_tabs": self._list_tabs,
+            "list_candidates": self._list_candidates,
             "open_tab": self._open_tab,
             "activate_tab": self._activate_tab,
             "close_tab": self._close_tab,
@@ -22,9 +23,13 @@ class ActionPipeline:
             "type_target_and_verify": self._type_target_and_verify,
             "press_key": self._press_key,
             "run_script": self._run_script,
+            "watch_page_state": self._watch_page_state,
+            "watch_target_state": self._watch_target_state,
             "wait_for": self._wait_for,
             "wait_for_text": self._wait_for_text,
             "wait_for_text_gone": self._wait_for_text_gone,
+            "wait_for_text_change": self._wait_for_text_change,
+            "wait_for_page_stable": self._wait_for_page_stable,
             "wait_for_timeout": self._wait_for_timeout,
             "inspect_elements": self._inspect_elements,
             "get_active_element": self._get_active_element,
@@ -47,12 +52,17 @@ class ActionPipeline:
             "navigate_forward": self._navigate_forward,
             "drag_target": self._drag_target,
             "get_console_messages": self._get_console_messages,
+            "get_page_errors": self._get_page_errors,
             "get_network_requests": self._get_network_requests,
+            "clear_debug_buffers": self._clear_debug_buffers,
             "screenshot": self._screenshot,
             "get_summary": self._get_summary,
             "get_capabilities": self._get_capabilities,
             "snapshot": self._snapshot,
             "get_action_trace": self._get_action_trace,
+            "verify_text": self._verify_text,
+            "verify_dialog": self._verify_dialog,
+            "verify_element": self._verify_element,
         }
 
     def supports(self, action_name: str) -> bool:
@@ -83,6 +93,16 @@ class ActionPipeline:
 
     def _list_tabs(self, args: Dict[str, Any]):
         return self.browser_session.list_tabs()
+
+    def _list_candidates(self, args: Dict[str, Any]):
+        return self.browser_session.list_candidates(
+            target=str(args.get("target", "") or ""),
+            by=str(args.get("by", "css") or "css"),
+            text_filter=str(args.get("text_filter", "") or ""),
+            limit=int(args.get("limit", 25) or 25),
+            include_boxes=bool(args.get("include_boxes", True)),
+            tab_id=str(args.get("tab_id", "") or ""),
+        )
 
     def _open_tab(self, args: Dict[str, Any]):
         return self.browser_session.open_tab(
@@ -169,6 +189,29 @@ class ActionPipeline:
             tab_id=str(args.get("tab_id", "") or ""),
         )
 
+    def _watch_page_state(self, args: Dict[str, Any]):
+        return self.browser_session.watch_page_state(
+            text=str(args.get("text", "") or ""),
+            previous_text=str(args.get("previous_text", "") or ""),
+            timeout_seconds=int(args.get("timeout_seconds", 20) or 20),
+            stable_cycles=int(args.get("stable_cycles", 2) or 2),
+            poll_interval_ms=int(args.get("poll_interval_ms", 500) or 500),
+            tab_id=str(args.get("tab_id", "") or ""),
+        )
+
+    def _watch_target_state(self, args: Dict[str, Any]):
+        return self.browser_session.watch_target_state(
+            target=str(args.get("target", "") or ""),
+            text=str(args.get("text", "") or ""),
+            previous_text=str(args.get("previous_text", "") or ""),
+            element=str(args.get("element", "") or ""),
+            by=str(args.get("by", "css") or "css"),
+            timeout_seconds=int(args.get("timeout_seconds", 20) or 20),
+            stable_cycles=int(args.get("stable_cycles", 2) or 2),
+            poll_interval_ms=int(args.get("poll_interval_ms", 500) or 500),
+            tab_id=str(args.get("tab_id", "") or ""),
+        )
+
     def _wait_for(self, args: Dict[str, Any]):
         return self.browser_session.wait_for(
             str(args.get("selector", "") or ""),
@@ -188,6 +231,22 @@ class ActionPipeline:
         return self.browser_session.wait_for_text_gone(
             str(args.get("text", "") or ""),
             timeout_seconds=int(args.get("timeout_seconds", 20) or 20),
+            tab_id=str(args.get("tab_id", "") or ""),
+        )
+
+    def _wait_for_text_change(self, args: Dict[str, Any]):
+        return self.browser_session.wait_for_text_change(
+            text=str(args.get("text", "") or ""),
+            previous_text=str(args.get("previous_text", "") or ""),
+            timeout_seconds=int(args.get("timeout_seconds", 20) or 20),
+            tab_id=str(args.get("tab_id", "") or ""),
+        )
+
+    def _wait_for_page_stable(self, args: Dict[str, Any]):
+        return self.browser_session.wait_for_page_stable(
+            timeout_seconds=int(args.get("timeout_seconds", 20) or 20),
+            stable_cycles=int(args.get("stable_cycles", 2) or 2),
+            poll_interval_ms=int(args.get("poll_interval_ms", 500) or 500),
             tab_id=str(args.get("tab_id", "") or ""),
         )
 
@@ -358,11 +417,22 @@ class ActionPipeline:
             level=str(args.get("level", "") or ""),
         )
 
+    def _get_page_errors(self, args: Dict[str, Any]):
+        return self.browser_session.get_page_errors(
+            tab_id=str(args.get("tab_id", "") or ""),
+            limit=int(args.get("limit", 100) or 100),
+        )
+
     def _get_network_requests(self, args: Dict[str, Any]):
         return self.browser_session.get_network_requests(
             tab_id=str(args.get("tab_id", "") or ""),
             limit=int(args.get("limit", 100) or 100),
             failed_only=bool(args.get("failed_only", False)),
+        )
+
+    def _clear_debug_buffers(self, args: Dict[str, Any]):
+        return self.browser_session.clear_debug_buffers(
+            tab_id=str(args.get("tab_id", "") or ""),
         )
 
     def _screenshot(self, args: Dict[str, Any]):
@@ -376,6 +446,23 @@ class ActionPipeline:
 
     def _get_capabilities(self, args: Dict[str, Any]):
         return self.browser_session.get_capabilities()
+
+    def _verify_text(self, args: Dict[str, Any]):
+        return self.browser_session.verify_text(
+            str(args.get("text", "") or ""),
+        )
+
+    def _verify_dialog(self, args: Dict[str, Any]):
+        return self.browser_session.verify_dialog(
+            accessible_name=str(args.get("accessible_name", "") or ""),
+            text=str(args.get("text", "") or ""),
+        )
+
+    def _verify_element(self, args: Dict[str, Any]):
+        return self.browser_session.verify_element(
+            role=str(args.get("role", "") or ""),
+            accessible_name=str(args.get("accessible_name", "") or ""),
+        )
 
     def _snapshot(self, args: Dict[str, Any]):
         depth_value = args.get("depth", 0)

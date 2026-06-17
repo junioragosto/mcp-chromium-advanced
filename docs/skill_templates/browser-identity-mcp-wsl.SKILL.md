@@ -68,6 +68,10 @@ Recently strengthened high-level actions from WSL are the same:
 
 - `wait_for_text(...)`
 - `wait_for_text_gone(...)`
+- `wait_for_text_change(...)`
+- `wait_for_page_stable(...)`
+- `watch_page_state(...)`
+- `watch_target_state(...)`
 - `wait_for_timeout(...)`
 - `hover(...)`
 - `select_option(...)`
@@ -76,6 +80,25 @@ Recently strengthened high-level actions from WSL are the same:
 - `drag_target(...)`
 
 Prefer these before arbitrary `run_script(...)` when the interaction is a normal browser task.
+
+For dynamic pages from WSL as well:
+
+- use `wait_for_page_stable(...)` before re-reading page state when the target is still re-rendering
+- use `wait_for_text_change(...)` when polling for task/status changes
+- use `watch_page_state(...)` when one call should cover baseline capture, state change, and stabilization
+- use `watch_target_state(...)` when the task is about one dynamic control or target-local region rather than the entire page
+- if `run_script(...)` returns `result=null`, treat that as a diagnostic state; the runtime now adds `script_result_state="null"` and a hint
+
+Recent managed-result normalization is the same from WSL:
+
+- `open_tab(...)`, `activate_tab(...)`, `close_tab(...)`
+  now expose stable fields such as `opened`, `activated`, `closed`, `active_tab_id`, `closed_tab_id`, and `tab_count`
+- `wait_for(...)`, `wait_for_timeout(...)`
+  now expose normalized `condition`, `by`, `waited`, and `timeout_ms`
+- `type_target_and_verify(...)`
+  now keeps `target`, `requested_target`, `by`, `value`, and `verified` aligned
+
+`browser_diagnose_page(...)` should be treated as a generic structured-page surface from WSL as well. Its `structured_page` block now summarizes interactive controls, form controls, custom elements, region density such as dialog/menu/listbox/tab, and a current interaction-region hint.
 
 Runtime isolation option from WSL:
 

@@ -166,7 +166,9 @@ class ManagedSessionDiagnosticsMixin:
             recovery_hint = "reactivate_expected_tab"
         elif alive and last_failure:
             error_code = str(last_failure.get("error_code", "") or "")
-            if error_code == "timeout":
+            if error_code == "page_not_ready":
+                recovery_hint = "wait_for_page_stable"
+            elif error_code == "timeout":
                 recovery_hint = "retry_or_diagnose_page"
             elif error_code in {"target_not_found", "target_not_interactable"}:
                 recovery_hint = "refresh_candidates_or_snapshot"
@@ -351,18 +353,148 @@ class ManagedSessionDiagnosticsMixin:
             payload["network"] = self._raw.get_network_requests(tab_id=normalized_tab_id, limit=40, failed_only=True)
         except Exception:
             payload["network"] = {"count": 0, "requests": []}
+        try:
+            payload["snapshot"] = self._fallback_snapshot(tab_id=normalized_tab_id)
+        except Exception:
+            payload["snapshot"] = {"unsupported": True, "message": "snapshot unavailable during diagnose_page"}
         payload["anti_bot"] = self._build_anti_bot_detection(current if isinstance(current, dict) else {})
         return payload
 
     def _extract_structured_page_data(self, text: str, snapshot_text: str = "") -> Dict[str, Any]:
         lines = [line.strip() for line in str(text or "").splitlines()]
         cleaned = [line for line in lines if line]
-        headings = [line for line in cleaned if len(line) <= 80 and not line.startswith("@")][:20]
+        headings = [line for line in cleaned if len(line) <= 80 and not line.startswith("@")] [:20]
+        interactive_controls: list[Dict[str, Any]] = []
+        form_controls: list[Dict[str, Any]] = []
+        custom_elements: list[str] = []
+        links: list[Dict[str, Any]] = []
+        buttons: list[Dict[str, Any]] = []
+        options: list[Dict[str, Any]] = []
+        tabs: list[Dict[str, Any]] = []
+        status_candidates: list[str] = []
+        region_counts = {"dialog": 0, "menu": 0, "listbox": 0, "tab": 0}
+        scope_counts = {"overlay": 0, "dialog": 0, "expanded": 0}
+        control_type_counts = {
+            "button": 0,
+            "link": 0,
+            "input_like": 0,
+            "option_like": 0,
+            "tab": 0,
+        }
+        list_signal_count = 0
+        table_signal_count = 0
+        for raw_line in str(snapshot_text or "").splitlines():
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            ref_match = re.search(r"\[ref=((?:f\d+)?e\d+)\]", line)
+            ref = ref_match.group(1) if ref_match else ""
+            summary = re.sub(r"\s*\[ref=((?:f\d+)?e\d+)\]\s*$", "", line)
+            summary = summary.lstrip("-").strip()
+            normalized_summary = re.sub(r"\s+", " ", summary)
+            quoted = re.findall(r'"([^"]+)"', normalized_summary)
+            label = quoted[-1].strip() if quoted else ""
+            tag_match = re.match(r"([a-z][a-z0-9:_-]*)", normalized_summary.lower())
+            tag_name = tag_match.group(1) if tag_match else ""
+            if not label and tag_name:
+                remainder = re.sub(rf"^{re.escape(tag_name)}(?:\s+{re.escape(tag_name)})?\s*", "", normalized_summary, flags=re.IGNORECASE)
+                label = remainder.strip()
+            lowered_summary = normalized_summary.lower()
+            scope_hint = "overlay" if any(token in lowered_summary for token in ("menu", "dropdown", "popup", "dialog", "sheet", "listbox")) else ""
+            if "dialog" in lowered_summary:
+                region_counts["dialog"] += 1
+            if "menuitem" in lowered_summary or re.search(r"\bmenu\b", lowered_summary):
+                region_counts["menu"] += 1
+            if "listbox" in lowered_summary:
+                region_counts["listbox"] += 1
+            if re.search(r"\btab\b", lowered_summary):
+                region_counts["tab"] += 1
+            if any(token in lowered_summary for token in ("list ", "listitem", "feed", "thread", "row", "collection")):
+                list_signal_count += 1
+            if any(token in lowered_summary for token in ("table", "grid", "columnheader", "rowheader", "cell")):
+                table_signal_count += 1
+            if scope_hint:
+                scope_counts["overlay"] += 1
+            if any(token in lowered_summary for token in ("dialog", "modal", "sheet")):
+                scope_counts["dialog"] += 1
+            if "expanded" in lowered_summary:
+                scope_counts["expanded"] += 1
+            summary_status_source = label or normalized_summary
+            if summary_status_source and len(summary_status_source) <= 160:
+                lowered_status = summary_status_source.lower()
+                if any(
+                    token in lowered_status
+                    for token in (
+                        "queued",
+                        "running",
+                        "in progress",
+                        "complete",
+                        "completed",
+                        "done",
+                        "success",
+                        "failed",
+                        "failure",
+                        "error",
+                        "pending",
+                        "processing",
+                    )
+                ):
+                    candidate_text = summary_status_source.strip()
+                    if candidate_text and candidate_text not in status_candidates:
+                        status_candidates.append(candidate_text)
+            if tag_name and "-" in tag_name and tag_name not in custom_elements:
+                custom_elements.append(tag_name)
+            if tag_name in {"button", "link", "textbox", "input", "select", "option", "menuitem", "checkbox", "radio", "tab"}:
+                control = {
+                    "ref": ref,
+                    "tag_name": tag_name,
+                    "label": label,
+                    "summary": summary,
+                    "is_custom_element": bool(tag_name and "-" in tag_name),
+                    "scope_hint": scope_hint,
+                }
+                interactive_controls.append(control)
+                if tag_name in {"textbox", "input", "select", "checkbox", "radio"}:
+                    form_controls.append(dict(control))
+                    control_type_counts["input_like"] += 1
+                if tag_name == "button":
+                    buttons.append(dict(control))
+                    control_type_counts["button"] += 1
+                if tag_name == "link":
+                    links.append(dict(control))
+                    control_type_counts["link"] += 1
+                if tag_name in {"option", "menuitem"}:
+                    options.append(dict(control))
+                    control_type_counts["option_like"] += 1
+                if tag_name == "tab":
+                    tabs.append(dict(control))
+                    control_type_counts["tab"] += 1
+                if label and len(label) <= 120:
+                    lowered_label = label.lower()
+                    if any(
+                        token in lowered_label
+                        for token in (
+                            "queued",
+                            "running",
+                            "in progress",
+                            "complete",
+                            "completed",
+                            "done",
+                            "success",
+                            "failed",
+                            "failure",
+                            "error",
+                            "pending",
+                            "processing",
+                        )
+                    ):
+                        if label not in status_candidates:
+                            status_candidates.append(label)
         comments: list[Dict[str, Any]] = []
         index = 0
         while index < len(cleaned):
             line = cleaned[index]
-            match = re.match(r"^(@\S+)\s+•\s+(.+)$", line)
+            match = re.match(r"^(@\S+)\s+.{2,4}\s+(.+)$", line)
             if not match:
                 index += 1
                 continue
@@ -374,7 +506,7 @@ class ManagedSessionDiagnosticsMixin:
             lookahead = index + 1
             while lookahead < len(cleaned):
                 current = cleaned[lookahead]
-                if re.match(r"^@\S+\s+•\s+.+$", current):
+                if re.match(r"^@\S+\s+.{2,4}\s+.+$", current):
                     break
                 if current.lower().startswith("reply"):
                     lookahead += 1
@@ -401,11 +533,111 @@ class ManagedSessionDiagnosticsMixin:
             )
             index = lookahead
         snapshot_refs = re.findall(r"\[ref=((?:f\d+)?e\d+)\]", str(snapshot_text or ""))
+        primary_region = ""
+        primary_region_count = 0
+        for region_name, region_count in {**region_counts, **scope_counts}.items():
+            if region_count > primary_region_count:
+                primary_region = region_name
+                primary_region_count = region_count
         return {
             "headings": headings,
+            "interactive_controls": interactive_controls[:20],
+            "interactive_control_count": len(interactive_controls),
+            "form_controls": form_controls[:20],
+            "form_control_count": len(form_controls),
+            "button_controls": buttons[:20],
+            "button_count": len(buttons),
+            "link_controls": links[:20],
+            "link_count": len(links),
+            "option_controls": options[:20],
+            "option_count": len(options),
+            "tab_controls": tabs[:20],
+            "custom_element_preview": custom_elements[:20],
+            "custom_element_count": len(custom_elements),
             "comment_threads": comments[:12],
             "comment_thread_count": len(comments),
             "snapshot_ref_count": len(snapshot_refs),
+            "dialog_count": int(region_counts["dialog"]),
+            "menu_count": int(region_counts["menu"]),
+            "listbox_count": int(region_counts["listbox"]),
+            "tab_count": int(region_counts["tab"]),
+            "overlay_control_count": int(scope_counts["overlay"]),
+            "list_signal_count": int(list_signal_count),
+            "table_signal_count": int(table_signal_count),
+            "status_candidates": status_candidates[:12],
+            "control_type_counts": dict(control_type_counts),
+            "interaction_region": primary_region,
+            "interaction_region_summary": {
+                "primary_region": primary_region,
+                "dialog_count": int(region_counts["dialog"]),
+                "menu_count": int(region_counts["menu"]),
+                "listbox_count": int(region_counts["listbox"]),
+                "tab_count": int(region_counts["tab"]),
+                "overlay_control_count": int(scope_counts["overlay"]),
+                "form_control_count": len(form_controls),
+                "button_count": len(buttons),
+                "link_count": len(links),
+                "option_count": len(options),
+                "list_signal_count": int(list_signal_count),
+                "table_signal_count": int(table_signal_count),
+            },
+        }
+
+    def _extract_structured_region_data(self, details: Dict[str, Any], subtree_candidates: list[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+        base = details if isinstance(details, dict) else {}
+        candidates = [item for item in (subtree_candidates or []) if isinstance(item, dict)]
+        links = [item for item in candidates if str(item.get("tag_name", "") or "").lower() == "link"]
+        buttons = [item for item in candidates if str(item.get("tag_name", "") or "").lower() == "button"]
+        options = [
+            item
+            for item in candidates
+            if str(item.get("tag_name", "") or "").lower() in {"option", "menuitem"}
+        ]
+        input_like = [
+            item
+            for item in candidates
+            if str(item.get("tag_name", "") or "").lower() in {"textbox", "input", "select", "checkbox", "radio"}
+        ]
+        texts = []
+        for item in candidates:
+            label = str(item.get("text", "") or item.get("aria_label", "") or item.get("accessible_name", "") or "").strip()
+            if label:
+                texts.append(label)
+        status_candidates = []
+        for value in texts:
+            lowered = value.lower()
+            if any(
+                token in lowered
+                for token in (
+                    "queued",
+                    "running",
+                    "in progress",
+                    "complete",
+                    "completed",
+                    "done",
+                    "success",
+                    "failed",
+                    "failure",
+                    "error",
+                    "pending",
+                    "processing",
+                )
+            ):
+                if value not in status_candidates:
+                    status_candidates.append(value)
+        return {
+            "target": str(base.get("target", "") or ""),
+            "tag_name": str(base.get("tag_name", "") or ""),
+            "role": str(base.get("role", "") or ""),
+            "visible": bool(base.get("visible", False)),
+            "enabled": bool(base.get("enabled", True)),
+            "candidate_count": len(candidates),
+            "button_count": len(buttons),
+            "link_count": len(links),
+            "option_count": len(options),
+            "input_like_count": len(input_like),
+            "status_candidates": status_candidates[:12],
+            "labels_preview": texts[:20],
         }
 
     def _fallback_interaction_context(self, action_name: str = "inspect", tab_id: str = "") -> Dict[str, Any]:
@@ -522,6 +754,10 @@ class ManagedSessionDiagnosticsMixin:
             "open_tab",
             "activate_tab",
             "close_tab",
+            "wait_for_text_change",
+            "wait_for_page_stable",
+            "watch_page_state",
+            "watch_target_state",
             "click",
             "click_target",
             "type_text",
@@ -531,6 +767,36 @@ class ManagedSessionDiagnosticsMixin:
             "mouse_move_xy",
             "mouse_click_xy",
             "mouse_drag_xy",
+        }
+
+    def _minimal_post_action_context(self, action_name: str, tab_id: str = "") -> Dict[str, Any]:
+        normalized_tab_id = str(tab_id or "").strip()
+        try:
+            page = (
+                self._raw.get_current_url(tab_id=normalized_tab_id)
+                if normalized_tab_id
+                else self._raw.get_current_url()
+            )
+        except Exception:
+            page = {}
+        if not isinstance(page, dict):
+            page = {}
+        try:
+            tabs = list(self._raw.list_tabs().get("tabs", []))
+        except Exception:
+            tabs = []
+        active_tab_id = str(page.get("tab_id", "") or normalized_tab_id or "")
+        return {
+            "action_name": str(action_name or "inspect"),
+            "page": page,
+            "tabs": tabs,
+            "active_tab_id": active_tab_id,
+            "active_element": {},
+            "modal_state": {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []},
+            "anti_bot": self._build_anti_bot_detection(page),
+            "snapshot": {"unsupported": True, "message": "post-action context minimized for fast path."},
+            "recent_actions": self._recent_actions_payload(limit=4),
+            "session_health": self._build_session_health_snapshot(page_payload=page),
         }
 
     def _attach_post_action_context(self, action_name: str, payload: Dict[str, Any], *, failure: bool = False) -> Dict[str, Any]:
@@ -546,7 +812,11 @@ class ManagedSessionDiagnosticsMixin:
         if not self._should_attach_post_action_context(action_name):
             return payload
         context_action = f"{action_name}_failed" if payload.get("ok") is False or failure else action_name
-        payload["post_action_context"] = self._build_post_action_context(context_action, tab_id=str(payload.get("tab_id", "") or ""))
+        payload["post_action_context"] = (
+            self._build_post_action_context(context_action, tab_id=str(payload.get("tab_id", "") or ""))
+            if payload.get("ok") is False or failure
+            else self._minimal_post_action_context(context_action, tab_id=str(payload.get("tab_id", "") or ""))
+        )
         return payload
 
     def _infer_error_code(self, error_type: str, error_text: str) -> str:
@@ -560,7 +830,11 @@ class ManagedSessionDiagnosticsMixin:
             return "target_not_found"
         if "not visible" in lowered or "not interactable" in lowered or "intercept" in lowered:
             return "target_not_interactable"
+        if "page stability" in lowered or "page text change" in lowered or "still be rendering" in lowered:
+            return "page_not_ready"
         if "timeout" in lowered:
+            if "page stability" in lowered or "text change" in lowered:
+                return "page_not_ready"
             return "timeout"
         if "session" in lowered and "alive" in lowered:
             return "session_not_alive"
@@ -664,6 +938,13 @@ class ManagedSessionDiagnosticsMixin:
         elif isinstance(snapshot_payload, dict):
             snapshot_text = str(snapshot_payload.get("snapshot", "") or "")
         payload["structured_page"] = self._extract_structured_page_data(page_text, snapshot_text=snapshot_text)
+        if action_name == "diagnose_target":
+            details = payload.get("details", {})
+            subtree_candidates = payload.get("subtree_candidates", [])
+            payload["structured_region"] = self._extract_structured_region_data(
+                details if isinstance(details, dict) else {},
+                subtree_candidates if isinstance(subtree_candidates, list) else [],
+            )
         payload["session_health"] = self._build_session_health_snapshot(page_payload=payload)
         return payload
 
@@ -772,6 +1053,20 @@ class ManagedSessionDiagnosticsMixin:
             score += 90
         if scope.get("prefer_expanded") and str(entry.get("aria_expanded", "") or "").lower() == "true":
             score += 70
+        if scope.get("prefer_overlay") and any(token in role for token in ("menuitem", "option")):
+            score += 60
+        if scope.get("prefer_expanded") and any(
+            token in " ".join(
+                [
+                    str(entry.get("class", "") or ""),
+                    str(entry.get("aria_label", "") or ""),
+                    str(entry.get("accessible_name", "") or ""),
+                    str(entry.get("text", "") or ""),
+                ]
+            ).lower()
+            for token in ("newest", "latest", "sort", "filter", "apply")
+        ):
+            score += 40
         hints = " ".join(
             [
                 str(entry.get("text", "") or ""),
@@ -784,7 +1079,7 @@ class ManagedSessionDiagnosticsMixin:
         ).lower()
         for token in scope.get("recent_target_hints", []):
             if token and token in hints:
-                score += 18
+                score += 26
         return score
 
     def _is_unsupported_result(self, result: Dict[str, Any]) -> bool:

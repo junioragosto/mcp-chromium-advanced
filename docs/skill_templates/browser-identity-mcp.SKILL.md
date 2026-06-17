@@ -208,6 +208,10 @@ Recently strengthened high-level actions:
 
 - `wait_for_text(...)`
 - `wait_for_text_gone(...)`
+- `wait_for_text_change(...)`
+- `wait_for_page_stable(...)`
+- `watch_page_state(...)`
+- `watch_target_state(...)`
 - `wait_for_timeout(...)`
 - `hover(...)`
 - `select_option(...)`
@@ -216,6 +220,25 @@ Recently strengthened high-level actions:
 - `drag_target(...)`
 
 Prefer these higher-level actions before falling back to arbitrary `run_script(...)` when the task is a mainstream browser interaction problem.
+
+For dynamic pages:
+
+- use `wait_for_page_stable(...)` before re-reading text or candidates when the page is visibly re-rendering
+- use `wait_for_text_change(...)` when monitoring state changes or long-running task output
+- use `watch_page_state(...)` when the task is naturally "watch this until it changes and settles"
+- use `watch_target_state(...)` when the task is about one dynamic control, popup choice, local status block, or target-local region
+- if `run_script(...)` returns `result=null`, treat that as a first-class diagnostic state rather than a clean success; the runtime now adds `script_result_state="null"` and a hint
+
+Recent managed-result normalization also means callers should expect stronger cross-engine consistency for:
+
+- `open_tab(...)`, `activate_tab(...)`, `close_tab(...)`
+  expect stable fields such as `opened`, `activated`, `closed`, `active_tab_id`, `closed_tab_id`, and `tab_count`
+- `wait_for(...)`, `wait_for_timeout(...)`
+  expect normalized `condition`, `by`, `waited`, and `timeout_ms`
+- `type_target_and_verify(...)`
+  expect aligned `target`, `requested_target`, `by`, `value`, and `verified`
+
+`browser_diagnose_page(...)` should also be treated as a more general structured-page primitive now, not only a text dump. Its `structured_page` block can summarize interactive controls, form controls, custom elements, region density such as dialog/menu/listbox/tab, and a current interaction-region hint.
 
 Runtime isolation option:
 

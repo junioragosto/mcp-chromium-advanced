@@ -170,6 +170,14 @@ Examples of newer high-level action coverage exposed through the managed layer:
   `wait_for_text(...)`
 - text disappearance wait:
   `wait_for_text_gone(...)`
+- text change wait:
+  `wait_for_text_change(...)`
+- page stability wait:
+  `wait_for_page_stable(...)`
+- task-style state watch:
+  `watch_page_state(...)`
+- target-local state watch:
+  `watch_target_state(...)`
 - bounded pause:
   `wait_for_timeout(...)`
 - hover:
@@ -182,6 +190,31 @@ Examples of newer high-level action coverage exposed through the managed layer:
   `drag_target(...)`
 
 These additions are meant to reduce exploratory retries and make complex-page flows feel closer to official Playwright-style browser control.
+
+For dynamic pages, prefer the newer wait primitives before dropping to ad-hoc polling:
+
+- use `wait_for_page_stable(...)` when the page is still re-rendering or when text/html keep changing
+- use `wait_for_text_change(...)` when a task is waiting for a region or run-status text to change rather than merely appear once
+- use `watch_page_state(...)` when you want one call that captures the initial text, waits for change, waits for stabilization, and returns a final diff-oriented summary
+- use `watch_target_state(...)` when the task is about one dynamic control, status chip, popup item, or target-local region rather than the whole page
+- if `run_script(...)` returns `result=null`, the managed runtime now marks `script_result_state="null"` and adds a diagnostic hint instead of leaving that state ambiguous
+
+Recent managed-result normalization on top of that action surface now also guarantees more consistent payload semantics across engines for:
+
+- tab lifecycle:
+  `open_tab(...)`, `activate_tab(...)`, `close_tab(...)` now normalize fields such as `opened`, `activated`, `closed`, `active_tab_id`, `closed_tab_id`, and `tab_count`
+- wait semantics:
+  `wait_for(...)` and `wait_for_timeout(...)` now consistently expose `condition`, `by`, `waited`, and `timeout_ms`
+- verified typing:
+  `type_target_and_verify(...)` now keeps `target`, `requested_target`, `by`, `value`, and `verified` aligned for easier upstream reasoning
+
+The managed diagnostics path was also widened beyond comment/text extraction. `browser_diagnose_page(...)` now produces a more generic `structured_page` model that can summarize:
+
+- interactive controls
+- form controls
+- custom element previews
+- dialog/menu/listbox/tab density
+- current interaction region hints such as `overlay` or `dialog`
 
 ## Managed automation scripts
 
