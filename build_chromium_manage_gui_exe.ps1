@@ -55,6 +55,7 @@ function Copy-BuildOutput {
 
 $pythonExe = "python"
 $guiScriptPath = Join-Path $projectRoot "run_gui.py"
+$guiLauncherScriptPath = Join-Path $projectRoot "run_gui_launcher.py"
 $daemonScriptPath = Join-Path $projectRoot "chromium_advanced\mcp_daemon.py"
 $workerScriptPath = Join-Path $projectRoot "chromium_advanced\mcp_server.py"
 $iconPath = Join-Path $projectRoot "resources\chromium_profile_manager.ico"
@@ -102,6 +103,18 @@ Invoke-ExternalChecked -StepName "Build ChromiumProfileManager" -Command {
       --add-data "README.md;." `
       --add-data "README_zh.md;." `
       $guiScriptPath
+}
+
+Invoke-ExternalChecked -StepName "Build ChromiumProfileManager launcher" -Command {
+    & $pythonExe -m PyInstaller `
+      -y `
+      --workpath $stageBuildRoot `
+      --distpath $stageDistRoot `
+      --noconsole `
+      --onefile `
+      --name "ChromiumProfileManager" `
+      --icon $iconPath `
+      $guiLauncherScriptPath
 }
 
 Invoke-ExternalChecked -StepName "Build ChromiumMcpDaemon" -Command {

@@ -177,7 +177,7 @@ MCP_STATUS_QUERY_TIMEOUT_SECONDS = 0.6
 MCP_STATUS_CACHE_TTL_SECONDS = 1.5
 MCP_RECENT_HEALTH_GRACE_SECONDS = 30.0
 MCP_WATCHDOG_RESTART_FAILURES = 6
-CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS = 3.0
+CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS = 1.0
 OCCUPANCY_EVENTS_POLL_MS = 6000
 CONTROL_KEEPALIVE_REFRESH_INTERVAL_SECONDS = 10.0
 SCHEDULE_TRIGGER_WINDOW_SECONDS = 90
@@ -291,6 +291,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_consecutive_failures = 0
         self.control_profiles_cache: Dict = {}
         self.control_profiles_last_query_at = 0.0
+        self.control_events_seen_keys: set[str] = set()
         self.control_keepalive_cache: Dict = {}
         self.control_keepalive_last_query_at = 0.0
         self.window_state_dirty = False
@@ -1167,13 +1168,16 @@ class ChromiumManagerWindow(QMainWindow):
         plan = build_external_process_refresh_plan(
             previous_map=previous_map,
             current_map=process_map,
-            occupancy_cache=self.profile_occupancy_cache,
+            occupancy_cache={},
             tr=self.tr,
         )
         if not bool(plan["signature_changed"]):
             return
         self.external_profile_process_signature = str(plan["signature"])
         self.external_profile_process_map = process_map
+        # External process transitions can immediately change the effective row state.
+        # Invalidate the cached control snapshot so the next UI refresh pulls fresh data.
+        self.invalidate_control_profiles_cache()
         for message in plan["transition_messages"]:
             self.append_log(message)
         if bool(plan["needs_ui_refresh"]):
@@ -1221,6 +1225,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.load_mcp_settings_to_ui()
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
+        self.refresh_fallback_profile_occupancy_cache()
         if not initial_bootstrap:
             self.refresh_scheduler_status()
             self.query_control_profiles(force=False)
@@ -1255,6 +1260,9 @@ class ChromiumManagerWindow(QMainWindow):
             lambda message: self.append_log(message, prefix="GUI"),
         )
 
+    def refresh_fallback_profile_occupancy_cache(self) -> None:
+        self.profile_occupancy_cache = self.load_profile_occupancy_cache()
+
     def format_scene_type_label(self, scene_type: str) -> str:
         return format_scene_type_label(scene_type, self.tr)
 
@@ -1269,26 +1277,48 @@ class ChromiumManagerWindow(QMainWindow):
     def format_occupancy_event_text(self, payload: Dict) -> str:
         return format_occupancy_event_text(payload)
 
+    def _build_control_event_key(self, payload: Dict) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        return "|".join(
+            [
+                str(payload.get("time", "") or "").strip(),
+                str(payload.get("profile_name", "") or "").strip(),
+                str(payload.get("scene_type", "") or "").strip(),
+                str(payload.get("state", "") or "").strip(),
+                str(payload.get("owner_label", "") or "").strip(),
+                str(payload.get("session_id", "") or "").strip(),
+            ]
+        )
+
     def on_occupancy_events_timer(self):
-        if not hasattr(self, "tabs") or self.tabs.currentWidget() is not self.occupancy_tab:
-            return
         payload = self.query_control_events(limit=20)
         events = payload.get("events", []) if isinstance(payload.get("events", []), list) else []
         if not events:
             return
 
         emitted = False
+        new_event_seen = False
         for payload in events[-20:]:
             if not isinstance(payload, dict):
                 continue
+            event_key = self._build_control_event_key(payload)
+            if event_key and event_key in self.control_events_seen_keys:
+                continue
+            if event_key:
+                self.control_events_seen_keys.add(event_key)
+                if len(self.control_events_seen_keys) > 200:
+                    self.control_events_seen_keys = set(list(self.control_events_seen_keys)[-100:])
             self.append_log(self.format_occupancy_event_text(payload), prefix="OCC")
             emitted = True
-        if emitted:
-            # Occupancy events are followed by a UI refresh, but the control
-            # profile cache is usually still fresh enough to avoid an immediate
-            # second heavyweight profiles query.
-            self.query_control_profiles(force=False)
+            new_event_seen = True
+        if new_event_seen:
+            self.invalidate_control_profiles_cache()
+            self.query_control_profiles(force=True)
             self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
+            return
+        if emitted and hasattr(self, "tabs") and self.tabs.currentWidget() is self.occupancy_tab:
+            self.request_ui_refresh(occupancy_tab=True)
 
     def refresh_occupancy_tab(self):
         if not hasattr(self, "tabs") or self.tabs.currentWidget() is not self.occupancy_tab:
@@ -2627,18 +2657,6 @@ class ChromiumManagerWindow(QMainWindow):
             if isinstance(payload, dict):
                 self.control_profiles_cache = payload
                 self.control_profiles_last_query_at = now_ts
-                profiles = payload.get("profiles", [])
-                mapped = {}
-                if isinstance(profiles, list):
-                    for item in profiles:
-                        if not isinstance(item, dict):
-                            continue
-                        profile_name = str(item.get("profile_name", "") or "").strip()
-                        if profile_name:
-                            mapped[profile_name] = dict(
-                                item.get("occupancy", {}) if isinstance(item.get("occupancy", {}), dict) else {}
-                            )
-                self.profile_occupancy_cache = mapped
             return payload if isinstance(payload, dict) else {}
         except Exception:
             return self.control_profiles_cache if isinstance(self.control_profiles_cache, dict) else {}
@@ -2800,6 +2818,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_launch_instance_id = ""
         self.mcp_owned_process = False
         self.mcp_status_cache = {}
+        self.invalidate_control_profiles_cache()
         self.request_ui_refresh(mcp_status=True)
 
     def check_mcp_health_after_start(self, startup_token: int):
@@ -2814,6 +2833,9 @@ class ChromiumManagerWindow(QMainWindow):
             if status:
                 if not self.mcp_launch_instance_id:
                     self.mcp_launch_instance_id = str(status.get("daemon_instance_id", "") or "").strip()
+                # A daemon prelaunched during GUI bootstrap should still be governed
+                # by this GUI instance for stop/exit behavior.
+                self.mcp_owned_process = True
                 self.mcp_startup_in_progress = False
                 self.mcp_startup_deadline = None
                 self.request_ui_refresh(mcp_status=True)
@@ -2923,6 +2945,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_owned_process = bool(plan.get("owned_process", False))
         if bool(plan.get("clear_status_cache", True)):
             self.mcp_status_cache = {}
+        self.invalidate_control_profiles_cache()
         if bool(plan.get("request_status_refresh", True)):
             self.request_ui_refresh(mcp_status=True)
 
@@ -3096,6 +3119,9 @@ class ChromiumManagerWindow(QMainWindow):
     def request_exit(self):
         self.force_exit_requested = True
         self.close()
+        app = QApplication.instance()
+        if app is not None:
+            QTimer.singleShot(0, app.quit)
 
     def setup_single_instance_server(self):
         try:
@@ -3126,7 +3152,9 @@ class ChromiumManagerWindow(QMainWindow):
             payload = bytes(socket_client.readAll()).decode("utf-8", errors="replace").strip().lower()
         except Exception:
             payload = ""
-        if payload.startswith("show"):
+        if payload.startswith("exit"):
+            self.request_exit()
+        elif payload.startswith("show"):
             self.show_from_tray()
             if self.isMinimized():
                 self.showNormal()
@@ -3159,7 +3187,7 @@ class ChromiumManagerWindow(QMainWindow):
             self.hide_to_tray()
             return
 
-        if bool(self.query_control_keepalive_runtime().get("running", False)):
+        if not self.force_exit_requested and bool(self.query_control_keepalive_runtime().get("running", False)):
             self.force_exit_requested = False
             QMessageBox.information(self, self.tr("info_title"), self.tr("info_keepalive_running_exit"))
             event.ignore()
@@ -3275,9 +3303,15 @@ def main():
     multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(description="Chromium profile manager")
     parser.add_argument("--start-minimized", action="store_true", help="Start minimized to tray when available.")
+    parser.add_argument("--exit-existing-instance", action="store_true", help="Request an existing GUI instance to exit.")
     parser.add_argument("--run-mcp-daemon", action="store_true", help="Run the MCP daemon instead of the GUI.")
     parser.add_argument("--run-mcp-worker", action="store_true", help="Run the MCP worker instead of the GUI.")
     args, remaining = parser.parse_known_args()
+
+    if args.exit_existing_instance:
+        from chromium_advanced.gui.gui_runtime import request_existing_instance_exit
+
+        raise SystemExit(0 if request_existing_instance_exit() else 1)
 
     if args.run_mcp_daemon:
         from chromium_advanced.mcp_daemon import main as daemon_main
@@ -3300,6 +3334,7 @@ def main():
         raise SystemExit(0)
 
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(True)
     app._single_instance_guard = single_instance_guard
     app.aboutToQuit.connect(lambda: release_single_instance_guard(getattr(app, "_single_instance_guard", None)))
     app_icon = get_app_icon()

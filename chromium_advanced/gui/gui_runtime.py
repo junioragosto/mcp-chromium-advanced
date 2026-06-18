@@ -41,12 +41,20 @@ def show_single_instance_message() -> None:
 
 
 def notify_existing_instance(timeout_ms: int = 1200) -> bool:
+    return send_existing_instance_command("show\n", timeout_ms=timeout_ms)
+
+
+def request_existing_instance_exit(timeout_ms: int = 1200) -> bool:
+    return send_existing_instance_command("exit\n", timeout_ms=timeout_ms)
+
+
+def send_existing_instance_command(command: str, timeout_ms: int = 1200) -> bool:
     try:
         socket_client = QLocalSocket()
         socket_client.connectToServer(SINGLE_INSTANCE_SERVER_NAME)
         if not socket_client.waitForConnected(timeout_ms):
             return False
-        socket_client.write(b"show\n")
+        socket_client.write(str(command or "").encode("utf-8", errors="replace"))
         socket_client.flush()
         socket_client.waitForBytesWritten(timeout_ms)
         socket_client.disconnectFromServer()
@@ -285,6 +293,37 @@ def get_startup_command() -> str:
     return subprocess.list2cmdline([python_executable, os.path.abspath(__file__), "--start-minimized"])
 
 
+def _extract_startup_command_executable(command: str) -> str:
+    text = str(command or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = subprocess.list2cmdline([])  # no-op to keep subprocess imported consistently
+        del parts
+    except Exception:
+        pass
+    try:
+        import shlex
+
+        if SYSTEM_TYPE == "Windows":
+            # Windows Run command values are typically quoted command lines.
+            tokens = shlex.split(text, posix=False)
+        else:
+            tokens = shlex.split(text)
+    except Exception:
+        tokens = []
+    if not tokens:
+        return ""
+    return os.path.abspath(str(tokens[0]).strip().strip('"'))
+
+
+def _normalize_startup_command(command: str) -> str:
+    executable = _extract_startup_command_executable(command)
+    if not executable:
+        return ""
+    return subprocess.list2cmdline([executable, "--start-minimized"])
+
+
 def is_system_auto_start_enabled() -> bool:
     if SYSTEM_TYPE != "Windows":
         return False
@@ -294,7 +333,12 @@ def is_system_auto_start_enabled() -> bool:
 
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WINDOWS_RUN_REG_PATH, 0, winreg.KEY_READ) as key:
             value, _ = winreg.QueryValueEx(key, APP_NAME)
-            return bool(str(value).strip())
+            current_command = _normalize_startup_command(get_startup_command())
+            existing_command = _normalize_startup_command(str(value or ""))
+            existing_executable = _extract_startup_command_executable(str(value or ""))
+            if not existing_command or not existing_executable or not os.path.exists(existing_executable):
+                return False
+            return existing_command == current_command
     except FileNotFoundError:
         return False
     except Exception:

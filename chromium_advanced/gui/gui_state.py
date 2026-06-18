@@ -59,7 +59,8 @@ def build_profile_runtime_state_text(
     control_state = str(control_profile.get("occupancy_state", "") or "").strip().lower()
     control_owner_label = str(control_profile.get("occupancy_owner_label", "") or "").strip()
     control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
-    occupancy = control_occupancy or occupancy_cache.get(profile_name, {})
+    occupancy = control_occupancy if control_occupancy else {}
+    fallback_occupancy = occupancy_cache.get(profile_name, {}) if isinstance(occupancy_cache.get(profile_name, {}), dict) else {}
     if occupancy:
         scene_type = str(occupancy.get("scene_type", "") or "").strip()
         owner_label = str(occupancy.get("owner_label", "") or "").strip()
@@ -72,6 +73,13 @@ def build_profile_runtime_state_text(
         state = control_state or "active"
         suffix = f" | {control_owner_label}" if control_owner_label else ""
         return f"{scene_type}:{state}{suffix}"
+    if fallback_occupancy:
+        scene_type = str(fallback_occupancy.get("scene_type", "") or "").strip()
+        owner_label = str(fallback_occupancy.get("owner_label", "") or "").strip()
+        state = str(fallback_occupancy.get("state", "") or "").strip() or "active"
+        if scene_type and state not in {"released", "start_failed"}:
+            suffix = f" | {owner_label}" if owner_label else ""
+            return f"{scene_type}:{state}{suffix}"
     if is_profile_keepalive_running(profile_name):
         return tr("runtime_state_keepalive", "Keepalive running")
     control_external_process_count = int(control_profile.get("external_process_count", 0) or 0)
@@ -135,7 +143,8 @@ def build_profile_status_display(
     control_state = str(control_profile.get("occupancy_state", "") or "").strip().lower()
     control_owner_label = str(control_profile.get("occupancy_owner_label", "") or "").strip()
     control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
-    occupancy = control_occupancy or occupancy_cache.get(profile_name, {})
+    occupancy = control_occupancy if control_occupancy else {}
+    fallback_occupancy = occupancy_cache.get(profile_name, {}) if isinstance(occupancy_cache.get(profile_name, {}), dict) else {}
     if occupancy:
         scene_type = str(occupancy.get("scene_type", "") or "").strip() or "in_use"
         state = str(occupancy.get("state", "") or "").strip() or "active"
@@ -156,6 +165,19 @@ def build_profile_status_display(
         if state not in {"active", "running"}:
             label = f"{label}/{state}"
         tooltip = control_owner_label or f"{scene_type} ({state})"
+        return {"label": label, "tooltip": tooltip}
+    if fallback_occupancy:
+        scene_type = str(fallback_occupancy.get("scene_type", "") or "").strip() or "in_use"
+        state = str(fallback_occupancy.get("state", "") or "").strip() or "active"
+        owner_label = str(fallback_occupancy.get("owner_label", "") or "").strip()
+        label = format_scene_type_label(scene_type, tr)
+        if state not in {"active", "running"}:
+            label = f"{label}/{state}"
+        tooltip = owner_label or f"{scene_type} ({state})"
+        if fallback_occupancy.get("engine_name"):
+            tooltip = f"{tooltip}\nengine={fallback_occupancy.get('engine_name')}"
+        if fallback_occupancy.get("session_id"):
+            tooltip = f"{tooltip}\nsession={fallback_occupancy.get('session_id')}"
         return {"label": label, "tooltip": tooltip}
     if is_profile_keepalive_running(profile_name):
         return {"label": "KEEPALIVE", "tooltip": "keepalive running"}
@@ -198,7 +220,11 @@ def build_selected_profile_status_text(
     )
     control_profile = control_profile if isinstance(control_profile, dict) else {}
     control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
-    occupancy = control_occupancy or occupancy_cache.get(profile_name, {})
+    occupancy = control_occupancy if control_occupancy else {}
+    if not occupancy:
+        cached = occupancy_cache.get(profile_name, {})
+        if isinstance(cached, dict):
+            occupancy = cached
     occupancy_text = "-"
     if occupancy:
         owner_pid = int(occupancy.get("owner_pid", 0) or 0)

@@ -391,7 +391,7 @@ def build_default_config() -> Dict:
             "idle_timeout_seconds": 60,
             "worker_policy": "sticky",
             "headless": False,
-            "start_minimized": True,
+            "start_minimized": False,
             "api_token": "",
         },
         "control": {
@@ -1499,7 +1499,7 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     normalized["app"]["concurrency_mode"] = concurrency_mode
     normalized["mcp"]["enabled"] = bool(normalized["mcp"].get("enabled", False))
     normalized["mcp"]["headless"] = bool(normalized["mcp"].get("headless", False))
-    normalized["mcp"]["start_minimized"] = bool(normalized["mcp"].get("start_minimized", True))
+    normalized["mcp"]["start_minimized"] = bool(normalized["mcp"].get("start_minimized", False))
     normalized["mcp"]["api_token"] = str(normalized["mcp"].get("api_token", "")).strip()
     normalized["mcp"]["transport"] = str(normalized["mcp"].get("transport", "streamable-http")).strip() or "streamable-http"
     normalized["mcp"]["host"] = str(normalized["mcp"].get("host", "127.0.0.1")).strip() or "127.0.0.1"
@@ -2411,6 +2411,62 @@ def _extract_switch_value(cmdline: Sequence[str], prefix: str) -> str:
     return ""
 
 
+def _extract_switch_values(cmdline: Sequence[str], prefix: str) -> List[str]:
+    lowered_prefix = str(prefix or "").strip().lower()
+    if not lowered_prefix:
+        return []
+    values: List[str] = []
+    for item in cmdline or []:
+        text = str(item or "").strip()
+        lower = text.lower()
+        if lower.startswith(lowered_prefix):
+            values.append(text[len(lowered_prefix):])
+    return values
+
+
+def _classify_chromium_process_role(cmdline: Sequence[str]) -> str:
+    joined = " ".join(str(item or "") for item in (cmdline or [])).lower()
+    if "--type=" not in joined:
+        return "browser"
+    if "--type=renderer" in joined:
+        return "renderer"
+    if "--type=gpu-process" in joined:
+        return "gpu"
+    if "--type=utility" in joined:
+        if "--utility-sub-type=network.mojom.networkservice" in joined:
+            return "utility_network"
+        if "--utility-sub-type=storage.mojom.storage_service" in joined:
+            return "utility_storage"
+        if "--utility-sub-type=audio.mojom.audioservice" in joined:
+            return "utility_audio"
+        if "ondevicemodelservice" in joined:
+            return "utility_model"
+        return "utility"
+    if "--type=crashpad-handler" in joined:
+        return "crashpad"
+    return "child"
+
+
+def _is_noise_only_chromium_process(role: str, cmdline: Sequence[str]) -> bool:
+    normalized_role = str(role or "").strip().lower()
+    if normalized_role in {
+        "gpu",
+        "utility",
+        "utility_audio",
+        "utility_model",
+        "utility_network",
+        "utility_storage",
+        "renderer",
+        "crashpad",
+        "child",
+    }:
+        return True
+    joined = " ".join(str(item or "") for item in (cmdline or [])).lower()
+    if "--headless=old" in joined or "--headless=new" in joined:
+        return False
+    return False
+
+
 def _profile_root_map(config: Dict) -> Dict[str, str]:
     normalized = normalize_config(config)
     mapping: Dict[str, str] = {}
@@ -2465,16 +2521,19 @@ def find_running_chromium_processes(config: Dict) -> List[Dict]:
             if not matched_path:
                 continue
 
+            profile_name = profile_root_map.get(
+                normalize_fs_path(_extract_switch_value(cmdline, "--user-data-dir="))
+            ) or ""
+            role = _classify_chromium_process_role(cmdline)
             matches.append(
                 {
                     "pid": proc.info.get("pid"),
                     "name": proc.info.get("name", ""),
                     "path": matched_path,
                     "cmdline": cmdline,
-                    "profile_name": profile_root_map.get(
-                        normalize_fs_path(_extract_switch_value(cmdline, "--user-data-dir="))
-                    )
-                    or "",
+                    "profile_name": profile_name,
+                    "process_role": role,
+                    "noise_only": _is_noise_only_chromium_process(role, cmdline),
                 }
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -2536,6 +2595,10 @@ $items | ConvertTo-Json -Compress
                             "pid": item.get("Id"),
                             "name": item.get("ProcessName", ""),
                             "path": executable_path,
+                            "cmdline": [],
+                            "profile_name": "",
+                            "process_role": "browser",
+                            "noise_only": False,
                         }
                     )
     except Exception:
@@ -2642,12 +2705,15 @@ def get_chromium_process_map_by_profile(config: Dict) -> Dict[str, List[Dict]]:
                 elif spec["profile_arg"] not in joined_lower and spec["profile_name_lower"] not in joined_lower:
                     continue
 
+                role = _classify_chromium_process_role(cmdline)
                 entries[spec["profile_name"]].append(
                     {
                         "pid": proc.info.get("pid"),
                         "name": proc.info.get("name", ""),
                         "path": proc.info.get("exe", "") or (cmdline[0] if cmdline else ""),
                         "cmdline": cmdline,
+                        "process_role": role,
+                        "noise_only": _is_noise_only_chromium_process(role, cmdline),
                     }
                 )
                 break
@@ -2655,7 +2721,9 @@ def get_chromium_process_map_by_profile(config: Dict) -> Dict[str, List[Dict]]:
             continue
 
     for profile_name in list(entries.keys()):
-        entries[profile_name] = sorted(entries[profile_name], key=lambda item: int(item.get("pid") or 0))
+        items = sorted(entries[profile_name], key=lambda item: int(item.get("pid") or 0))
+        primary_items = [item for item in items if not bool(item.get("noise_only", False))]
+        entries[profile_name] = primary_items or items
     return entries
 
 

@@ -1036,6 +1036,15 @@ class PlaywrightCliBrowserSession(BrowserSession):
         args.append("--json")
         payload = self._run_cli(args)
         parsed = payload.get("parsed", {})
+        snapshot_text = ""
+        if isinstance(parsed, dict):
+            snapshot_text = str(parsed.get("snapshot", "") or "")
+        elif parsed is not None:
+            snapshot_text = str(parsed or "")
+        if not snapshot_text.strip():
+            time.sleep(0.25)
+            payload = self._run_cli(args)
+            parsed = payload.get("parsed", {})
         return {**self.get_current_url(tab_id=effective_tab_id), **(parsed if isinstance(parsed, dict) else {"snapshot": parsed})}
 
     def list_candidates(
@@ -1166,7 +1175,25 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 "action_path": action_path,
             }
         except Exception as exc:
-            return self._action_error_payload("type_text", exc, selector=selector, by=by, text_filter=text)
+            try:
+                time.sleep(0.2)
+                if effective_tab_id:
+                    self._ensure_tab_selected(tab_id=effective_tab_id)
+                payload = self._run_cli(args)
+                parsed = payload.get("parsed", {})
+                result = parsed if isinstance(parsed, dict) else {"result": parsed}
+                actual_value = self._read_target_value(target)
+                return {
+                    **self._current_page_payload(tab_id=effective_tab_id, action_name="type_text"),
+                    **result,
+                    "typed": True,
+                    "submitted": bool(submit),
+                    "actual_value": actual_value,
+                    "value_matches": actual_value == str(text),
+                    "action_path": "cli_retry",
+                }
+            except Exception:
+                return self._action_error_payload("type_text", exc, selector=selector, by=by, text_filter=text)
 
     def type_target(
         self,
@@ -1216,7 +1243,25 @@ class PlaywrightCliBrowserSession(BrowserSession):
                 "action_path": action_path,
             }
         except Exception as exc:
-            return self._action_error_payload("type_target", exc, target=target, by=by, text_filter=text)
+            try:
+                time.sleep(0.2)
+                if effective_tab_id:
+                    self._ensure_tab_selected(tab_id=effective_tab_id)
+                payload = self._run_cli(args)
+                parsed = payload.get("parsed", {})
+                result = parsed if isinstance(parsed, dict) else {"result": parsed}
+                actual_value = self._read_target_value(resolved_target)
+                return {
+                    **self._current_page_payload(tab_id=effective_tab_id, action_name="type_target"),
+                    **result,
+                    "typed": True,
+                    "submitted": bool(submit),
+                    "actual_value": actual_value,
+                    "value_matches": actual_value == str(text),
+                    "action_path": "cli_retry",
+                }
+            except Exception:
+                return self._action_error_payload("type_target", exc, target=target, by=by, text_filter=text)
 
     def type_target_and_verify(
         self,

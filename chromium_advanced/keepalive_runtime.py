@@ -1120,6 +1120,12 @@ def run_profile_keepalive(
                 "details": {},
                 "disabled_sites": [],
             }
+        try:
+            lock_path = _lib().get_profile_runtime_lock_path(config, profile_name)
+            if lock_path:
+                _lib().clear_stale_lockfile(lock_path, stale_seconds=1)
+        except Exception:
+            pass
         if not profile_lock.try_acquire():
             return {
                 "profile_name": profile_name,
@@ -1326,16 +1332,48 @@ def run_keepalive_job(
 
                 profile_name = item["profile_name"]
                 _lib().log_message(logger, f"keepalive start: {profile_name}")
+                profile_running_processes = _lib().get_chromium_processes_for_profile(config, profile_name)
+                profile_lock_path = _lib().get_profile_runtime_lock_path(config, profile_name)
+                profile_lock_active = bool(profile_lock_path and os.path.exists(profile_lock_path))
                 preflight = session_manager.can_start_session(
                     profile_name,
                     engine_name=str(config.get("app", {}).get("browser_engine", "") or ""),
                 )
-                if not bool(preflight.get("allowed")):
+                starting_profiles = preflight.get("status", {}).get("starting_profiles", [])
+                starting_profile_names = {
+                    str(item.get("profile_name", "") or "").strip()
+                    for item in starting_profiles
+                    if isinstance(item, dict)
+                }
+                block_reason = ""
+                if profile_running_processes:
+                    block_reason = f"{profile_name} chromium already running"
+                elif profile_lock_active:
+                    block_reason = f"{profile_name} runtime lock is already held"
+                elif profile_name in starting_profile_names:
+                    block_reason = f"profile is starting: {profile_name}"
+                elif int(preflight.get("active_profile_session_count", 0) or 0) > 0:
+                    block_reason = str(preflight.get("reason", "") or "profile is already in use by another MCP session")
+                elif int(preflight.get("external_profile_process_count", 0) or 0) > 0:
+                    block_reason = str(preflight.get("reason", "") or "profile chromium is already running")
+                elif not bool(preflight.get("allowed")) and "reusable session" in str(preflight.get("reason", "") or "").lower():
+                    block_reason = str(preflight.get("reason", "") or "profile already has a reusable session")
+                elif not bool(preflight.get("allowed")) and (
+                    bool(preflight.get("profile_lock_active"))
+                    or int(preflight.get("active_profile_session_count", 0) or 0) > 0
+                    or int(preflight.get("external_profile_process_count", 0) or 0) > 0
+                ):
+                    block_reason = str(preflight.get("reason", "") or "profile is unavailable")
+                if block_reason:
                     result = {
                         "profile_name": profile_name,
                         "status": "skipped",
-                        "message": str(preflight.get("reason", "") or "profile is unavailable"),
-                        "details": {"preflight": preflight},
+                        "message": block_reason,
+                        "details": {
+                            "preflight": preflight,
+                            "profile_lock_active": profile_lock_active,
+                            "external_profile_process_count": len(profile_running_processes),
+                        },
                         "disabled_sites": [],
                     }
                     _lib().log_message(logger, f"{profile_name}: skipped before keepalive start: {result['message']}")

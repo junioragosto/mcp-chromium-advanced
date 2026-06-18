@@ -484,6 +484,7 @@ class SessionManager:
             if not isinstance(entry, dict):
                 continue
             scene_type = str(entry.get("scene_type", "") or "").strip().lower()
+            state = str(entry.get("state", "") or "").strip().lower()
             owner_pid = int(entry.get("owner_pid", 0) or 0)
             session_id = str(entry.get("session_id", "") or "").strip()
             if session_id and session_id in live_session_ids:
@@ -509,6 +510,14 @@ class SessionManager:
             lock_missing = not bool(profile_lock_path and os.path.exists(profile_lock_path))
             gui_owned_without_runtime = scene_type in {"manual", "keepalive"} and not has_external_processes and lock_missing
             if scene_type == "mcp":
+                if state == "starting" and lock_missing and not has_external_processes:
+                    results.append(self.reclaim_profile(profile_name, reason="stale_mcp_starting_occupancy"))
+                    continue
+                if lock_missing and not has_external_processes and (
+                    not session_id or session_id not in live_session_ids
+                ):
+                    results.append(self.reclaim_profile(profile_name, reason="orphan_mcp_occupancy"))
+                    continue
                 if not (owner_pid_dead or lock_pid_dead):
                     continue
                 results.append(self.reclaim_profile(profile_name, reason="stale_mcp_occupancy"))
@@ -609,11 +618,14 @@ class SessionManager:
             if self._external_busy_cache and (now_ts - self._external_busy_cache_at) < self.EXTERNAL_BUSY_CACHE_TTL_SECONDS:
                 return dict(self._external_busy_cache)
         scan_started = time.perf_counter()
-        running_processes = find_running_chromium_processes(config)
+        scanned_processes = find_running_chromium_processes(config)
+        running_processes = [item for item in scanned_processes if not bool(item.get("noise_only", False))]
+        auxiliary_running_processes = [item for item in scanned_processes if bool(item.get("noise_only", False))]
         keepalive_lock_active = os.path.exists(get_lock_path())
         mirror_lock_active = os.path.exists(get_mirror_lock_path())
         details = {
             "running_processes": running_processes,
+            "auxiliary_running_processes": auxiliary_running_processes,
             "keepalive_lock_active": keepalive_lock_active,
             "mirror_lock_active": mirror_lock_active,
             "external_scan_ms": int((time.perf_counter() - scan_started) * 1000),
@@ -644,6 +656,108 @@ class SessionManager:
             "external_running_process_count": len(items),
             "external_running_processes": sample,
             "external_running_processes_truncated": len(items) > len(sample),
+        }
+
+    @classmethod
+    def _build_runtime_state_payload(
+        cls,
+        *,
+        profile_name: str,
+        sessions: List[SessionRecord],
+        occupancy: Dict,
+        profile_lock_active: bool,
+        profile_processes: List[Dict],
+        include_external_processes: bool,
+    ) -> Dict[str, object]:
+        active_summary = sessions[0].to_summary(refresh=False) if sessions else {}
+        runtime_state = cls._resolve_profile_runtime_state(
+            sessions=sessions,
+            occupancy=occupancy,
+            profile_lock_active=profile_lock_active,
+            profile_processes=profile_processes,
+        )
+        return {
+            "profile_name": profile_name,
+            "active_session": bool(sessions),
+            "active_session_count": len(sessions),
+            "live_session_count": sum(1 for session in sessions if session.runtime_mode == "live_root"),
+            "isolated_session_count": 0,
+            "session_id": active_summary.get("session_id", ""),
+            "current_url": active_summary.get("current_url", ""),
+            "title": active_summary.get("title", ""),
+            "created_at": active_summary.get("created_at", 0),
+            "last_used_at": active_summary.get("last_used_at", 0),
+            "busy_owner_profile_name": "",
+            "busy_state": str(runtime_state.get("busy_state", "idle") or "idle"),
+            "occupancy": dict(runtime_state.get("occupancy", {}) if isinstance(runtime_state.get("occupancy", {}), dict) else {}),
+            "occupancy_state": str(runtime_state.get("occupancy_state", "") or ""),
+            "occupancy_scene_type": str(runtime_state.get("occupancy_scene_type", "") or ""),
+            "occupancy_owner_label": str(runtime_state.get("occupancy_owner_label", "") or ""),
+            "profile_lock_active": bool(runtime_state.get("profile_lock_active", False)),
+            "external_process_count": int(runtime_state.get("external_process_count", 0) or 0),
+            "external_processes": list(profile_processes) if include_external_processes else [],
+        }
+
+    @staticmethod
+    def _resolve_profile_runtime_state(
+        *,
+        sessions: List[SessionRecord],
+        occupancy: Dict,
+        profile_lock_active: bool,
+        profile_processes: List[Dict],
+    ) -> Dict[str, object]:
+        normalized_occupancy = occupancy if isinstance(occupancy, dict) else {}
+        occupancy_scene_type = str(normalized_occupancy.get("scene_type", "") or "").strip()
+        occupancy_state = str(normalized_occupancy.get("state", "") or "").strip()
+        occupancy_owner_label = str(normalized_occupancy.get("owner_label", "") or "").strip()
+        if sessions:
+            return {
+                "busy_state": "active_sessions",
+                "occupancy": normalized_occupancy,
+                "occupancy_state": occupancy_state,
+                "occupancy_scene_type": occupancy_scene_type,
+                "occupancy_owner_label": occupancy_owner_label,
+                "profile_lock_active": bool(profile_lock_active),
+                "external_process_count": len(profile_processes),
+            }
+        if normalized_occupancy:
+            return {
+                "busy_state": occupancy_scene_type or occupancy_state or "occupied",
+                "occupancy": normalized_occupancy,
+                "occupancy_state": occupancy_state,
+                "occupancy_scene_type": occupancy_scene_type,
+                "occupancy_owner_label": occupancy_owner_label,
+                "profile_lock_active": bool(profile_lock_active),
+                "external_process_count": len(profile_processes),
+            }
+        if profile_lock_active:
+            return {
+                "busy_state": "profile_lock_active",
+                "occupancy": {},
+                "occupancy_state": "",
+                "occupancy_scene_type": "",
+                "occupancy_owner_label": "",
+                "profile_lock_active": True,
+                "external_process_count": len(profile_processes),
+            }
+        if profile_processes:
+            return {
+                "busy_state": "external_chromium_running",
+                "occupancy": {},
+                "occupancy_state": "",
+                "occupancy_scene_type": "",
+                "occupancy_owner_label": "",
+                "profile_lock_active": False,
+                "external_process_count": len(profile_processes),
+            }
+        return {
+            "busy_state": "idle",
+            "occupancy": {},
+            "occupancy_state": "",
+            "occupancy_scene_type": "",
+            "occupancy_owner_label": "",
+            "profile_lock_active": False,
+            "external_process_count": 0,
         }
 
     def _get_profile_names(self) -> List[str]:
@@ -702,9 +816,6 @@ class SessionManager:
             if not profile_name:
                 continue
             sessions = profile_sessions.get(profile_name, [])
-            active_summary = sessions[0].to_summary(refresh=False) if sessions else {}
-            live_session_count = sum(1 for session in sessions if session.runtime_mode == "live_root")
-            isolated_session_count = 0
             mirror_validation = {}
             if include_mirror_validation:
                 mirror_validation = manager.validate_profile_snapshot(profile_name)
@@ -712,19 +823,16 @@ class SessionManager:
             profile_lock_path = get_profile_runtime_lock_path(config, profile_name)
             profile_lock_active = bool(profile_lock_path and os.path.exists(profile_lock_path))
             profile_processes = running_by_profile.get(profile_name, [])
-            if sessions:
-                busy_state = "active_sessions"
-            elif occupancy:
-                busy_state = str(occupancy.get("scene_type", "") or occupancy.get("state", "") or "occupied")
-            elif profile_lock_active:
-                busy_state = "profile_lock_active"
-            elif profile_processes:
-                busy_state = "external_chromium_running"
-            else:
-                busy_state = "idle"
-            results.append(
+            payload = self._build_runtime_state_payload(
+                profile_name=profile_name,
+                sessions=sessions,
+                occupancy=occupancy,
+                profile_lock_active=profile_lock_active,
+                profile_processes=profile_processes,
+                include_external_processes=include_external_processes,
+            )
+            payload.update(
                 {
-                    "profile_name": profile_name,
                     "account": item.get("account", ""),
                     "notes": item.get("notes", ""),
                     "keepalive_enabled": bool(item.get("keepalive_enabled", False)),
@@ -734,29 +842,13 @@ class SessionManager:
                     "last_mirror_at": item.get("last_mirror_at", ""),
                     "last_mirror_status": item.get("last_mirror_status", ""),
                     "last_mirror_message": item.get("last_mirror_message", ""),
-                    "active_session": bool(sessions),
-                    "active_session_count": len(sessions),
-                    "live_session_count": live_session_count,
-                    "isolated_session_count": isolated_session_count,
-                    "session_id": active_summary.get("session_id", ""),
-                    "current_url": active_summary.get("current_url", ""),
-                    "title": active_summary.get("title", ""),
-                    "created_at": active_summary.get("created_at", 0),
-                    "last_used_at": active_summary.get("last_used_at", 0),
-                    "busy_owner_profile_name": "",
-                    "busy_state": busy_state,
-                    "occupancy": occupancy,
-                    "occupancy_state": str(occupancy.get("state", "") or ""),
-                    "occupancy_scene_type": str(occupancy.get("scene_type", "") or ""),
-                    "occupancy_owner_label": str(occupancy.get("owner_label", "") or ""),
-                    "profile_lock_active": profile_lock_active,
-                    "external_process_count": len(profile_processes),
                     "mirror_available": bool(mirror_validation.get("available")),
                     "mirror_generated_at": mirror_validation.get("generated_at", ""),
                     "mirror_root_available": bool(mirror_validation.get("root_available")),
                     "mirror_profile_available": bool(mirror_validation.get("profile_available")),
                 }
             )
+            results.append(payload)
         return results
 
     def get_profile_status(self, profile_name: str) -> Dict:
@@ -1017,7 +1109,6 @@ class SessionManager:
         if profile_name not in self._get_profile_names():
             raise ValueError(f"profile not found: {profile_name}")
 
-        status = self.get_server_status()
         external_busy = self._get_external_busy_details(config)
         running_by_profile = self._group_running_processes_by_profile(external_busy.get("running_processes", []))
         profile_lock_path = get_profile_runtime_lock_path(config, profile_name)
@@ -1033,22 +1124,32 @@ class SessionManager:
         allowed = False
         reason = ""
 
+        status = self.get_server_status()
         starting_profiles = status.get("starting_profiles", [])
         starting_profile_names = {
             str(item.get("profile_name", "") or "").strip()
             for item in starting_profiles
             if isinstance(item, dict)
         }
+        profile_occupancy = self.get_profile_occupancy(profile_name)
+        runtime_state = self._resolve_profile_runtime_state(
+            sessions=profile_sessions,
+            occupancy=profile_occupancy,
+            profile_lock_active=profile_lock_active,
+            profile_processes=profile_processes,
+        )
         if profile_name in starting_profile_names:
             reason = f"profile is starting: {profile_name}"
         elif reusable_session:
             reason = "profile already has a reusable session"
         elif profile_sessions:
             reason = "profile is already in use by another MCP session"
-        elif profile_lock_active:
+        elif str(runtime_state.get("busy_state", "") or "") == "profile_lock_active":
             reason = "profile runtime lock is already held"
-        elif profile_processes:
+        elif str(runtime_state.get("busy_state", "") or "") == "external_chromium_running":
             reason = "profile chromium is already running"
+        elif str(runtime_state.get("busy_state", "") or "") not in {"", "idle"}:
+            reason = f"profile is busy: {runtime_state.get('busy_state', 'unknown')}"
         else:
             allowed = True
             reason = "profile is available"
