@@ -1168,13 +1168,16 @@ class ChromiumManagerWindow(QMainWindow):
         plan = build_external_process_refresh_plan(
             previous_map=previous_map,
             current_map=process_map,
-            occupancy_cache={},
+            occupancy_cache=self.profile_occupancy_cache,
             tr=self.tr,
         )
-        if not bool(plan["signature_changed"]):
+        stale_profiles = [str(item).strip() for item in plan.get("stale_profiles", []) if str(item).strip()]
+        if not bool(plan["signature_changed"]) and not stale_profiles:
             return
         self.external_profile_process_signature = str(plan["signature"])
         self.external_profile_process_map = process_map
+        for profile_name in stale_profiles:
+            self.profile_occupancy_cache.pop(profile_name, None)
         # External process transitions can immediately change the effective row state.
         # Invalidate the cached control snapshot so the next UI refresh pulls fresh data.
         self.invalidate_control_profiles_cache()
@@ -1262,6 +1265,41 @@ class ChromiumManagerWindow(QMainWindow):
 
     def refresh_fallback_profile_occupancy_cache(self) -> None:
         self.profile_occupancy_cache = self.load_profile_occupancy_cache()
+
+    def prune_fallback_profile_occupancy_cache(self) -> None:
+        if not isinstance(self.profile_occupancy_cache, dict) or not self.profile_occupancy_cache:
+            return
+        control_profiles = (
+            self.control_profiles_cache.get("profiles", [])
+            if isinstance(self.control_profiles_cache, dict)
+            else []
+        )
+        valid_profile_names = {
+            str(item.get("profile_name", "") or "").strip()
+            for item in control_profiles
+            if isinstance(item, dict) and str(item.get("profile_name", "") or "").strip()
+        }
+        updated_cache: Dict[str, Dict] = {}
+        changed = False
+        for profile_name, occupancy in list(self.profile_occupancy_cache.items()):
+            if not isinstance(occupancy, dict):
+                changed = True
+                continue
+            normalized_name = str(profile_name or "").strip()
+            state = str(occupancy.get("state", "") or "").strip().lower()
+            scene_type = str(occupancy.get("scene_type", "") or "").strip().lower()
+            if normalized_name and valid_profile_names and normalized_name not in valid_profile_names:
+                changed = True
+                continue
+            if state in {"released", "idle", "start_failed"}:
+                changed = True
+                continue
+            if scene_type == "manual" and not self.external_profile_process_map.get(normalized_name, []):
+                changed = True
+                continue
+            updated_cache[normalized_name] = occupancy
+        if changed:
+            self.profile_occupancy_cache = updated_cache
 
     def format_scene_type_label(self, scene_type: str) -> str:
         return format_scene_type_label(scene_type, self.tr)
@@ -2657,6 +2695,7 @@ class ChromiumManagerWindow(QMainWindow):
             if isinstance(payload, dict):
                 self.control_profiles_cache = payload
                 self.control_profiles_last_query_at = now_ts
+                self.prune_fallback_profile_occupancy_cache()
             return payload if isinstance(payload, dict) else {}
         except Exception:
             return self.control_profiles_cache if isinstance(self.control_profiles_cache, dict) else {}

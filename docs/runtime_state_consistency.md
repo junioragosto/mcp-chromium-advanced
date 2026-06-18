@@ -63,6 +63,11 @@ GUI responsibilities:
 - keep a local fallback occupancy cache only for temporary degradation
 
 GUI must not overwrite fallback occupancy cache with control payload data.
+GUI should actively prune fallback cache entries when:
+
+- control profile snapshots confirm the profile list and the fallback entry is no longer valid
+- fallback state is `released`, `idle`, or `start_failed`
+- a fallback `manual` occupancy entry no longer has a matching external primary Chromium process
 
 ## Event-First Refresh
 
@@ -110,6 +115,7 @@ Fallback occupancy cache still exists for short-lived failure cases such as:
 - transient lock/permission issues reading occupancy registry
 
 Fallback is display-only and must never become the authoritative start-governance source.
+Fallback should also be treated as self-healing cache, not durable state.
 
 ## Validation Requirements
 

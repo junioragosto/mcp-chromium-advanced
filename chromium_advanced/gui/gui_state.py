@@ -806,7 +806,7 @@ def build_external_process_refresh_plan(
         "signature_changed": signature_changed,
         "stale_profiles": stale_profiles,
         "transition_messages": transition_messages,
-        "needs_ui_refresh": bool(signature_changed),
+        "needs_ui_refresh": bool(signature_changed or stale_profiles),
     }
 
 
