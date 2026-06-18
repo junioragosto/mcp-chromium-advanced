@@ -947,6 +947,19 @@ class PlaywrightCliBrowserSession(BrowserSession):
             "tabs": tabs_after,
         }
 
+    def resize(self, width: int, height: int) -> Dict:
+        target_width = max(320, int(width))
+        target_height = max(240, int(height))
+        self._run_cli(["resize", str(target_width), str(target_height), "--json"])
+        tabs = self._refresh_tabs()
+        return {
+            **self._current_page_payload(tab_id=self._preferred_tab_id(), commit_expected=True, action_name="resize"),
+            "resized": True,
+            "width": target_width,
+            "height": target_height,
+            "tabs": tabs,
+        }
+
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         del wait_for_ready
         effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
@@ -1262,6 +1275,67 @@ class PlaywrightCliBrowserSession(BrowserSession):
             }
         except Exception as exc:
             return self._action_error_payload("press_key", exc, selector=selector, by=by, text_filter=key)
+
+    def handle_dialog(self, accept: bool = True, prompt_text: str = "", tab_id: str = "") -> Dict:
+        try:
+            effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
+            if effective_tab_id:
+                self._ensure_tab_selected(tab_id=effective_tab_id)
+            if bool(accept):
+                args = ["dialog-accept"]
+                if str(prompt_text or ""):
+                    args.append(str(prompt_text or ""))
+            else:
+                args = ["dialog-dismiss"]
+            self._run_cli([*args, "--json"])
+            return {
+                **self.get_current_url(tab_id=effective_tab_id),
+                "handled": True,
+                "accepted": bool(accept),
+                "dismissed": not bool(accept),
+                "prompt_text": str(prompt_text or ""),
+            }
+        except Exception as exc:
+            return self._action_error_payload("handle_dialog", exc, text_filter="dialog")
+
+    def file_upload(
+        self,
+        target: str,
+        files: list[str] | None = None,
+        by: str = "css",
+        element: str = "",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        del element, timeout_seconds
+        try:
+            normalized_files = [str(item).strip() for item in (files or []) if str(item or "").strip()]
+            if not normalized_files:
+                raise ValueError("files is required")
+            effective_tab_id = self._preferred_tab_id()
+            if effective_tab_id:
+                self._ensure_tab_selected(tab_id=effective_tab_id)
+            resolved_target = str(target or "").strip()
+            if SNAPSHOT_REF_PATTERN.match(resolved_target):
+                raise NotImplementedError("file_upload does not support snapshot refs for playwright_cli.")
+            selector_target = _selector_to_target(resolved_target, by)
+            payload = self._eval_on_target(
+                selector_target,
+                f"(element) => {{ if (!element || String(element.tagName || '').toLowerCase() !== 'input' || String(element.getAttribute('type') || '').toLowerCase() !== 'file') throw new Error('target is not a file input'); return true; }}"
+            )
+            if payload is not True:
+                raise ValueError("target is not a file input")
+            self.click(resolved_target, by=by)
+            self._run_cli(["upload", *normalized_files, "--json"])
+            return {
+                **self.get_current_url(),
+                "uploaded": True,
+                "file_count": len(normalized_files),
+                "target": str(target or "").strip(),
+                "by": str(by or "css"),
+                "files": list(normalized_files),
+            }
+        except Exception as exc:
+            return self._action_error_payload("file_upload", exc, target=target, by=by, text_filter=target)
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:
         effective_tab_id = self._preferred_tab_id(tab_id=tab_id)

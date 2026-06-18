@@ -218,8 +218,34 @@ Recently strengthened high-level actions:
 - `navigate_back(...)`
 - `navigate_forward(...)`
 - `drag_target(...)`
+- `handle_dialog(...)`
+- `file_upload(...)`
 
 Prefer these higher-level actions before falling back to arbitrary `run_script(...)` when the task is a mainstream browser interaction problem.
+
+Official-style compatibility aliases are also available now:
+
+- `browser_tabs`
+- `browser_take_screenshot`
+- `browser_close`
+- `browser_handle_dialog`
+- `browser_file_upload`
+- `browser_resize`
+- `browser_network_request`
+
+When an upstream task or agent prompt looks like it expects an official `playwright-mcp`-style surface, prefer those aliases instead of inventing an ad-hoc translation layer.
+
+`browser_tabs` should now be treated as a real action tool, not only a list alias:
+
+- `action="list"`
+- `action="new"` with optional `url`
+- `action="select"` with `index`
+- `action="close"` with `index`
+
+For network diagnostics, prefer the pair:
+
+- `browser_get_network_requests` for list-oriented inspection
+- `browser_network_request` for official-style single-request detail lookup by 1-based index
 
 For dynamic pages:
 

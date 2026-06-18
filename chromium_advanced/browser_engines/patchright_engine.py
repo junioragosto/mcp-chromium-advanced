@@ -997,6 +997,22 @@ class PatchrightBrowserSession(BrowserSession):
             "tabs": self._safe_tabs_summary(),
         }
 
+    def resize(self, width: int, height: int) -> Dict:
+        page = self._resolve_page()
+        target_width = max(320, int(width))
+        target_height = max(240, int(height))
+        try:
+            self.page.set_viewport_size({"width": target_width, "height": target_height})
+        except Exception:
+            page.set_viewport_size({"width": target_width, "height": target_height})
+        return {
+            **self.get_current_url(tab_id=self._get_tab_id(page)),
+            "resized": True,
+            "width": target_width,
+            "height": target_height,
+            "tabs": self._safe_tabs_summary(),
+        }
+
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         page = self._resolve_page(tab_id=tab_id)
         wait_until = "load" if wait_for_ready else "domcontentloaded"
@@ -1449,6 +1465,68 @@ class PatchrightBrowserSession(BrowserSession):
             }
         except Exception as exc:
             return self._action_error_payload("select_option", exc, selector=selector, by=by, text_filter=selector)
+
+    def handle_dialog(self, accept: bool = True, prompt_text: str = "", tab_id: str = "") -> Dict:
+        try:
+            page = self._resolve_page(tab_id=tab_id)
+            holder: Dict[str, Any] = {}
+
+            def _listener(dialog) -> None:
+                holder["type"] = str(getattr(dialog, "type", "")() if callable(getattr(dialog, "type", None)) else "")
+                holder["message"] = str(getattr(dialog, "message", "")() if callable(getattr(dialog, "message", None)) else "")
+                holder["default_value"] = str(getattr(dialog, "default_value", "")() if callable(getattr(dialog, "default_value", None)) else "")
+                if bool(accept):
+                    dialog.accept(str(prompt_text or "")) if str(prompt_text or "") else dialog.accept()
+                else:
+                    dialog.dismiss()
+                holder["handled"] = True
+
+            page.once("dialog", _listener)
+            page.wait_for_timeout(300)
+            if not holder.get("handled"):
+                raise ValueError("No dialog was observed for the current page.")
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "handled": True,
+                "accepted": bool(accept),
+                "dismissed": not bool(accept),
+                "prompt_text": str(prompt_text or ""),
+                "dialog": {
+                    "type": str(holder.get("type", "") or ""),
+                    "message": str(holder.get("message", "") or ""),
+                    "default_value": str(holder.get("default_value", "") or ""),
+                },
+                "post_action_context": self._post_action_context("handle_dialog", page=page),
+            }
+        except Exception as exc:
+            return self._action_error_payload("handle_dialog", exc, text_filter="dialog", tab_id=tab_id)
+
+    def file_upload(
+        self,
+        target: str,
+        files: list[str] | None = None,
+        by: str = "css",
+        element: str = "",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        try:
+            page = self._resolve_page()
+            locator = self._resolve_target_locator(target=target, by=by, element=element, page=page)
+            normalized_files = [str(item).strip() for item in (files or []) if str(item or "").strip()]
+            if not normalized_files:
+                raise ValueError("files is required")
+            locator.set_input_files(normalized_files, timeout=int(timeout_seconds) * 1000)
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "uploaded": True,
+                "file_count": len(normalized_files),
+                "target": str(target or "").strip(),
+                "by": str(by or "css"),
+                "files": list(normalized_files),
+                "post_action_context": self._post_action_context("file_upload", page=page),
+            }
+        except Exception as exc:
+            return self._action_error_payload("file_upload", exc, target=target, by=by, text_filter=target, element=element)
 
     def navigate_back(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         try:

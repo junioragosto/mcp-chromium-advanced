@@ -1,4 +1,5 @@
 import argparse
+import atexit
 import ctypes
 import json
 import os
@@ -6,6 +7,7 @@ import sys
 import tempfile
 import traceback
 import time
+import threading
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
@@ -25,9 +27,32 @@ ERROR_ALREADY_EXISTS = 183
 MCP_TRACE_LIMIT = 500
 MCP_TRACE_FILE_MAX_BYTES = 5 * 1024 * 1024
 MCP_TRACE_FILE_ROTATIONS = 3
+MCP_TRACE_ROTATE_CHECK_EVERY = 20
+MCP_TRACE_SUCCESS_SAMPLE_RATE = 0.2
 
 
 _mcp_tool_traces: list[dict[str, Any]] = []
+_trace_file_lock = threading.Lock()
+_trace_file_handle = None
+_trace_file_path = ""
+_trace_file_write_count = 0
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = str(os.environ.get(name, "") or "").strip().lower()
+    if not value:
+        return bool(default)
+    return value in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = str(os.environ.get(name, "") or "").strip()
+        if not value:
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
 
 
 def _safe_log(text: str) -> None:
@@ -49,25 +74,133 @@ def _safe_log(text: str) -> None:
 
 
 def _safe_len(value: Any) -> int:
+    def _measure(item: Any, depth: int = 0) -> int:
+        if item is None:
+            return 0
+        if isinstance(item, (bool, int, float)):
+            return len(str(item))
+        if isinstance(item, str):
+            return len(item)
+        if depth >= 2:
+            return len(str(type(item).__name__))
+        if isinstance(item, dict):
+            total = 0
+            for index, (key, val) in enumerate(item.items()):
+                if index >= 24:
+                    total += 64
+                    break
+                total += len(str(key)) + _measure(val, depth + 1)
+            return total
+        if isinstance(item, (list, tuple, set)):
+            total = 0
+            for index, entry in enumerate(item):
+                if index >= 24:
+                    total += 64
+                    break
+                total += _measure(entry, depth + 1)
+            return total
+        return len(str(item))
+
     try:
-        return len(json.dumps(value, ensure_ascii=False, default=str))
+        return int(_measure(value))
     except Exception:
         return 0
 
 
+def _resolve_trace_path() -> str:
+    trace_path = os.environ.get("CHROMIUM_ADVANCED_MCP_TRACE_PATH")
+    if not trace_path:
+        trace_path = str(Path(os.environ.get("TEMP") or tempfile.gettempdir()) / "chromium-advanced-mcp-trace.jsonl")
+    return str(trace_path)
+
+
+def _should_use_persistent_trace_handle(trace_path: str) -> bool:
+    explicit_path = str(os.environ.get("CHROMIUM_ADVANCED_MCP_TRACE_PATH", "") or "").strip()
+    if explicit_path:
+        return False
+    normalized = str(trace_path or "").lower()
+    return normalized.endswith("chromium-advanced-mcp-trace.jsonl")
+
+
+def _close_trace_file_handle() -> None:
+    global _trace_file_handle, _trace_file_path
+    with _trace_file_lock:
+        handle = _trace_file_handle
+        _trace_file_handle = None
+        _trace_file_path = ""
+    if handle is not None:
+        try:
+            handle.flush()
+        except Exception:
+            pass
+        try:
+            handle.close()
+        except Exception:
+            pass
+
+
+atexit.register(_close_trace_file_handle)
+
+
+def _get_trace_file_handle(trace_path: str):
+    global _trace_file_handle, _trace_file_path
+    normalized_path = str(trace_path or "")
+    with _trace_file_lock:
+        if _trace_file_handle is not None and _trace_file_path == normalized_path:
+            return _trace_file_handle
+        old_handle = _trace_file_handle
+        _trace_file_handle = None
+        _trace_file_path = ""
+        if old_handle is not None:
+            try:
+                old_handle.flush()
+            except Exception:
+                pass
+            try:
+                old_handle.close()
+            except Exception:
+                pass
+        Path(normalized_path).parent.mkdir(parents=True, exist_ok=True)
+        _trace_file_handle = open(normalized_path, "a", encoding="utf-8")
+        _trace_file_path = normalized_path
+        return _trace_file_handle
+
+
 def _append_mcp_trace(trace: dict[str, Any]) -> None:
+    global _trace_file_write_count
     _mcp_tool_traces.append(trace)
     overflow = len(_mcp_tool_traces) - MCP_TRACE_LIMIT
     if overflow > 0:
         del _mcp_tool_traces[:overflow]
-    trace_path = os.environ.get("CHROMIUM_ADVANCED_MCP_TRACE_PATH")
-    if not trace_path:
-        trace_path = str(Path(os.environ.get("TEMP") or tempfile.gettempdir()) / "chromium-advanced-mcp-trace.jsonl")
+    trace_path = _resolve_trace_path()
     try:
-        Path(trace_path).parent.mkdir(parents=True, exist_ok=True)
-        _rotate_trace_file(Path(trace_path))
-        with open(trace_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(trace, ensure_ascii=False, default=str) + "\n")
+        should_persist = True
+        explicit_path = str(os.environ.get("CHROMIUM_ADVANCED_MCP_TRACE_PATH", "") or "").strip()
+        if bool(trace.get("ok", True)) and not explicit_path:
+            sample_rate = max(0.0, min(1.0, _env_float("CHROMIUM_ADVANCED_MCP_TRACE_SUCCESS_SAMPLE_RATE", MCP_TRACE_SUCCESS_SAMPLE_RATE)))
+            timestamp = float(trace.get("timestamp", 0.0) or 0.0)
+            bucket = abs(hash((str(trace.get("tool_name", "")), str(trace.get("session_id", "")), int(timestamp * 10)))) % 1000
+            should_persist = bucket < int(sample_rate * 1000)
+        if not should_persist:
+            return
+        use_persistent_handle = _should_use_persistent_trace_handle(trace_path)
+        if use_persistent_handle:
+            with _trace_file_lock:
+                _trace_file_write_count += 1
+                should_rotate = (_trace_file_write_count % MCP_TRACE_ROTATE_CHECK_EVERY) == 0
+            if should_rotate:
+                _close_trace_file_handle()
+                _rotate_trace_file(Path(trace_path))
+            handle = _get_trace_file_handle(trace_path)
+            with _trace_file_lock:
+                handle.write(json.dumps(trace, ensure_ascii=False, default=str) + "\n")
+                if _env_flag("CHROMIUM_ADVANCED_MCP_TRACE_FLUSH_EVERY_WRITE", default=False):
+                    handle.flush()
+        else:
+            Path(trace_path).parent.mkdir(parents=True, exist_ok=True)
+            _rotate_trace_file(Path(trace_path))
+            with open(trace_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(trace, ensure_ascii=False, default=str) + "\n")
     except Exception:
         pass
 
@@ -120,12 +253,14 @@ def _trace_mcp_tool(tool_name: str, func: Callable[[], dict], *, session_id: str
     finally:
         trace["duration_ms"] = round((time.perf_counter() - started) * 1000)
         _append_mcp_trace(trace)
-        _safe_log(
-            f"[{now_text()}] [MCP-TRACE] tool={trace['tool_name']} "
-            f"session={trace['session_id'] or '-'} ok={trace['ok']} "
-            f"duration_ms={trace['duration_ms']} result_size={trace['result_size']} "
-            f"error={trace['error_type'] or '-'}"
-        )
+        trace_stdout_enabled = _env_flag("CHROMIUM_ADVANCED_MCP_TRACE_STDOUT", default=False)
+        if trace_stdout_enabled or not trace["ok"]:
+            _safe_log(
+                f"[{now_text()}] [MCP-TRACE] tool={trace['tool_name']} "
+                f"session={trace['session_id'] or '-'} ok={trace['ok']} "
+                f"duration_ms={trace['duration_ms']} result_size={trace['result_size']} "
+                f"error={trace['error_type'] or '-'}"
+            )
 
 
 def _extract_action_level_error(result: object) -> tuple[bool, str, str]:
@@ -328,6 +463,38 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         return {"session_id": session_id, **browser_session.list_tabs()}
 
     @server.tool(annotations=trusted_browser_action_annotations)
+    def browser_tabs(
+        session_id: str,
+        action: str = "list",
+        index: int = -1,
+        url: str = "",
+    ) -> dict:
+        """Official-style tab manager: list, new, select, or close a browser tab."""
+        browser_session = session_manager.resolve_session(session_id)
+        normalized_action = str(action or "list").strip().lower()
+        if normalized_action in {"", "list"}:
+            return {"session_id": session_id, **browser_session.list_tabs(), "action": "list"}
+        if normalized_action in {"new", "open", "create"}:
+            return {
+                "session_id": session_id,
+                **browser_session.open_tab(url=str(url or "").strip(), activate=True, wait_for_ready=True, timeout_seconds=DEFAULT_TIMEOUT_SECONDS),
+                "action": "new",
+            }
+        if normalized_action in {"select", "activate"}:
+            return {
+                "session_id": session_id,
+                **browser_session.activate_tab(index=int(index)),
+                "action": "select",
+            }
+        if normalized_action == "close":
+            return {
+                "session_id": session_id,
+                **browser_session.close_tab(index=int(index)),
+                "action": "close",
+            }
+        raise ValueError(f"Unsupported browser_tabs action: {normalized_action}")
+
+    @server.tool(annotations=trusted_browser_action_annotations)
     def browser_open_tab(
         session_id: str,
         url: str = "",
@@ -372,6 +539,17 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         """Close a tab by explicit tab_id or index and keep the session alive on a remaining tab."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.close_tab(tab_id=tab_id, index=int(index))}
+
+    @server.tool(annotations=trusted_browser_action_annotations)
+    def browser_resize(session_id: str, width: int, height: int) -> dict:
+        """Official-style browser window resize."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.resize(width=int(width), height=int(height))}
+
+    @server.tool(annotations=local_lifecycle_annotations)
+    def browser_close(session_id: str) -> dict:
+        """Official-style alias for closing the current browser session."""
+        return close_profile_session(session_id)
 
     @server.tool(annotations=local_read_annotations)
     def get_session_capabilities(session_id: str) -> dict:
@@ -1189,10 +1367,72 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
         )
 
     @server.tool(annotations=browser_read_annotations)
+    def browser_network_request(session_id: str, index: int, tab_id: str = "") -> dict:
+        """Official-style single network request detail lookup by 1-based index."""
+        return _trace_mcp_tool(
+            "browser_network_request",
+            lambda: {
+                "session_id": session_id,
+                **session_manager.resolve_session(session_id).get_network_request(index=int(index), tab_id=tab_id),
+            },
+            session_id=session_id,
+        )
+
+    @server.tool(annotations=browser_read_annotations)
     def screenshot(session_id: str, filename: str = "", tab_id: str = "") -> dict:
         """Save a screenshot to disk and return the file path."""
         browser_session = session_manager.resolve_session(session_id)
         return {"session_id": session_id, **browser_session.screenshot(filename, tab_id=tab_id)}
+
+    @server.tool(annotations=browser_read_annotations)
+    def browser_take_screenshot(session_id: str, filename: str = "", tab_id: str = "") -> dict:
+        """Official-style alias for saving a screenshot to disk."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {"session_id": session_id, **browser_session.screenshot(filename, tab_id=tab_id)}
+
+    @server.tool(annotations=trusted_browser_action_annotations)
+    def browser_handle_dialog(
+        session_id: str,
+        accept: bool = True,
+        prompt_text: str = "",
+        tab_id: str = "",
+    ) -> dict:
+        """Accept or dismiss a blocking browser dialog."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.handle_dialog(
+                accept=bool(accept),
+                prompt_text=prompt_text,
+                tab_id=tab_id,
+            ),
+        }
+
+    @server.tool(annotations=trusted_browser_action_annotations)
+    def browser_file_upload(
+        session_id: str,
+        target: str,
+        files: list[str] | None = None,
+        file: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class", "link_text", "partial_link_text"] = "css",
+        element: str = "",
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    ) -> dict:
+        """Upload one or multiple files through a file input target."""
+        normalized_files = [str(item) for item in (files or []) if str(item or "")]
+        if not normalized_files and str(file or "").strip():
+            normalized_files = [str(file).strip()]
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.file_upload(
+                target=target,
+                files=normalized_files,
+                by=by,
+                element=element,
+                timeout_seconds=int(timeout_seconds),
+            ),
+        }
 
     @server.tool(annotations=local_lifecycle_annotations)
     def close_all_sessions() -> dict:

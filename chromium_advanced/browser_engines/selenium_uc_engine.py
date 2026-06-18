@@ -588,6 +588,18 @@ class SeleniumBrowserSession(BrowserSession):
             self._activate_handle(remaining[0])
         return {**self.get_current_url(), "closed": True, "closed_tab": closed_tab, "tabs": self.list_tabs().get("tabs", [])}
 
+    def resize(self, width: int, height: int) -> Dict:
+        target_width = max(320, int(width))
+        target_height = max(240, int(height))
+        self.driver.set_window_size(target_width, target_height)
+        return {
+            **self.get_current_url(),
+            "resized": True,
+            "width": target_width,
+            "height": target_height,
+            "tabs": self.list_tabs().get("tabs", []),
+        }
+
     def _error_payload(
         self,
         action_name: str,
@@ -949,6 +961,60 @@ class SeleniumBrowserSession(BrowserSession):
             return {**self.get_current_url(), "pressed": True, "key": key, "count": repeat}
         except Exception as exc:
             return self._error_payload("press_key", exc, selector=selector, by=by, text_filter=selector or key)
+
+    def handle_dialog(self, accept: bool = True, prompt_text: str = "", tab_id: str = "") -> Dict:
+        try:
+            handle = self._resolve_handle(tab_id=tab_id)
+            self._activate_handle(handle)
+            alert = self.driver.switch_to.alert
+            message = str(alert.text or "")
+            if bool(accept):
+                if str(prompt_text or ""):
+                    try:
+                        alert.send_keys(str(prompt_text or ""))
+                    except Exception:
+                        pass
+                alert.accept()
+            else:
+                alert.dismiss()
+            return {
+                **self.get_current_url(tab_id=handle),
+                "handled": True,
+                "accepted": bool(accept),
+                "dismissed": not bool(accept),
+                "prompt_text": str(prompt_text or ""),
+                "dialog": {"type": "alert", "message": message},
+            }
+        except Exception as exc:
+            return self._error_payload("handle_dialog", exc, text_filter="dialog")
+
+    def file_upload(
+        self,
+        target: str,
+        files: list[str] | None = None,
+        by: str = "css",
+        element: str = "",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        try:
+            if SNAPSHOT_REF_PATTERN.match(str(target or "").strip()):
+                raise NotImplementedError("Snapshot ref targets are currently supported only by the patchright engine.")
+            normalized_files = [str(item).strip() for item in (files or []) if str(item or "").strip()]
+            if not normalized_files:
+                raise ValueError("files is required")
+            locator = (selector_kind_to_by(by), target)
+            element_handle = wait_for_element(self.driver, locator, int(timeout_seconds), "present")
+            element_handle.send_keys("\n".join(normalized_files))
+            return {
+                **self.get_current_url(),
+                "uploaded": True,
+                "file_count": len(normalized_files),
+                "target": str(target or "").strip(),
+                "by": str(by or "css"),
+                "files": list(normalized_files),
+            }
+        except Exception as exc:
+            return self._error_payload("file_upload", exc, target=target, by=by, text_filter=target, element=element)
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:
         handle = self._resolve_handle(tab_id=tab_id)

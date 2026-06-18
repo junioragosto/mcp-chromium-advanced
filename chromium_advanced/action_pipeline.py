@@ -16,6 +16,7 @@ class ActionPipeline:
             "open_tab": self._open_tab,
             "activate_tab": self._activate_tab,
             "close_tab": self._close_tab,
+            "resize": self._resize,
             "click": self._click,
             "click_target": self._click_target,
             "type_text": self._type_text,
@@ -48,6 +49,8 @@ class ActionPipeline:
             "mouse_drag_xy": self._mouse_drag_xy,
             "mouse_gesture_path": self._mouse_gesture_path,
             "select_option": self._select_option,
+            "handle_dialog": self._handle_dialog,
+            "file_upload": self._file_upload,
             "navigate_back": self._navigate_back,
             "navigate_forward": self._navigate_forward,
             "drag_target": self._drag_target,
@@ -124,6 +127,12 @@ class ActionPipeline:
         return self.browser_session.close_tab(
             tab_id=str(args.get("tab_id", "") or ""),
             index=int(args.get("index", -1) or -1),
+        )
+
+    def _resize(self, args: Dict[str, Any]):
+        return self.browser_session.resize(
+            int(args.get("width", 0) or 0),
+            int(args.get("height", 0) or 0),
         )
 
     def _click(self, args: Dict[str, Any]):
@@ -383,6 +392,28 @@ class ActionPipeline:
             str(args.get("selector", "") or ""),
             values=normalized_values,
             by=str(args.get("by", "css") or "css"),
+            timeout_seconds=int(args.get("timeout_seconds", 20) or 20),
+        )
+
+    def _handle_dialog(self, args: Dict[str, Any]):
+        return self.browser_session.handle_dialog(
+            accept=bool(args.get("accept", True)),
+            prompt_text=str(args.get("prompt_text", "") or ""),
+            tab_id=str(args.get("tab_id", "") or ""),
+        )
+
+    def _file_upload(self, args: Dict[str, Any]):
+        values = args.get("files")
+        if isinstance(values, list):
+            normalized_files = [str(item).strip() for item in values if str(item or "").strip()]
+        else:
+            single = str(args.get("file", "") or "").strip()
+            normalized_files = [single] if single else []
+        return self.browser_session.file_upload(
+            target=str(args.get("target", "") or ""),
+            files=normalized_files,
+            by=str(args.get("by", "css") or "css"),
+            element=str(args.get("element", "") or ""),
             timeout_seconds=int(args.get("timeout_seconds", 20) or 20),
         )
 

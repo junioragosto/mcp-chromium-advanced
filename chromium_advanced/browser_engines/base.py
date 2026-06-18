@@ -42,6 +42,9 @@ class BrowserSession(Protocol):
     def close_tab(self, tab_id: str = "", index: int = -1) -> Dict:
         ...
 
+    def resize(self, width: int, height: int) -> Dict:
+        ...
+
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         ...
 
@@ -209,6 +212,19 @@ class BrowserSession(Protocol):
         selector: str,
         values: list[str] | None = None,
         by: str = "css",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        ...
+
+    def handle_dialog(self, accept: bool = True, prompt_text: str = "", tab_id: str = "") -> Dict:
+        ...
+
+    def file_upload(
+        self,
+        target: str,
+        files: list[str] | None = None,
+        by: str = "css",
+        element: str = "",
         timeout_seconds: int = 20,
     ) -> Dict:
         ...

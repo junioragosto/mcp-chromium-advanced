@@ -1517,6 +1517,14 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 result.setdefault("tab_count", len(result.get("tabs", [])))
         return result
 
+    def resize(self, width: int, height: int) -> Dict:
+        result = self._dispatch("resize", lambda: self._raw.resize(width=int(width), height=int(height)))
+        if isinstance(result, dict):
+            result.setdefault("resized", True)
+            result.setdefault("width", int(width))
+            result.setdefault("height", int(height))
+        return result
+
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         return self._dispatch(
             "navigate",
@@ -1772,6 +1780,45 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             result.setdefault("by", str(by or "css"))
         return result
 
+    def handle_dialog(self, accept: bool = True, prompt_text: str = "", tab_id: str = "") -> Dict:
+        result = self._dispatch(
+            "handle_dialog",
+            lambda: self._raw.handle_dialog(accept=accept, prompt_text=prompt_text, tab_id=tab_id),
+        )
+        if isinstance(result, dict):
+            result.setdefault("handled", True)
+            result.setdefault("accepted", bool(accept))
+            result.setdefault("dismissed", not bool(accept))
+            result.setdefault("prompt_text", str(prompt_text or ""))
+        return result
+
+    def file_upload(
+        self,
+        target: str,
+        files: list[str] | None = None,
+        by: str = "css",
+        element: str = "",
+        timeout_seconds: int = 20,
+    ) -> Dict:
+        normalized_files = [str(item).strip() for item in (files or []) if str(item or "").strip()]
+        result = self._dispatch(
+            "file_upload",
+            lambda: self._raw.file_upload(
+                target=target,
+                files=normalized_files,
+                by=by,
+                element=element,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+        if isinstance(result, dict):
+            result.setdefault("uploaded", bool(normalized_files))
+            result.setdefault("file_count", len(normalized_files))
+            result.setdefault("target", str(target or "").strip())
+            result.setdefault("by", str(by or "css"))
+            result.setdefault("files", list(normalized_files))
+        return result
+
     def navigate_back(self, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         result = self._dispatch(
             "navigate_back",
@@ -2018,6 +2065,24 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             "get_network_requests",
             lambda: self._raw.get_network_requests(tab_id=tab_id, limit=limit, failed_only=failed_only),
         )
+
+    def get_network_request(self, index: int, tab_id: str = "") -> Dict:
+        normalized_index = max(1, int(index))
+        payload = self.get_network_requests(tab_id=tab_id, limit=max(200, normalized_index), failed_only=False)
+        requests = payload.get("requests", [])
+        if not isinstance(requests, list):
+            requests = []
+        if normalized_index > len(requests):
+            raise IndexError(f"network request index out of range: {normalized_index}")
+        request = requests[normalized_index - 1]
+        return {
+            "tab_id": str(payload.get("tab_id", "") or tab_id or ""),
+            "url": str(payload.get("url", "") or ""),
+            "title": str(payload.get("title", "") or ""),
+            "index": normalized_index,
+            "request": dict(request) if isinstance(request, dict) else {"value": request},
+            "available_count": len(requests),
+        }
 
     def clear_debug_buffers(self, tab_id: str = "") -> Dict:
         return self._dispatch("clear_debug_buffers", lambda: self._raw.clear_debug_buffers(tab_id=tab_id))

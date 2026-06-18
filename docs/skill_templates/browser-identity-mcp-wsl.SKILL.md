@@ -78,8 +78,34 @@ Recently strengthened high-level actions from WSL are the same:
 - `navigate_back(...)`
 - `navigate_forward(...)`
 - `drag_target(...)`
+- `handle_dialog(...)`
+- `file_upload(...)`
 
 Prefer these before arbitrary `run_script(...)` when the interaction is a normal browser task.
+
+Official-style compatibility aliases are also available from WSL:
+
+- `browser_tabs`
+- `browser_take_screenshot`
+- `browser_close`
+- `browser_handle_dialog`
+- `browser_file_upload`
+- `browser_resize`
+- `browser_network_request`
+
+If the upstream prompt looks written for an official `playwright-mcp`-style tool surface, prefer these aliases instead of mixing MCP families.
+
+`browser_tabs` should also be treated as a real action tool from WSL:
+
+- `action="list"`
+- `action="new"` with optional `url`
+- `action="select"` with `index`
+- `action="close"` with `index`
+
+For network diagnostics from WSL, prefer the pair:
+
+- `browser_get_network_requests` for list-oriented inspection
+- `browser_network_request` for official-style single-request detail lookup by 1-based index
 
 For dynamic pages from WSL as well:
 

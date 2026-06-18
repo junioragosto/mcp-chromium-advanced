@@ -188,8 +188,29 @@ Examples of newer high-level action coverage exposed through the managed layer:
   `navigate_back(...)`, `navigate_forward(...)`
 - target-to-target drag:
   `drag_target(...)`
+- dialog handling:
+  `handle_dialog(...)`
+- file input upload:
+  `file_upload(...)`
 
 These additions are meant to reduce exploratory retries and make complex-page flows feel closer to official Playwright-style browser control.
+
+Official-style compatibility aliases are also now exposed for lower-friction agent/tool routing:
+
+- `browser_tabs`
+  official-style tab manager with `action=list|new|select|close`
+- `browser_take_screenshot`
+  alias of `screenshot`
+- `browser_close`
+  alias of `close_profile_session`
+- `browser_handle_dialog`
+  official-style wrapper over managed dialog handling
+- `browser_file_upload`
+  official-style wrapper over managed file upload
+- `browser_resize`
+  official-style browser window resize
+- `browser_network_request`
+  official-style single network request detail lookup by 1-based index
 
 For dynamic pages, prefer the newer wait primitives before dropping to ad-hoc polling:
 
@@ -533,6 +554,33 @@ The practical workflow is:
 4. switch again when needed
 
 For tab-aware read and debug calls, tools such as `navigate`, `get_current_url`, `get_page_text`, `get_page_html`, `browser_snapshot`, `browser_list_candidates`, `inspect_elements`, `run_script`, and `screenshot` also accept an optional `tab_id`.
+
+Official-style alias entry points are also available when the caller expects a more Playwright-MCP-like naming surface:
+
+- `browser_tabs`
+- `browser_take_screenshot`
+- `browser_close`
+- `browser_resize`
+- `browser_network_request`
+
+For mainstream browser tasks that involve page prompts or file inputs, the managed layer now also exposes:
+
+- `browser_handle_dialog`
+- `browser_file_upload`
+
+`browser_tabs` is no longer only a list alias. It now supports:
+
+- `action="list"`
+- `action="new"` with optional `url`
+- `action="select"` with `index`
+- `action="close"` with `index`
+
+For network diagnostics, the managed layer now supports both:
+
+- `browser_get_network_requests`
+  list-style debug output
+- `browser_network_request`
+  official-style single-request detail lookup by 1-based index
 
 ### Debug and observability tools
 

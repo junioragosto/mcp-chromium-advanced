@@ -167,18 +167,18 @@ from chromium_advanced.occupancy_registry import get_occupancy_events_path, list
 SYSTEM_TYPE = platform.system()
 SCHEDULER_POLL_MS = 15000
 LOG_MAX_BLOCKS = 5000
-LOG_FLUSH_INTERVAL_MS = 350
+LOG_FLUSH_INTERVAL_MS = 600
 CONFIG_MTIME_EPSILON = 0.0001
 MCP_PROCESS_STOP_TIMEOUT_MS = 3000
 MCP_WATCHDOG_INTERVAL_MS = 7000
 MCP_HEALTHCHECK_START_TIMEOUT_MS = 30000
-MCP_HEALTHCHECK_POLL_INTERVAL_MS = 250
+MCP_HEALTHCHECK_POLL_INTERVAL_MS = 400
 MCP_STATUS_QUERY_TIMEOUT_SECONDS = 0.6
-MCP_STATUS_CACHE_TTL_SECONDS = 1.0
+MCP_STATUS_CACHE_TTL_SECONDS = 1.5
 MCP_RECENT_HEALTH_GRACE_SECONDS = 30.0
 MCP_WATCHDOG_RESTART_FAILURES = 6
 CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS = 15.0
-OCCUPANCY_EVENTS_POLL_MS = 4000
+OCCUPANCY_EVENTS_POLL_MS = 6000
 SCHEDULE_TRIGGER_WINDOW_SECONDS = 90
 UI_REFRESH_DEBOUNCE_MS = 75
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
@@ -2704,7 +2704,13 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_label.setText(view_model["label"])
         self.mcp_status_detail_label.setText(view_model["detail"])
         if not self.gui_bootstrap_in_progress and daemon_status:
-            self.query_control_profiles()
+            now_ts = time.monotonic()
+            if (
+                not self.control_profiles_cache
+                or self.control_profiles_last_query_at <= 0
+                or (now_ts - self.control_profiles_last_query_at) >= CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS
+            ):
+                self.query_control_profiles()
         self.refresh_bottom_stats()
 
     def apply_initial_mcp_state(self):
@@ -2916,19 +2922,21 @@ class ChromiumManagerWindow(QMainWindow):
             )
 
     def on_mcp_watchdog_timer(self):
-        self.request_ui_refresh(mcp_status=True)
         if not self.is_mcp_expected_enabled():
             return
         if self.mcp_startup_in_progress:
             return
         daemon_status = self.query_mcp_status(force=True)
         if daemon_status:
+            self.request_ui_refresh(mcp_status=True)
             return
         if self.mcp_status_consecutive_failures >= 3:
             if find_project_mcp_processes(exclude_pid=os.getpid()):
                 return
             self.append_mcp_log(self.tr("log_mcp_watchdog_not_running"), prefix="MCP-WARN")
             self.start_mcp_service()
+            return
+        self.request_ui_refresh(mcp_status=True)
 
     def setup_tray_icon(self):
         self.tray_icon = None
