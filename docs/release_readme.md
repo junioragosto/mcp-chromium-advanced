@@ -3,6 +3,7 @@
 ## What Is Included
 
 - Desktop GUI application
+- Windows root launcher `ChromiumProfileManager.exe`
 - MCP daemon and browser worker runtime
 - Built-in `resources/bookmarks_template.html`
 - Built-in fingerprint plugin bundle downloaded from the latest `omegaee/my-fingerprint` release at build time
@@ -23,12 +24,24 @@ You must configure your own Chromium/Chrome executable and matching ChromeDriver
 ## First Start
 
 1. Start the GUI application.
+   On Windows, start the install-root `ChromiumProfileManager.exe`.
 2. Open the path/config section.
 3. Set:
    - Chromium browser path
    - ChromeDriver path
    - split UserData profiles root
 4. Save config.
+
+## Windows Launcher And Exit Semantics
+
+- The Windows install root entrypoint is `ChromiumProfileManager.exe`.
+- That root executable launches the nested real GUI runtime shipped inside the install bundle.
+- Windows autostart should target the root launcher with `--start-minimized`.
+- `ChromiumProfileManager.exe --exit-existing-instance` requests the running GUI instance to exit and now shuts down the installed GUI/daemon lifecycle cleanly.
+- Validation for this release line confirmed that explicit exit removes:
+  - the running GUI process
+  - the daemon process
+  - the active `28888` listener
 
 ## MCP Setup
 
@@ -76,12 +89,12 @@ the app can create fresh profiles without any preexisting mirror data.
 
 ## Engine Notes
 
-- `playwright_cli`
-  Default high-throughput MCP engine
+- `patchright`
+  Default high-capability MCP engine
 - `selenium_uc`
   Best for stealth / anti-bot tolerance / gesture-heavy pages
-- `patchright`
-  Best for complex frontend diagnosis and structured extraction
+- `playwright_cli`
+  Lightweight integrated compatibility engine
 
 ## Skills
 

@@ -700,13 +700,21 @@ The release build entrypoints are now:
 Current packaging behavior by platform:
 
 - Windows:
-  reuses the existing PyInstaller-based desktop build and packages the runnable app plus bundled docs/resources into a zip artifact
+  reuses the existing PyInstaller-based desktop build and packages a root launcher `ChromiumProfileManager.exe`, the nested real GUI runtime, the daemon, the worker, and bundled docs/resources into a zip artifact
 - macOS:
   builds native PyInstaller binaries on both Intel and Apple Silicon runners and packages the runnable app plus bundled docs/resources into zip artifacts
 - Linux:
   builds native PyInstaller binaries and packages the runnable app plus bundled docs/resources as `tar.gz`
 
 This `0.1.0` release line is therefore a real cross-platform runnable release baseline, but not yet a browser-bundled release.
+
+Windows packaged runtime notes:
+
+- the install root entrypoint is `ChromiumProfileManager.exe`
+- that root executable is a launcher which resolves and starts the nested real GUI runtime
+- Windows autostart should target the root launcher with `--start-minimized`
+- `ChromiumProfileManager.exe --exit-existing-instance` now requests the running GUI instance to exit and waits for the GUI/daemon lifecycle to shut down cleanly
+- explicit exit validation has confirmed that the installed GUI process, daemon process, and `28888` listener are all reclaimed together
 
 ## Skill templates
 

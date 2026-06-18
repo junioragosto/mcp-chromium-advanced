@@ -31,9 +31,16 @@ The packaged application normally contains:
 
 ```text
 <install_root>\ChromiumProfileManager.exe
+<install_root>\ChromiumProfileManager\ChromiumProfileManager.exe
 <install_root>\ChromiumMcpDaemon\ChromiumMcpDaemon.exe
 <install_root>\ChromiumMcpWorker\ChromiumMcpWorker.exe
 ```
+
+Windows launcher rule:
+
+- Always treat `<install_root>\ChromiumProfileManager.exe` as the user-facing entrypoint.
+- The nested `ChromiumProfileManager\ChromiumProfileManager.exe` is the real GUI runtime resolved by the root launcher.
+- Autostart should point to the root launcher, not to an old desktop path and not directly to the nested GUI runtime.
 
 The default MCP service shape is:
 
@@ -381,6 +388,20 @@ Post-package verification:
 & '<install_root>\ChromiumProfileManager.exe'
 Invoke-RestMethod -Uri 'http://127.0.0.1:28888/_daemon/status' -TimeoutSec 5 | ConvertTo-Json -Depth 8
 ```
+
+Explicit shutdown verification:
+
+```powershell
+& '<install_root>\ChromiumProfileManager.exe' --exit-existing-instance
+Get-Process ChromiumProfileManager,ChromiumMcpDaemon,ChromiumMcpWorker -ErrorAction SilentlyContinue
+Get-NetTCPConnection -LocalPort 28888 -ErrorAction SilentlyContinue
+```
+
+Expected result:
+
+- no remaining `ChromiumProfileManager` process
+- no remaining `ChromiumMcpDaemon` process
+- no `28888` listener left in `Listen` state
 
 Then run the MCP verification flow from section 8.
 
