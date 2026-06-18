@@ -54,6 +54,10 @@ def build_profile_runtime_state_text(
     if not profile_name:
         return tr("runtime_state_unknown", "Unknown")
     control_profile = control_profile if isinstance(control_profile, dict) else {}
+    control_busy_state = str(control_profile.get("busy_state", "") or "").strip().lower()
+    control_scene_type = str(control_profile.get("occupancy_scene_type", "") or "").strip().lower()
+    control_state = str(control_profile.get("occupancy_state", "") or "").strip().lower()
+    control_owner_label = str(control_profile.get("occupancy_owner_label", "") or "").strip()
     control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
     occupancy = control_occupancy or occupancy_cache.get(profile_name, {})
     if occupancy:
@@ -61,8 +65,13 @@ def build_profile_runtime_state_text(
         owner_label = str(occupancy.get("owner_label", "") or "").strip()
         state = str(occupancy.get("state", "") or "").strip() or "active"
         if scene_type and state not in {"released", "start_failed"}:
-            suffix = f" 路 {owner_label}" if owner_label else ""
+            suffix = f" | {owner_label}" if owner_label else ""
             return f"{scene_type}:{state}{suffix}"
+    if control_busy_state and control_busy_state not in {"idle", "released"}:
+        scene_type = control_scene_type or control_busy_state or "in_use"
+        state = control_state or "active"
+        suffix = f" | {control_owner_label}" if control_owner_label else ""
+        return f"{scene_type}:{state}{suffix}"
     if is_profile_keepalive_running(profile_name):
         return tr("runtime_state_keepalive", "Keepalive running")
     control_external_process_count = int(control_profile.get("external_process_count", 0) or 0)
@@ -121,6 +130,10 @@ def build_profile_status_display(
     control_profile: Optional[Dict] = None,
 ) -> Dict[str, str]:
     control_profile = control_profile if isinstance(control_profile, dict) else {}
+    control_busy_state = str(control_profile.get("busy_state", "") or "").strip().lower()
+    control_scene_type = str(control_profile.get("occupancy_scene_type", "") or "").strip().lower()
+    control_state = str(control_profile.get("occupancy_state", "") or "").strip().lower()
+    control_owner_label = str(control_profile.get("occupancy_owner_label", "") or "").strip()
     control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
     occupancy = control_occupancy or occupancy_cache.get(profile_name, {})
     if occupancy:
@@ -135,6 +148,14 @@ def build_profile_status_display(
             tooltip = f"{tooltip}\nengine={occupancy.get('engine_name')}"
         if occupancy.get("session_id"):
             tooltip = f"{tooltip}\nsession={occupancy.get('session_id')}"
+        return {"label": label, "tooltip": tooltip}
+    if control_busy_state and control_busy_state not in {"idle", "released"}:
+        scene_type = control_scene_type or control_busy_state or "in_use"
+        state = control_state or "active"
+        label = format_scene_type_label(scene_type, tr)
+        if state not in {"active", "running"}:
+            label = f"{label}/{state}"
+        tooltip = control_owner_label or f"{scene_type} ({state})"
         return {"label": label, "tooltip": tooltip}
     if is_profile_keepalive_running(profile_name):
         return {"label": "KEEPALIVE", "tooltip": "keepalive running"}

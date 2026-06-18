@@ -131,6 +131,10 @@ class SessionManager:
         self._status_snapshot_cache: Dict[str, Dict] = {}
         self._status_snapshot_cache_at: Dict[str, float] = {}
         self._status_snapshot_cache_ttl_seconds = 2.0
+        self._occupancy_events_cache: List[Dict] = []
+        self._occupancy_events_cache_at = 0.0
+        self._occupancy_events_cache_limit = 0
+        self._occupancy_events_cache_ttl_seconds = 2.0
 
     def _load_config(self) -> Dict:
         if isinstance(self._config_override, dict):
@@ -343,12 +347,32 @@ class SessionManager:
         entry = profiles.get(profile_name, {})
         return entry if isinstance(entry, dict) else {}
 
-    def list_profile_occupancy(self, *, tolerate_lock_timeout: bool = False) -> Dict[str, Dict]:
-        self.reconcile_stale_profile_occupancy()
+    def list_profile_occupancy(
+        self,
+        *,
+        tolerate_lock_timeout: bool = False,
+        reconcile: bool = True,
+    ) -> Dict[str, Dict]:
+        if reconcile:
+            self.reconcile_stale_profile_occupancy()
         return list_profile_occupancy_entries(tolerate_lock_timeout=True if not tolerate_lock_timeout else tolerate_lock_timeout)
 
     def list_recent_occupancy_events(self, limit: int = 100) -> List[Dict]:
-        return read_recent_jsonl_events(get_occupancy_events_path(), limit=limit)
+        bounded_limit = max(1, int(limit or 1))
+        now_ts = time.time()
+        with self._lock:
+            if (
+                self._occupancy_events_cache
+                and self._occupancy_events_cache_limit >= bounded_limit
+                and (now_ts - self._occupancy_events_cache_at) <= self._occupancy_events_cache_ttl_seconds
+            ):
+                return list(self._occupancy_events_cache[:bounded_limit])
+        items = read_recent_jsonl_events(get_occupancy_events_path(), limit=bounded_limit)
+        with self._lock:
+            self._occupancy_events_cache = list(items)
+            self._occupancy_events_cache_limit = bounded_limit
+            self._occupancy_events_cache_at = now_ts
+        return items
 
     def refresh_profile_lease(
         self,
@@ -522,7 +546,7 @@ class SessionManager:
         config = normalize_config(self._load_config())
         now_ts = time.time()
         results: List[Dict] = []
-        for profile_name, entry in self.list_profile_occupancy().items():
+        for profile_name, entry in self.list_profile_occupancy(reconcile=False).items():
             if not isinstance(entry, dict):
                 continue
             if not occupancy_entry_is_expired(entry, now_ts=now_ts):
@@ -655,10 +679,11 @@ class SessionManager:
         *,
         include_external_processes: bool = True,
         include_mirror_validation: bool = True,
+        reconcile_occupancy: bool = True,
     ) -> List[Dict]:
         config = normalize_config(self._load_config())
         manager = self._mirror_manager(config)
-        occupancy_map = self.list_profile_occupancy()
+        occupancy_map = self.list_profile_occupancy(reconcile=reconcile_occupancy)
         external_busy = {}
         running_by_profile = {}
         if include_external_processes:
@@ -764,13 +789,19 @@ class SessionManager:
                 return item
         raise ValueError(f"profile not found: {profile_name}")
 
-    def list_sessions(self) -> List[Dict]:
-        self.reconcile_stale_profile_occupancy()
+    def list_sessions(self, *, reconcile_occupancy: bool = True) -> List[Dict]:
+        if reconcile_occupancy:
+            self.reconcile_stale_profile_occupancy()
         with self._lock:
             self._purge_dead_sessions_locked(probe_browser=False)
             return [session.to_summary(refresh=False) for session in self._sessions_by_id.values()]
 
-    def get_runtime_status_snapshot(self) -> Dict:
+    def get_runtime_status_snapshot(
+        self,
+        *,
+        include_external_processes: bool = True,
+        include_mirror_status: bool = True,
+    ) -> Dict:
         config = normalize_config(self._load_config())
         concurrency_mode = str(config.get("app", {}).get("concurrency_mode", "per_profile_live") or "per_profile_live")
         default_engine_name = resolve_browser_engine_name(config)
@@ -792,13 +823,20 @@ class SessionManager:
             ]
             live_session_count = sum(1 for session in self._sessions_by_id.values() if session.runtime_mode == "live_root")
             active_profile_names = {str(session.profile_name).strip() for session in self._sessions_by_id.values() if str(session.profile_name).strip()}
-        external_busy = self._get_external_busy_details(config)
-        running_processes = external_busy.get("running_processes", [])
-        running_process_payload = self._compact_running_process_payload(running_processes)
-        keepalive_lock_active = bool(external_busy.get("keepalive_lock_active"))
-        mirror_lock_active = bool(external_busy.get("mirror_lock_active"))
-        external_scan_ms = int(external_busy.get("external_scan_ms", 0) or 0)
-        mirror_status = self._build_mirror_status(config)
+        if include_external_processes:
+            external_busy = self._get_external_busy_details(config)
+            running_processes = external_busy.get("running_processes", [])
+            running_process_payload = self._compact_running_process_payload(running_processes)
+            keepalive_lock_active = bool(external_busy.get("keepalive_lock_active"))
+            mirror_lock_active = bool(external_busy.get("mirror_lock_active"))
+            external_scan_ms = int(external_busy.get("external_scan_ms", 0) or 0)
+        else:
+            running_processes = []
+            running_process_payload = self._compact_running_process_payload([])
+            keepalive_lock_active = bool(os.path.exists(get_lock_path()))
+            mirror_lock_active = bool(os.path.exists(get_mirror_lock_path()))
+            external_scan_ms = 0
+        mirror_status = self._build_mirror_status(config) if include_mirror_status else {}
         state = "idle"
         busy = False
         message = "runtime snapshot"

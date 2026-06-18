@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import ctypes
+import inspect
 from contextlib import asynccontextmanager
 import multiprocessing
 import os
@@ -298,6 +299,41 @@ def _load_strategy_config(session_manager, config_path: str) -> Dict:
         return normalize_config({})
 
 
+def _call_with_optional_reconcile(target, method_name: str, *, reconcile_occupancy: bool, **kwargs):
+    method = getattr(target, method_name)
+    try:
+        signature = inspect.signature(method)
+        if "reconcile_occupancy" not in signature.parameters:
+            return method(**kwargs)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return method(**kwargs, reconcile_occupancy=reconcile_occupancy)
+    except TypeError as exc:
+        if "reconcile_occupancy" not in str(exc):
+            raise
+        return method(**kwargs)
+
+
+def _call_with_optional_runtime_flags(target, method_name: str, **kwargs):
+    method = getattr(target, method_name)
+    try:
+        return method(**kwargs)
+    except TypeError as exc:
+        filtered = dict(kwargs)
+        changed = False
+        for key in ("include_external_processes", "include_mirror_status"):
+            if key in filtered:
+                filtered.pop(key, None)
+                changed = True
+        if not changed:
+            raise
+        try:
+            return method(**filtered)
+        except TypeError:
+            raise exc
+
+
 def acquire_single_instance_guard(name: str):
     if platform.system() != "Windows":
         return None
@@ -435,6 +471,9 @@ class WorkerManager:
         self._last_stop_reason = ""
         self._worker_ready_once = False
         self._active_browser_session_ids: set[str] = set()
+        self._worker_listening_cache = False
+        self._worker_listening_cache_at = 0.0
+        self._worker_listening_cache_ttl_seconds = 2.0
         self._worker_log_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
@@ -586,7 +625,7 @@ class WorkerManager:
             self._reconcile_active_browser_session_ids_locked()
             worker_pid = self._process.pid if self._process is not None else None
             worker_running = self._process is not None and self._process.poll() is None
-            worker_listening = can_connect(self.worker_host, self.worker_port)
+            worker_listening = self._get_worker_listening_cached_locked()
             public_endpoint = f"http://{self.public_host}:{self.public_port}{self.public_path}"
             worker_endpoint = f"http://{self.worker_host}:{self.worker_port}{self.public_path}"
             now_ts = time.time()
@@ -595,7 +634,11 @@ class WorkerManager:
                 idle_seconds = max(0, int(now_ts - self._last_activity_at))
             daemon_session_ids: list[str] = []
             if include_session_details:
-                daemon_sessions = self.session_manager.list_sessions()
+                daemon_sessions = _call_with_optional_reconcile(
+                    self.session_manager,
+                    "list_sessions",
+                    reconcile_occupancy=False,
+                )
                 daemon_session_ids = sorted(
                     str(item.get("session_id", "") or "").strip()
                     for item in daemon_sessions
@@ -653,8 +696,26 @@ class WorkerManager:
 
     def _is_worker_healthy_locked(self) -> bool:
         if self._process is None or self._process.poll() is not None:
+            self._worker_listening_cache = False
+            self._worker_listening_cache_at = time.time()
             return False
-        return can_connect(self.worker_host, self.worker_port)
+        listening = can_connect(self.worker_host, self.worker_port)
+        self._worker_listening_cache = bool(listening)
+        self._worker_listening_cache_at = time.time()
+        return listening
+
+    def _get_worker_listening_cached_locked(self) -> bool:
+        if self._process is None or self._process.poll() is not None:
+            self._worker_listening_cache = False
+            self._worker_listening_cache_at = time.time()
+            return False
+        now_ts = time.time()
+        if (now_ts - self._worker_listening_cache_at) <= self._worker_listening_cache_ttl_seconds:
+            return bool(self._worker_listening_cache)
+        listening = can_connect(self.worker_host, self.worker_port, timeout=0.05)
+        self._worker_listening_cache = bool(listening)
+        self._worker_listening_cache_at = now_ts
+        return listening
 
     def _stop_worker_locked(self, reason: str) -> None:
         self._last_stop_reason = str(reason or "manual")
@@ -754,6 +815,46 @@ def create_daemon_app(
     daemon_pid = os.getpid()
     daemon_instance_id = f"{daemon_pid}-{uuid.uuid4().hex[:8]}"
     daemon_started_at = time.time()
+    housekeeping_lock = threading.Lock()
+    housekeeping_last_run_at = 0.0
+    housekeeping_interval_seconds = 30.0
+    runtime_status_cache: Dict[str, object] = {}
+    runtime_status_cache_at = 0.0
+    runtime_status_cache_ttl_seconds = 2.0
+
+    def maybe_run_housekeeping(force: bool = False) -> None:
+        nonlocal housekeeping_last_run_at
+        now_ts = time.time()
+        if not force and (now_ts - housekeeping_last_run_at) < housekeeping_interval_seconds:
+            return
+        with housekeeping_lock:
+            now_ts = time.time()
+            if not force and (now_ts - housekeeping_last_run_at) < housekeeping_interval_seconds:
+                return
+            session_manager.reconcile_stale_profile_occupancy()
+            session_manager.reap_expired_profile_occupancy()
+            housekeeping_last_run_at = now_ts
+
+    def get_runtime_status_cached(*, include_external_processes: bool = True, include_mirror_status: bool = True) -> Dict:
+        nonlocal runtime_status_cache, runtime_status_cache_at
+        now_ts = time.time()
+        cache_key = f"{int(bool(include_external_processes))}:{int(bool(include_mirror_status))}"
+        if (
+            runtime_status_cache
+            and runtime_status_cache.get("cache_key") == cache_key
+            and (now_ts - runtime_status_cache_at) <= runtime_status_cache_ttl_seconds
+        ):
+            cached_payload = runtime_status_cache.get("payload", {})
+            return dict(cached_payload) if isinstance(cached_payload, dict) else {}
+        payload = _call_with_optional_runtime_flags(
+            session_manager,
+            "get_runtime_status_snapshot",
+            include_external_processes=include_external_processes,
+            include_mirror_status=include_mirror_status,
+        )
+        runtime_status_cache = {"cache_key": cache_key, "payload": dict(payload)}
+        runtime_status_cache_at = now_ts
+        return payload
     session_manager = SessionManager(config_path=config_path)
     manual_profile_manager = ManualProfileRuntimeManager(session_manager, config_path)
     keepalive_manager = KeepaliveJobManager(config_path)
@@ -850,7 +951,9 @@ def create_daemon_app(
                         status_code=401,
                     )
                 token_value = parts[1]
-                if not secrets.compare_digest(token_value, api_token):
+                mcp_valid = secrets.compare_digest(token_value, api_token)
+                control_valid = bool(_control_token) and secrets.compare_digest(token_value, _control_token)
+                if not (mcp_valid or control_valid):
                     return JSONResponse(
                         {"error": "Authentication required", "detail": "Invalid API token"},
                         status_code=401,
@@ -909,14 +1012,16 @@ def create_daemon_app(
     def daemon_status() -> Dict:
         started_at = time.perf_counter()
         try:
-            session_manager.reconcile_stale_profile_occupancy()
-            session_manager.reap_expired_profile_occupancy()
+            maybe_run_housekeeping(force=False)
             status = worker_manager.get_status()
             status["daemon_pid"] = daemon_pid
             status["daemon_instance_id"] = daemon_instance_id
             status["daemon_ready"] = _daemon_ready()
             status["warmup_remaining_ms"] = max(0, int((effective_warmup_seconds - (time.time() - daemon_started_at)) * 1000))
-            status["server_status"] = session_manager.get_runtime_status_snapshot()
+            status["server_status"] = get_runtime_status_cached(
+                include_external_processes=False,
+                include_mirror_status=False,
+            )
             status["status_build_ms"] = int((time.perf_counter() - started_at) * 1000)
             return status
         except Exception as exc:
@@ -925,8 +1030,7 @@ def create_daemon_app(
     @app.get("/_control/status")
     def control_status() -> Dict:
         try:
-            session_manager.reconcile_stale_profile_occupancy()
-            session_manager.reap_expired_profile_occupancy()
+            maybe_run_housekeeping(force=False)
             return {
                 "ok": True,
                 "surface": "control",
@@ -956,11 +1060,23 @@ def create_daemon_app(
     def control_dashboard() -> Dict:
         started_at = time.perf_counter()
         try:
-            session_manager.reconcile_stale_profile_occupancy()
-            session_manager.reap_expired_profile_occupancy()
-            profiles = session_manager.list_profiles()
-            sessions = session_manager.list_sessions()
-            server_status = session_manager.get_runtime_status_snapshot()
+            maybe_run_housekeeping(force=False)
+            profiles = _call_with_optional_reconcile(
+                session_manager,
+                "list_profiles",
+                reconcile_occupancy=False,
+                include_external_processes=False,
+                include_mirror_validation=False,
+            )
+            sessions = _call_with_optional_reconcile(
+                session_manager,
+                "list_sessions",
+                reconcile_occupancy=False,
+            )
+            server_status = get_runtime_status_cached(
+                include_external_processes=False,
+                include_mirror_status=False,
+            )
             busy_profiles = [item for item in profiles if str(item.get("busy_state", "idle")) != "idle"]
             return {
                 "ok": True,
@@ -984,21 +1100,22 @@ def create_daemon_app(
     def control_profiles(include_runtime_snapshot: bool = False) -> Dict:
         started_at = time.perf_counter()
         try:
-            session_manager.reconcile_stale_profile_occupancy()
-            session_manager.reap_expired_profile_occupancy()
+            maybe_run_housekeeping(force=False)
             include_heavy_profile_details = bool(include_runtime_snapshot)
             payload = {
                 "ok": True,
                 "surface": "control",
-                "profiles": session_manager.list_profiles(
+                "profiles": _call_with_optional_reconcile(
+                    session_manager,
+                    "list_profiles",
+                    reconcile_occupancy=include_heavy_profile_details,
                     include_external_processes=include_heavy_profile_details,
                     include_mirror_validation=include_heavy_profile_details,
                 ),
-                "events": session_manager.list_recent_occupancy_events(limit=50),
                 "status_build_ms": int((time.perf_counter() - started_at) * 1000),
             }
             if bool(include_runtime_snapshot):
-                payload["server_status"] = session_manager.get_runtime_status_snapshot()
+                payload["server_status"] = get_runtime_status_cached()
             return payload
         except Exception as exc:
             raise _as_http_error(exc) from exc
@@ -1006,8 +1123,7 @@ def create_daemon_app(
     @app.get("/_control/profiles/{profile_name}")
     def control_profile_status(profile_name: str, include_runtime_snapshot: bool = False) -> Dict:
         try:
-            session_manager.reconcile_stale_profile_occupancy()
-            session_manager.reap_expired_profile_occupancy()
+            maybe_run_housekeeping(force=False)
             include_heavy_profile_details = bool(include_runtime_snapshot)
             profile_payload = session_manager.get_profile_status_with_options(
                 profile_name,
@@ -1020,7 +1136,7 @@ def create_daemon_app(
                 "profile": profile_payload,
             }
             if bool(include_runtime_snapshot):
-                payload["server_status"] = session_manager.get_runtime_status_snapshot()
+                payload["server_status"] = get_runtime_status_cached()
             return payload
         except Exception as exc:
             raise _as_http_error(exc) from exc
@@ -1028,12 +1144,11 @@ def create_daemon_app(
     @app.get("/_control/sessions")
     def control_sessions() -> Dict:
         try:
-            session_manager.reconcile_stale_profile_occupancy()
-            session_manager.reap_expired_profile_occupancy()
+            maybe_run_housekeeping(force=False)
             return {
                 "ok": True,
                 "surface": "control",
-                "sessions": session_manager.list_sessions(),
+                "sessions": session_manager.list_sessions(reconcile_occupancy=False),
             }
         except Exception as exc:
             raise _as_http_error(exc) from exc
@@ -1042,8 +1157,7 @@ def create_daemon_app(
     def control_events(limit: int = 100) -> Dict:
         bounded_limit = max(1, min(1000, int(limit or 100)))
         try:
-            session_manager.reconcile_stale_profile_occupancy()
-            session_manager.reap_expired_profile_occupancy()
+            maybe_run_housekeeping(force=False)
             return {
                 "ok": True,
                 "surface": "control",
@@ -1353,13 +1467,12 @@ def create_daemon_app(
     def daemon_profiles() -> Dict:
         started_at = time.perf_counter()
         try:
-            session_manager.reconcile_stale_profile_occupancy()
-            session_manager.reap_expired_profile_occupancy()
+            maybe_run_housekeeping(force=False)
             return {
                 "daemon_pid": daemon_pid,
                 "daemon_instance_id": daemon_instance_id,
                 "daemon_ready": _daemon_ready(),
-                "profiles": session_manager.list_profiles(),
+                "profiles": session_manager.list_profiles(reconcile_occupancy=False),
                 "events": session_manager.list_recent_occupancy_events(limit=50),
                 "status_build_ms": int((time.perf_counter() - started_at) * 1000),
             }
@@ -1368,8 +1481,7 @@ def create_daemon_app(
 
     @app.get("/_daemon/profiles/{profile_name}")
     def daemon_profile_status(profile_name: str) -> Dict:
-        session_manager.reconcile_stale_profile_occupancy()
-        session_manager.reap_expired_profile_occupancy()
+        maybe_run_housekeeping(force=False)
         try:
             return session_manager.get_profile_status(unquote(profile_name))
         except Exception as exc:
@@ -1393,6 +1505,7 @@ def create_daemon_app(
     @app.post("/_daemon/reap-expired")
     def daemon_reap_expired() -> Dict:
         try:
+            maybe_run_housekeeping(force=True)
             results = session_manager.reap_expired_profile_occupancy()
             return {"reclaimed": results, "count": len(results)}
         except Exception as exc:

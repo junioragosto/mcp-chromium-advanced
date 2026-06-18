@@ -167,7 +167,7 @@ from chromium_advanced.occupancy_registry import get_occupancy_events_path, list
 SYSTEM_TYPE = platform.system()
 SCHEDULER_POLL_MS = 15000
 LOG_MAX_BLOCKS = 5000
-LOG_FLUSH_INTERVAL_MS = 600
+LOG_FLUSH_INTERVAL_MS = 1200
 CONFIG_MTIME_EPSILON = 0.0001
 MCP_PROCESS_STOP_TIMEOUT_MS = 3000
 MCP_WATCHDOG_INTERVAL_MS = 7000
@@ -177,8 +177,9 @@ MCP_STATUS_QUERY_TIMEOUT_SECONDS = 0.6
 MCP_STATUS_CACHE_TTL_SECONDS = 1.5
 MCP_RECENT_HEALTH_GRACE_SECONDS = 30.0
 MCP_WATCHDOG_RESTART_FAILURES = 6
-CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS = 15.0
+CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS = 3.0
 OCCUPANCY_EVENTS_POLL_MS = 6000
+CONTROL_KEEPALIVE_REFRESH_INTERVAL_SECONDS = 10.0
 SCHEDULE_TRIGGER_WINDOW_SECONDS = 90
 UI_REFRESH_DEBOUNCE_MS = 75
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
@@ -290,6 +291,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_consecutive_failures = 0
         self.control_profiles_cache: Dict = {}
         self.control_profiles_last_query_at = 0.0
+        self.control_keepalive_cache: Dict = {}
+        self.control_keepalive_last_query_at = 0.0
         self.window_state_dirty = False
         self.occupancy_event_file_offset = 0
         self.pending_ui_refresh_flags: Dict[str, bool] = {}
@@ -1141,7 +1144,9 @@ class ChromiumManagerWindow(QMainWindow):
         return self.serialize_external_profile_process_map(process_map)
 
     def build_external_profile_process_map(self) -> Dict[str, List[int]]:
-        profiles_payload = self.query_control_profiles(force=True)
+        # Reuse the cached control payload during steady-state refreshes; the
+        # daemon-side profiles endpoint is one of the heaviest GUI polling calls.
+        profiles_payload = self.query_control_profiles(force=False)
         profiles = profiles_payload.get("profiles", []) if isinstance(profiles_payload.get("profiles", []), list) else []
         raw_map: Dict[str, List[int]] = {}
         for item in profiles:
@@ -1174,6 +1179,10 @@ class ChromiumManagerWindow(QMainWindow):
         if bool(plan["needs_ui_refresh"]):
             self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
 
+    def invalidate_control_profiles_cache(self) -> None:
+        self.control_profiles_cache = {}
+        self.control_profiles_last_query_at = 0.0
+
     def build_profile_runtime_state_text(self, profile_name: str) -> str:
         return build_profile_runtime_state_text(
             profile_name,
@@ -1201,6 +1210,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.external_profile_process_map = {}
         self.external_profile_process_signature = ""
         self.profile_occupancy_cache = {}
+        self.control_keepalive_cache = {}
+        self.control_keepalive_last_query_at = 0.0
         self.load_app_settings_to_ui()
         self.retranslate_ui()
         self.refresh_keepalive_plugin_table()
@@ -1212,7 +1223,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.refresh_close_to_tray_checkbox()
         if not initial_bootstrap:
             self.refresh_scheduler_status()
-            self.query_control_profiles(force=True)
+            self.query_control_profiles(force=False)
         self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, delay_ms=0)
 
     def complete_startup_refresh(self):
@@ -1224,7 +1235,7 @@ class ChromiumManagerWindow(QMainWindow):
         ):
             self.start_mcp_service()
         self.refresh_scheduler_status()
-        self.query_control_profiles(force=True)
+        self.query_control_profiles(force=False)
         self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True, delay_ms=0)
 
     def reload_config_from_disk(self):
@@ -1259,6 +1270,8 @@ class ChromiumManagerWindow(QMainWindow):
         return format_occupancy_event_text(payload)
 
     def on_occupancy_events_timer(self):
+        if not hasattr(self, "tabs") or self.tabs.currentWidget() is not self.occupancy_tab:
+            return
         payload = self.query_control_events(limit=20)
         events = payload.get("events", []) if isinstance(payload.get("events", []), list) else []
         if not events:
@@ -1271,11 +1284,19 @@ class ChromiumManagerWindow(QMainWindow):
             self.append_log(self.format_occupancy_event_text(payload), prefix="OCC")
             emitted = True
         if emitted:
-            self.query_control_profiles(force=True)
+            # Occupancy events are followed by a UI refresh, but the control
+            # profile cache is usually still fresh enough to avoid an immediate
+            # second heavyweight profiles query.
+            self.query_control_profiles(force=False)
             self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
 
     def refresh_occupancy_tab(self):
-        profiles_payload = self.query_control_profiles(force=True)
+        if not hasattr(self, "tabs") or self.tabs.currentWidget() is not self.occupancy_tab:
+            return
+        # This view is refreshed frequently through the generic UI refresh path.
+        # Prefer the cached control snapshot unless the caller explicitly forced
+        # a control refresh earlier in the same cycle.
+        profiles_payload = self.query_control_profiles(force=False)
         entries = {}
         profiles = profiles_payload.get("profiles", []) if isinstance(profiles_payload.get("profiles", []), list) else []
         for item in profiles:
@@ -2002,6 +2023,7 @@ class ChromiumManagerWindow(QMainWindow):
             prefix=self.tr("keepalive_source_default"),
         )
         try:
+            self.invalidate_control_keepalive_cache()
             self.control_stop_keepalive()
         except Exception as exc:
             QMessageBox.warning(self, self.tr("running_title"), str(exc))
@@ -2508,6 +2530,17 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_consecutive_failures = int(result["consecutive_failures"])
         return result["status"]
 
+    def query_mcp_ping(self) -> Dict:
+        try:
+            payload = fetch_json(
+                self.get_mcp_status_url(),
+                timeout=MCP_STATUS_QUERY_TIMEOUT_SECONDS,
+                headers=self.get_mcp_auth_headers(),
+            )
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
     def get_control_profiles_url(self) -> str:
         base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
         if base.endswith("/status"):
@@ -2595,8 +2628,8 @@ class ChromiumManagerWindow(QMainWindow):
                 self.control_profiles_cache = payload
                 self.control_profiles_last_query_at = now_ts
                 profiles = payload.get("profiles", [])
+                mapped = {}
                 if isinstance(profiles, list):
-                    mapped = {}
                     for item in profiles:
                         if not isinstance(item, dict):
                             continue
@@ -2605,8 +2638,7 @@ class ChromiumManagerWindow(QMainWindow):
                             mapped[profile_name] = dict(
                                 item.get("occupancy", {}) if isinstance(item.get("occupancy", {}), dict) else {}
                             )
-                    if mapped:
-                        self.profile_occupancy_cache = mapped
+                self.profile_occupancy_cache = mapped
             return payload if isinstance(payload, dict) else {}
         except Exception:
             return self.control_profiles_cache if isinstance(self.control_profiles_cache, dict) else {}
@@ -2623,15 +2655,30 @@ class ChromiumManagerWindow(QMainWindow):
             return {}
 
     def query_control_keepalive(self) -> Dict:
+        now_ts = time.monotonic()
+        if (
+            self.control_keepalive_cache
+            and self.control_keepalive_last_query_at > 0
+            and (now_ts - self.control_keepalive_last_query_at) < CONTROL_KEEPALIVE_REFRESH_INTERVAL_SECONDS
+        ):
+            return self.control_keepalive_cache
         try:
             payload = fetch_json(
                 self.get_control_keepalive_url(),
                 timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
                 headers=self.get_mcp_auth_headers(),
             )
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
+            if isinstance(payload, dict):
+                self.control_keepalive_cache = payload
+                self.control_keepalive_last_query_at = now_ts
+                return payload
             return {}
+        except Exception:
+            return self.control_keepalive_cache if isinstance(self.control_keepalive_cache, dict) else {}
+
+    def invalidate_control_keepalive_cache(self) -> None:
+        self.control_keepalive_cache = {}
+        self.control_keepalive_last_query_at = 0.0
 
     def query_control_keepalive_runtime(self) -> Dict:
         payload = self.query_control_keepalive()
@@ -2926,10 +2973,15 @@ class ChromiumManagerWindow(QMainWindow):
             return
         if self.mcp_startup_in_progress:
             return
-        daemon_status = self.query_mcp_status(force=True)
-        if daemon_status:
+        ping_status = self.query_mcp_ping()
+        if ping_status:
+            self.mcp_status_consecutive_failures = 0
+            if not self.gui_bootstrap_in_progress:
+                self.query_control_profiles(force=False)
+                self.refresh_external_profile_process_state()
             self.request_ui_refresh(mcp_status=True)
             return
+        self.mcp_status_consecutive_failures += 1
         if self.mcp_status_consecutive_failures >= 3:
             if find_project_mcp_processes(exclude_pid=os.getpid()):
                 return
@@ -3126,11 +3178,12 @@ class ChromiumManagerWindow(QMainWindow):
     def refresh_scheduler_status(self):
         previous_status = self.config.get("keepalive", {}).get("last_run_status")
         previous_run_at = self.config.get("keepalive", {}).get("last_run_at")
-        self.reload_config_if_changed()
+        self.reload_config_if_changed(force=False)
         keepalive_payload = self.query_control_keepalive()
         keepalive = dict(
             keepalive_payload.get("keepalive", {}) if isinstance(keepalive_payload.get("keepalive", {}), dict) else self.config["keepalive"]
         )
+        runtime = keepalive_payload.get("runtime", {}) if isinstance(keepalive_payload.get("runtime", {}), dict) else {}
         self.global_last_run.setText(keepalive.get("last_run_at", "") or "-")
         self.global_last_status.setText(keepalive.get("last_run_status", "") or "-")
         self.global_last_message.setText(keepalive.get("last_run_message", "") or "-")
@@ -3148,7 +3201,7 @@ class ChromiumManagerWindow(QMainWindow):
             now_dt=now_dt,
             schedule_dt=schedule_dt,
             last_scheduled_date=last_scheduled_date,
-            keepalive_running=bool(self.query_control_keepalive_runtime().get("running", False)),
+            keepalive_running=bool(runtime.get("running", False)),
             triggered_today_text=today_text,
             format_datetime=format_datetime_for_ui,
             should_trigger_schedule=should_trigger_keepalive_schedule,
@@ -3208,6 +3261,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.append_log(f"{self.tr('log_keepalive_started')} (engine={engine_name})", prefix=keepalive_log_prefix)
         self.set_keepalive_buttons_enabled(False)
         try:
+            self.invalidate_control_keepalive_cache()
             self.control_start_keepalive(selected_profiles, source)
         except Exception as exc:
             self.set_keepalive_buttons_enabled(True)
