@@ -1,4 +1,4 @@
-# 官方 MCP 对齐迭代二期计划
+﻿# 官方 MCP 对齐迭代二期计划
 
 日期：2026-06-18
 
@@ -153,8 +153,8 @@
 3. `docs/skill_templates/browser-identity-mcp.SKILL.md`
 4. `docs/skill_templates/browser-identity-mcp-wsl.SKILL.md`
 5. 系统 skill：
-   - `C:\Users\Administrator\.codex\skills\browser-identity-mcp\SKILL.md`
-   - `C:\Users\Administrator\.codex\skills\browser-identity-mcp-wsl\SKILL.md`
+   - `$CODEX_HOME/skills/browser-identity-mcp/SKILL.md`
+   - `$CODEX_HOME/skills/browser-identity-mcp-wsl/SKILL.md`
 
 更新重点：
 
@@ -181,3 +181,4 @@
 3. 结构化诊断输出明显增强且保持通用
 4. 文档与 skill 已同步
 5. 本地代码达到可继续发布验证的状态
+

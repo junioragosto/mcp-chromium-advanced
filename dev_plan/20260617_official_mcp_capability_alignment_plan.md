@@ -1,4 +1,4 @@
-# 官方 Playwright MCP 能力对齐优化计划
+﻿# 官方 Playwright MCP 能力对齐优化计划
 
 日期：2026-06-17
 
@@ -221,8 +221,8 @@
 3. `docs/skill_templates/browser-identity-mcp.SKILL.md`
 4. `docs/skill_templates/browser-identity-mcp-wsl.SKILL.md`
 5. 系统 skill：
-   - `C:\\Users\\Administrator\\.codex\\skills\\browser-identity-mcp\\SKILL.md`
-   - `C:\\Users\\Administrator\\.codex\\skills\\browser-identity-mcp-wsl\\SKILL.md`
+   - `$CODEX_HOME/skills/browser-identity-mcp/SKILL.md`
+   - `$CODEX_HOME/skills/browser-identity-mcp-wsl/SKILL.md`
 
 更新重点：
 
@@ -253,3 +253,4 @@
 4. 做视觉层 UI 大改版
 
 本轮目标很明确：在现有架构打通的基础上，把默认 `patchright` 路径的能力和使用体验，尽可能向官方 `playwright-mcp` 靠齐。
+

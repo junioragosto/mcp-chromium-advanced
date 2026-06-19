@@ -35,8 +35,8 @@ FINGERPRINT_DOWNLOAD_HREF_PATTERN = re.compile(
     re.IGNORECASE,
 )
 LOCAL_FINGERPRINT_FALLBACKS = [
-    Path(r"D:\softs\chromium\ChromiumProfileManager\extensions"),
     PROJECT_ROOT / "extensions",
+    PROJECT_ROOT / "local_extensions",
 ]
 
 
@@ -352,6 +352,16 @@ def build_release_root(artifact_name: str) -> tuple[Path, dict]:
     return package_root, fingerprint_meta
 
 
+def copy_tree_contents(source_dir: Path, target_dir: Path) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for item in source_dir.iterdir():
+        destination = target_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, destination, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, destination)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build release artifacts for the current platform.")
     parser.add_argument("--artifact-name", required=True)
@@ -362,7 +372,7 @@ def main():
 
     if sys.platform.startswith("win"):
         source_dir = build_windows()
-        shutil.copytree(source_dir, package_root / "app")
+        copy_tree_contents(source_dir, package_root)
         package_zip(package_root, OUT_ROOT / f"{artifact_name}.zip")
         return
 

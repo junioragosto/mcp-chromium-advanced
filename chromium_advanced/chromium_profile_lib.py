@@ -1203,6 +1203,52 @@ def normalize_keepalive_action_result(site_name: str, result: Dict) -> Dict:
     return payload
 
 
+def derive_keepalive_site_presence(profile: Dict) -> Dict[str, List[str]]:
+    details = profile.get("last_keepalive_details", {}) or {}
+    if not isinstance(details, dict):
+        details = {}
+
+    online_sites: List[str] = []
+    signed_out_sites: List[str] = []
+    attention_sites: List[str] = []
+    failed_sites: List[str] = []
+    skipped_sites: List[str] = []
+    unknown_sites: List[str] = []
+
+    for site_name in sorted(details.keys(), key=lambda item: str(item or "").lower()):
+        site_id = str(site_name or "").strip()
+        if not site_id:
+            continue
+        payload = normalize_keepalive_action_result(site_id, details.get(site_name, {}))
+        status = str(payload.get("status", "") or "").strip().lower()
+        signed_in = payload.get("signed_in")
+        if signed_in is True:
+            online_sites.append(site_id)
+            continue
+        if signed_in is False or status == "signed_out":
+            signed_out_sites.append(site_id)
+            continue
+        if status == "attention":
+            attention_sites.append(site_id)
+            continue
+        if status == "failed":
+            failed_sites.append(site_id)
+            continue
+        if status == "skipped":
+            skipped_sites.append(site_id)
+            continue
+        unknown_sites.append(site_id)
+
+    return {
+        "online_sites": online_sites,
+        "signed_out_sites": signed_out_sites,
+        "attention_sites": attention_sites,
+        "failed_sites": failed_sites,
+        "skipped_sites": skipped_sites,
+        "unknown_sites": unknown_sites,
+    }
+
+
 def format_keepalive_site_status(
     site_name: str,
     info: Dict,
@@ -1244,6 +1290,7 @@ def normalize_profile_entry(entry: Dict, legacy_keepalive_sites: Optional[Dict] 
     normalized["last_mirror_message"] = str(normalized.get("last_mirror_message", "")).strip()
     details = normalized.get("last_keepalive_details", {})
     normalized["last_keepalive_details"] = details if isinstance(details, dict) else {}
+    normalized.update(derive_keepalive_site_presence(normalized))
     return normalized
 
 

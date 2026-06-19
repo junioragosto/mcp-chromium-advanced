@@ -7,7 +7,6 @@ from PIL import Image, ImageDraw
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE = Path(r"F:\Downloads\ScreenShot_2026-06-15_131432_465.png")
 DEFAULT_RESOURCES_DIR = PROJECT_ROOT / "resources"
 
 
@@ -108,7 +107,7 @@ def generate_icons(source_path: Path, resources_dir: Path) -> dict[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate app icon assets for Windows/macOS/Linux.")
-    parser.add_argument("--source", default=str(DEFAULT_SOURCE))
+    parser.add_argument("--source", required=True, help="Path to the source image used to generate app icons.")
     parser.add_argument("--resources-dir", default=str(DEFAULT_RESOURCES_DIR))
     args = parser.parse_args()
 

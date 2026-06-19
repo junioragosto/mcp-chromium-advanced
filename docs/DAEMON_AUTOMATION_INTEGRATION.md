@@ -90,14 +90,37 @@ Example body:
 }
 ```
 
+For resource-lease-only callers that do not need browser actions and only need
+exclusive access to the profile files, use:
+
+```json
+{
+  "profile_name": "Profile 8",
+  "owner_label": "yt_dlp_job",
+  "runtime_options": {
+    "resource_only": true
+  }
+}
+```
+
 Success response contains:
 
 - `session_id`
 - `profile_name`
 - `engine_name`
+- `browser_family`
+- `user_data_dir`
+- `profile_dir`
 - `runtime_mode`
 - `runtime_root`
 - `reused`
+
+`resource_only=true` means:
+
+- the daemon still acquires the same profile occupancy and runtime lock
+- no browser window is launched
+- the caller can safely use the returned `user_data_dir` / `profile_dir`
+- `/_daemon/automation/action` is not available for that session type
 
 Typical failures:
 
@@ -156,6 +179,11 @@ Currently supported action names:
 - `get_summary`
 - `get_capabilities`
 - `snapshot`
+
+Important restriction:
+
+- sessions acquired with `runtime_options.resource_only=true` cannot call
+  `/_daemon/automation/action`; they are resource leases, not browser sessions
 
 Typical failures:
 
@@ -246,6 +274,24 @@ Useful daemon endpoints around the automation flow:
 - `POST /_daemon/reap-expired`
 
 Use them to inspect occupancy, recent events, and stale lock recovery state.
+
+Profile status payloads also include keepalive-derived site presence arrays so a
+business caller can choose a profile based on required login state before
+occupying it:
+
+- `online_sites`
+- `signed_out_sites`
+- `attention_sites`
+- `failed_sites`
+- `skipped_sites`
+- `unknown_sites`
+
+Practical selection pattern:
+
+1. `GET /_daemon/profiles`
+2. keep only profiles with `busy_state=idle`
+3. keep only profiles whose `online_sites` contains the required site ids
+4. acquire the selected profile through `/_daemon/automation/acquire`
 
 Important access rule:
 

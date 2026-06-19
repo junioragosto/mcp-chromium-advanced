@@ -177,11 +177,12 @@ MCP_STATUS_QUERY_TIMEOUT_SECONDS = 0.6
 MCP_STATUS_CACHE_TTL_SECONDS = 1.5
 MCP_RECENT_HEALTH_GRACE_SECONDS = 30.0
 MCP_WATCHDOG_RESTART_FAILURES = 6
-CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS = 1.0
+CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS = 2.5
 OCCUPANCY_EVENTS_POLL_MS = 6000
 CONTROL_KEEPALIVE_REFRESH_INTERVAL_SECONDS = 10.0
 SCHEDULE_TRIGGER_WINDOW_SECONDS = 90
 UI_REFRESH_DEBOUNCE_MS = 75
+BACKGROUND_PROFILES_REFRESH_INTERVAL_SECONDS = 12.0
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
 MCP_WORKER_POLICY_OPTIONS = ["lazy", "sticky", "always_on"]
@@ -291,6 +292,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_consecutive_failures = 0
         self.control_profiles_cache: Dict = {}
         self.control_profiles_last_query_at = 0.0
+        self.background_profiles_refresh_last_at = 0.0
         self.profile_table_row_cache: Dict[str, Dict[str, object]] = {}
         self.control_events_seen_keys: set[str] = set()
         self.control_keepalive_cache: Dict = {}
@@ -472,17 +474,9 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_sync.clicked.connect(self.sync_profiles)
         toolbar.addWidget(self.btn_sync)
 
-        self.btn_launch_selected = QPushButton()
-        self.btn_launch_selected.clicked.connect(self.launch_selected_profile)
-        toolbar.addWidget(self.btn_launch_selected)
-
         self.btn_reclaim_selected = QPushButton()
         self.btn_reclaim_selected.clicked.connect(self.reclaim_selected_profile)
         toolbar.addWidget(self.btn_reclaim_selected)
-
-        self.btn_keepalive_selected = QPushButton()
-        self.btn_keepalive_selected.clicked.connect(self.run_keepalive_for_selected)
-        toolbar.addWidget(self.btn_keepalive_selected)
 
         self.btn_keepalive_all = QPushButton()
         self.btn_keepalive_all.clicked.connect(self.run_keepalive_for_all)
@@ -1128,13 +1122,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.pending_mcp_log_lines = []
         self.mcp_log_output.clear()
 
-    def set_keepalive_buttons_enabled(self, enabled: bool):
-        self.btn_add.setEnabled(enabled)
-        self.btn_edit.setEnabled(enabled)
-        self.btn_remove.setEnabled(enabled)
-        self.btn_remove_with_dir.setEnabled(enabled)
+    def set_keepalive_controls_enabled(self, enabled: bool):
         self.btn_reclaim_selected.setEnabled(enabled)
-        self.btn_keepalive_selected.setEnabled(enabled)
         self.btn_keepalive_all.setEnabled(enabled)
         self.btn_save_keepalive.setEnabled(enabled)
         self.btn_refresh_task.setEnabled(enabled)
@@ -1148,6 +1137,13 @@ class ChromiumManagerWindow(QMainWindow):
         if hasattr(self, "plugin_source_editor"):
             self.plugin_source_editor.setReadOnly((not enabled) or (not editable_plugin_selected))
         self.request_ui_refresh(table=True)
+
+    def set_profile_management_controls_enabled(self, enabled: bool):
+        self.btn_add.setEnabled(enabled)
+        self.btn_edit.setEnabled(enabled)
+        self.btn_remove.setEnabled(enabled)
+        self.btn_remove_with_dir.setEnabled(enabled)
+        self.btn_sync.setEnabled(enabled)
 
     def build_external_profile_process_signature(self) -> str:
         process_map = self.build_external_profile_process_map()
@@ -1198,6 +1194,7 @@ class ChromiumManagerWindow(QMainWindow):
     def invalidate_control_profiles_cache(self) -> None:
         self.control_profiles_cache = {}
         self.control_profiles_last_query_at = 0.0
+        self.background_profiles_refresh_last_at = 0.0
 
     def build_profile_runtime_state_text(self, profile_name: str) -> str:
         return build_profile_runtime_state_text(
@@ -2432,9 +2429,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_remove.setText(self.tr("toolbar_remove"))
         self.btn_remove_with_dir.setText(self.tr("toolbar_remove_full"))
         self.btn_sync.setText(self.tr("toolbar_sync"))
-        self.btn_launch_selected.setText(self.tr("toolbar_launch"))
         self.btn_reclaim_selected.setText(self.tr("toolbar_reclaim"))
-        self.btn_keepalive_selected.setText(self.tr("toolbar_keepalive_selected"))
         self.btn_keepalive_all.setText(self.tr("toolbar_keepalive_all"))
         self.btn_open_config_dir.setText(self.tr("toolbar_open_config"))
         self.app_auto_start_checkbox.setText(self.tr("toolbar_autostart"))
@@ -2955,15 +2950,30 @@ class ChromiumManagerWindow(QMainWindow):
         )
         self.mcp_status_label.setText(view_model["label"])
         self.mcp_status_detail_label.setText(view_model["detail"])
-        if not self.gui_bootstrap_in_progress and daemon_status:
-            now_ts = time.monotonic()
-            if (
-                not self.control_profiles_cache
-                or self.control_profiles_last_query_at <= 0
-                or (now_ts - self.control_profiles_last_query_at) >= CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS
-            ):
-                self.query_control_profiles()
         self.refresh_bottom_stats()
+
+    def maybe_refresh_profiles_in_background(self, *, force: bool = False) -> None:
+        if self.gui_bootstrap_in_progress:
+            return
+        if self.is_ui_interaction_busy():
+            return
+        now_ts = time.monotonic()
+        if (
+            not force
+            and self.background_profiles_refresh_last_at > 0
+            and (now_ts - self.background_profiles_refresh_last_at) < BACKGROUND_PROFILES_REFRESH_INTERVAL_SECONDS
+        ):
+            return
+        payload = self.query_control_profiles(force=force)
+        self.background_profiles_refresh_last_at = now_ts
+        if not isinstance(payload, dict) or not payload:
+            return
+        self.current_ui_refresh_context = {
+            "control_profiles_payload": payload,
+            "keepalive_runtime": self.query_control_keepalive_runtime(),
+        }
+        self.refresh_external_profile_process_state()
+        self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
 
     def apply_initial_mcp_state(self):
         if self.mcp_startup_applied:
@@ -3185,11 +3195,11 @@ class ChromiumManagerWindow(QMainWindow):
             return
         ping_status = self.query_mcp_ping()
         if ping_status:
+            had_failures = self.mcp_status_consecutive_failures > 0
             self.mcp_status_consecutive_failures = 0
-            if not self.gui_bootstrap_in_progress:
-                self.query_control_profiles(force=False)
-                self.refresh_external_profile_process_state()
-            self.request_ui_refresh(mcp_status=True)
+            if had_failures:
+                self.request_ui_refresh(mcp_status=True)
+            self.maybe_refresh_profiles_in_background(force=False)
             return
         self.mcp_status_consecutive_failures += 1
         if self.mcp_status_consecutive_failures >= 3:
@@ -3426,6 +3436,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.global_task_next_run.setText(view_model["next_run"])
         self.global_task_last_result.setText(view_model["last_result"])
         self.current_ui_refresh_context["scheduler_keepalive_runtime"] = runtime
+        self.set_keepalive_controls_enabled(not bool(runtime.get("running", False)))
 
     def on_scheduler_timer(self):
         if self.is_ui_interaction_busy():
@@ -3475,12 +3486,12 @@ class ChromiumManagerWindow(QMainWindow):
         )
         keepalive_log_prefix = describe_keepalive_source(source, [item for item in selected_profiles if item])
         self.append_log(f"{self.tr('log_keepalive_started')} (engine={engine_name})", prefix=keepalive_log_prefix)
-        self.set_keepalive_buttons_enabled(False)
+        self.set_keepalive_controls_enabled(False)
         try:
             self.invalidate_control_keepalive_cache()
             self.control_start_keepalive(selected_profiles, source)
         except Exception as exc:
-            self.set_keepalive_buttons_enabled(True)
+            self.set_keepalive_controls_enabled(True)
             QMessageBox.warning(self, self.tr("running_title"), str(exc))
             return
         self.query_control_profiles(force=True)

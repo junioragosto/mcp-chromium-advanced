@@ -194,6 +194,7 @@ Configure these fields in the GUI or config file:
 Runtime note for callers:
 
 - `runtime_options.incognito=true` is supported on the managed daemon automation path when the caller wants to validate a flow without inheriting the normal regular-window session state. The current `browserIdentity` MCP tool surface does not yet expose `runtime_options` directly on `start_profile_session(...)`.
+- `runtime_options.resource_only=true` is supported on the managed daemon automation path when the caller only needs exclusive access to the governed profile files, such as `yt-dlp --cookies-from-browser ...`, and does not need a live browser session.
 
 Keepalive plugins can add new site logic without rebuilding the app. The GUI exposes a dedicated Keepalive Plugins tab for inspecting built-in plugin source and editing trusted local plugins. See `docs/KEEPALIVE_PLUGIN_GUIDE.md`.
 
@@ -342,6 +343,7 @@ Use this policy unless the user gives a different explicit instruction:
 - Use `selenium_uc` for stealth-sensitive sites, or when the user reports automation banners/detection problems and accepts lower throughput.
 - Use `playwright_cli` for lightweight compatibility paths, bounded diagnostics, or explicitly lower-overhead flows.
 - If the task specifically needs isolated validation without normal session carry-over, keep the selected profile the same and use the managed daemon automation path with `runtime_options.incognito=true`.
+- If the task only needs the profile's cookie/database files and not browser actions, use the managed daemon automation path with `runtime_options.resource_only=true`, consume the returned `user_data_dir` / `profile_dir`, then release the lease explicitly.
 
 Do not assume an engine switch affects an already running session. Close the current session and start a new one with the desired engine.
 

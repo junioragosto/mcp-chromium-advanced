@@ -15,6 +15,13 @@ build_validate/
 dist_stage/
 dist_validate/
 out/
+app/
+extensions/
+skill_templates/
+release-info.txt
+release_readme.md
+release_zh.md
+ChromiumProfileManager_stage/
 *.spec
 *.ps1
 !build_chromium_manage_gui_exe.ps1
@@ -47,8 +54,6 @@ tmp_*.py
 tmp_*.log
 tmp_*.out.log
 tmp_*.err.log
-
-demo/
+tests/
 .playwright-cli/
 .vscode/
-review/

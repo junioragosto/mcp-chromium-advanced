@@ -774,11 +774,12 @@ class WorkerManager:
         while not self._watchdog_stop.wait(WATCHDOG_INTERVAL_SECONDS):
             with self._lock:
                 self._cleanup_dead_process_locked()
-                self._reconcile_active_browser_session_ids_locked()
                 if self._process is None:
                     continue
                 if self.worker_policy == "always_on":
                     continue
+                if self._active_browser_session_ids:
+                    self._reconcile_active_browser_session_ids_locked()
                 if self._active_browser_session_ids:
                     continue
                 last_idle_basis_at = self._last_request_at or self._last_start_at or self._last_activity_at
@@ -821,6 +822,9 @@ def create_daemon_app(
     runtime_status_cache: Dict[str, object] = {}
     runtime_status_cache_at = 0.0
     runtime_status_cache_ttl_seconds = 2.0
+    control_profiles_cache: Dict[str, object] = {}
+    control_profiles_cache_at = 0.0
+    control_profiles_cache_ttl_seconds = 2.0
 
     def maybe_run_housekeeping(force: bool = False) -> None:
         nonlocal housekeeping_last_run_at
@@ -854,6 +858,42 @@ def create_daemon_app(
         )
         runtime_status_cache = {"cache_key": cache_key, "payload": dict(payload)}
         runtime_status_cache_at = now_ts
+        return payload
+
+    def invalidate_runtime_caches() -> None:
+        nonlocal runtime_status_cache, runtime_status_cache_at, control_profiles_cache, control_profiles_cache_at
+        runtime_status_cache = {}
+        runtime_status_cache_at = 0.0
+        control_profiles_cache = {}
+        control_profiles_cache_at = 0.0
+
+    def get_control_profiles_cached(*, include_runtime_snapshot: bool = False) -> Dict:
+        nonlocal control_profiles_cache, control_profiles_cache_at
+        now_ts = time.time()
+        cache_key = f"profiles:{int(bool(include_runtime_snapshot))}"
+        if (
+            control_profiles_cache
+            and control_profiles_cache.get("cache_key") == cache_key
+            and (now_ts - control_profiles_cache_at) <= control_profiles_cache_ttl_seconds
+        ):
+            cached_payload = control_profiles_cache.get("payload", {})
+            return dict(cached_payload) if isinstance(cached_payload, dict) else {}
+        include_heavy_profile_details = bool(include_runtime_snapshot)
+        payload = {
+            "ok": True,
+            "surface": "control",
+            "profiles": _call_with_optional_reconcile(
+                session_manager,
+                "list_profiles",
+                reconcile_occupancy=include_heavy_profile_details,
+                include_external_processes=include_heavy_profile_details,
+                include_mirror_validation=include_heavy_profile_details,
+            ),
+        }
+        if include_runtime_snapshot:
+            payload["server_status"] = get_runtime_status_cached()
+        control_profiles_cache = {"cache_key": cache_key, "payload": dict(payload)}
+        control_profiles_cache_at = now_ts
         return payload
     session_manager = SessionManager(config_path=config_path)
     manual_profile_manager = ManualProfileRuntimeManager(session_manager, config_path)
@@ -1101,21 +1141,8 @@ def create_daemon_app(
         started_at = time.perf_counter()
         try:
             maybe_run_housekeeping(force=False)
-            include_heavy_profile_details = bool(include_runtime_snapshot)
-            payload = {
-                "ok": True,
-                "surface": "control",
-                "profiles": _call_with_optional_reconcile(
-                    session_manager,
-                    "list_profiles",
-                    reconcile_occupancy=include_heavy_profile_details,
-                    include_external_processes=include_heavy_profile_details,
-                    include_mirror_validation=include_heavy_profile_details,
-                ),
-                "status_build_ms": int((time.perf_counter() - started_at) * 1000),
-            }
-            if bool(include_runtime_snapshot):
-                payload["server_status"] = get_runtime_status_cached()
+            payload = get_control_profiles_cached(include_runtime_snapshot=bool(include_runtime_snapshot))
+            payload["status_build_ms"] = int((time.perf_counter() - started_at) * 1000)
             return payload
         except Exception as exc:
             raise _as_http_error(exc) from exc
@@ -1199,6 +1226,7 @@ def create_daemon_app(
     async def control_launch_profile(profile_name: str) -> Dict:
         try:
             result = await asyncio.to_thread(manual_profile_manager.launch, unquote(profile_name))
+            invalidate_runtime_caches()
             return {"ok": True, "surface": "control", "result": result}
         except Exception as exc:
             raise _as_http_error(exc) from exc
@@ -1207,6 +1235,7 @@ def create_daemon_app(
     async def control_close_profile(profile_name: str) -> Dict:
         try:
             result = await asyncio.to_thread(manual_profile_manager.close, unquote(profile_name))
+            invalidate_runtime_caches()
             return {"ok": True, "surface": "control", "result": result}
         except Exception as exc:
             raise _as_http_error(exc) from exc
@@ -1228,6 +1257,7 @@ def create_daemon_app(
                 selected_profiles=[str(item).strip() for item in selected_profiles if str(item).strip()],
                 source=source,
             )
+            invalidate_runtime_caches()
             return {"ok": True, "surface": "control", "runtime": result}
         except Exception as exc:
             raise _as_http_error(exc) from exc
@@ -1235,7 +1265,9 @@ def create_daemon_app(
     @app.post("/_control/keepalive/stop")
     def control_keepalive_stop() -> Dict:
         try:
-            return {"ok": True, "surface": "control", "runtime": keepalive_manager.request_stop()}
+            payload = {"ok": True, "surface": "control", "runtime": keepalive_manager.request_stop()}
+            invalidate_runtime_caches()
+            return payload
         except Exception as exc:
             raise _as_http_error(exc) from exc
 
@@ -1498,7 +1530,9 @@ def create_daemon_app(
         try:
             decoded_profile_name = unquote(profile_name)
             await asyncio.to_thread(session_manager.get_profile_status, decoded_profile_name)
-            return await asyncio.to_thread(session_manager.reclaim_profile, decoded_profile_name, reason=reason)
+            result = await asyncio.to_thread(session_manager.reclaim_profile, decoded_profile_name, reason=reason)
+            invalidate_runtime_caches()
+            return result
         except Exception as exc:
             raise _as_http_error(exc) from exc
 
@@ -1507,6 +1541,7 @@ def create_daemon_app(
         try:
             maybe_run_housekeeping(force=True)
             results = session_manager.reap_expired_profile_occupancy()
+            invalidate_runtime_caches()
             return {"reclaimed": results, "count": len(results)}
         except Exception as exc:
             raise _as_http_error(exc) from exc
@@ -1560,6 +1595,7 @@ def create_daemon_app(
                 },
                 reclaimable=True,
             )
+            invalidate_runtime_caches()
             return result
         except Exception as exc:
             raise _as_http_error(exc) from exc
@@ -1577,7 +1613,7 @@ def create_daemon_app(
         heartbeat_timeout_seconds = int((body or {}).get("heartbeat_timeout_seconds", 180) or 180)
         details = dict((body or {}).get("details") or {})
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 session_manager.refresh_profile_lease,
                 profile_name,
                 scene_type="automation",
@@ -1589,6 +1625,8 @@ def create_daemon_app(
                 details=details,
                 reclaimable=True,
             )
+            invalidate_runtime_caches()
+            return result
         except Exception as exc:
             raise _as_http_error(exc) from exc
 
@@ -1604,13 +1642,16 @@ def create_daemon_app(
             if session_id:
                 result = await asyncio.to_thread(session_manager.close_session, session_id)
                 if result.get("closed"):
+                    invalidate_runtime_caches()
                     return result
             if profile_name:
-                return await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     session_manager.reclaim_profile,
                     profile_name,
                     reason="daemon_api_automation_release",
                 )
+                invalidate_runtime_caches()
+                return result
             raise HTTPException(status_code=400, detail="session_id or profile_name is required")
         except HTTPException:
             raise
@@ -1639,8 +1680,8 @@ def create_daemon_app(
         else:
             args = {}
         try:
-            browser_session = await asyncio.to_thread(
-                session_manager.resolve_session,
+            session_record = await asyncio.to_thread(
+                session_manager.get_session,
                 session_id,
                 scene_type="automation",
                 owner_label=owner_label,
@@ -1648,6 +1689,12 @@ def create_daemon_app(
             )
         except Exception as exc:
             raise _as_http_error(exc) from exc
+        if str(getattr(session_record, "runtime_mode", "") or "").strip().lower() == "resource_only":
+            raise HTTPException(
+                status_code=409,
+                detail="resource_only session does not support browser actions; use the returned user_data_dir/profile_dir and then release the lease",
+            )
+        browser_session = session_record.browser_session
 
         def _run_action() -> Dict:
             pipeline = ActionPipeline(browser_session)

@@ -14,12 +14,15 @@ from chromium_advanced.chromium_profile_lib import (
     build_runtime_config_overrides,
     clear_stale_lockfile,
     cleanup_keepalive_profile_processes,
+    derive_keepalive_site_presence,
     ensure_profile_bookmarks_initialized,
     find_running_chromium_processes,
     get_chromium_processes_for_profile,
     get_lock_path,
     get_mirror_lock_path,
+    get_profile_directory_path,
     get_profile_runtime_lock_path,
+    get_profile_user_data_root,
     is_process_alive,
     load_app_config,
     normalize_config,
@@ -55,6 +58,22 @@ def _safe_log(text: str) -> None:
         print(message, flush=True)
     except Exception:
         pass
+
+
+class ResourceLeaseSession:
+    def __init__(self, profile_name: str):
+        self.profile_name = str(profile_name or "")
+
+    def get_summary(self):
+        class _Summary:
+            current_url = ""
+            title = "resource lease"
+            alive = True
+
+        return _Summary()
+
+    def close(self):
+        return None
 
 
 @dataclass
@@ -861,6 +880,7 @@ class SessionManager:
                     "mirror_profile_available": bool(mirror_validation.get("profile_available")),
                 }
             )
+            payload.update(derive_keepalive_site_presence(item))
             results.append(payload)
         return results
 
@@ -1200,6 +1220,7 @@ class SessionManager:
         config = normalize_config(self._load_config())
         self.reconcile_stale_profile_occupancy()
         resolved_engine_name = resolve_browser_engine_name(config, engine_name)
+        resource_only = bool((runtime_options or {}).get("resource_only", False))
         preflight = self.can_start_session(profile_name, engine_name=resolved_engine_name)
         effective_scene_type = str(scene_type or "mcp").strip() or "mcp"
         effective_owner_label = str(owner_label or "").strip()
@@ -1221,10 +1242,15 @@ class SessionManager:
                         break
             if reuse_existing and reusable_session:
                 reusable_session.last_used_at = time.time()
+                user_data_dir = get_profile_user_data_root(config, reusable_session.profile_name)
+                profile_dir = get_profile_directory_path(config, reusable_session.profile_name)
                 return {
                     "session_id": reusable_session.session_id,
                     "profile_name": reusable_session.profile_name,
                     "engine_name": reusable_session.engine_name,
+                    "browser_family": "chromium",
+                    "user_data_dir": user_data_dir,
+                    "profile_dir": profile_dir,
                     "runtime_mode": reusable_session.runtime_mode,
                     "runtime_root": reusable_session.runtime_root,
                     "mirror_generated_at": reusable_session.mirror_generated_at,
@@ -1252,10 +1278,12 @@ class SessionManager:
 
         runtime_root = ""
         mirror_generated_at = ""
-        runtime_mode = str(preflight.get("start_mode", "live_root") or "live_root")
+        runtime_mode = "resource_only" if resource_only else str(preflight.get("start_mode", "live_root") or "live_root")
         cleanup_runtime_on_close = False
         profile_lock = SingleRunLock(get_profile_runtime_lock_path(config, profile_name))
         session: Optional[SessionRecord] = None
+        user_data_dir = get_profile_user_data_root(config, profile_name)
+        profile_dir = get_profile_directory_path(config, profile_name)
         try:
             if not profile_lock.try_acquire():
                 raise RuntimeError(f"profile runtime lock is already held: {profile_name}")
@@ -1263,7 +1291,7 @@ class SessionManager:
                 f"[{now_text()}] [SESSION] start_session begin: profile={profile_name} engine={resolved_engine_name} mode={runtime_mode}"
             )
             config_for_launch = copy.deepcopy(config)
-            if isinstance(runtime_options, dict) and runtime_options:
+            if isinstance(runtime_options, dict) and runtime_options and not resource_only:
                 config_for_launch = build_runtime_config_overrides(
                     config_for_launch,
                     headless=runtime_options.get("headless"),
@@ -1274,17 +1302,25 @@ class SessionManager:
                     extra_args=runtime_options.get("extra_args") if isinstance(runtime_options.get("extra_args"), list) else [],
                     engine_name=resolved_engine_name,
                 )
-            ensure_profile_bookmarks_initialized(config_for_launch, profile_name)
-            _safe_log(f"[{now_text()}] [SESSION] bookmarks ready: profile={profile_name}")
+            if not resource_only:
+                ensure_profile_bookmarks_initialized(config_for_launch, profile_name)
+                _safe_log(f"[{now_text()}] [SESSION] bookmarks ready: profile={profile_name}")
 
-            engine = create_browser_engine(resolved_engine_name)
-            _safe_log(
-                f"[{now_text()}] [SESSION] engine created: profile={profile_name} engine={resolved_engine_name}"
-            )
-            browser_session = ManagedBrowserSession(engine.create_session(config_for_launch, profile_name))
-            _safe_log(
-                f"[{now_text()}] [SESSION] browser session created: profile={profile_name} engine={resolved_engine_name} mode={runtime_mode}"
-            )
+                engine = create_browser_engine(resolved_engine_name)
+                _safe_log(
+                    f"[{now_text()}] [SESSION] engine created: profile={profile_name} engine={resolved_engine_name}"
+                )
+                browser_session = ManagedBrowserSession(engine.create_session(config_for_launch, profile_name))
+                _safe_log(
+                    f"[{now_text()}] [SESSION] browser session created: profile={profile_name} engine={resolved_engine_name} mode={runtime_mode}"
+                )
+                launch_pid = int(getattr(browser_session, "pid", 0) or 0)
+            else:
+                browser_session = ResourceLeaseSession(profile_name)
+                launch_pid = 0
+                _safe_log(
+                    f"[{now_text()}] [SESSION] resource lease created: profile={profile_name} engine={resolved_engine_name}"
+                )
             session_id = f"session-{uuid.uuid4().hex[:12]}"
             now = time.time()
             session = SessionRecord(
@@ -1303,7 +1339,7 @@ class SessionManager:
                 task_scope=task_scope,
                 reuse_scope=reuse_scope,
                 profile_lock=profile_lock,
-                launch_pid=int(getattr(browser_session, "pid", 0) or 0),
+                launch_pid=launch_pid,
             )
             with self._lock:
                 self._sessions_by_id[session_id] = session
@@ -1324,6 +1360,9 @@ class SessionManager:
                 "session_id": session_id,
                 "profile_name": profile_name,
                 "engine_name": resolved_engine_name,
+                "browser_family": "chromium",
+                "user_data_dir": user_data_dir,
+                "profile_dir": profile_dir,
                 "runtime_mode": runtime_mode,
                 "runtime_root": runtime_root,
                 "mirror_generated_at": mirror_generated_at,

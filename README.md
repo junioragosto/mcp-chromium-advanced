@@ -87,7 +87,7 @@ Current endpoint boundary:
   - `/_daemon/status`
   - `/_daemon/profiles`
   - `/_daemon/profiles/{profile_name}`
-  - `/_daemon/automation/*`
+- `/_daemon/automation/*`
 - GUI/control surface:
   - `/_control/ping`
   - `/_control/status`
@@ -148,6 +148,57 @@ Recommended practical policy:
   Preferred for stealth-sensitive sites or workflows where avoiding automation detection, challenge handling, or coordinate/gesture fallback matters more than raw throughput.
 - `playwright_cli`
   Lightweight integrated engine for lower-overhead flows and compatibility scenarios, but no longer the default high-capability path.
+
+## Profile login-state discovery
+
+Business callers can now use profile status endpoints not only to check whether a
+profile is idle, but also to see which keepalive-managed sites were last
+confirmed online for that profile.
+
+Relevant endpoints:
+
+- `list_profiles()`
+- `get_profile_status(profile_name)`
+- `GET /_daemon/profiles`
+- `GET /_daemon/profiles/{profile_name}`
+
+Returned profile payloads now include these derived arrays:
+
+- `online_sites`
+  Sites whose last keepalive result confirmed `signed_in=true`
+- `signed_out_sites`
+  Sites whose last keepalive result confirmed signed-out state
+- `attention_sites`
+  Sites that loaded but could not be confidently confirmed
+- `failed_sites`
+  Sites whose keepalive attempt failed
+- `skipped_sites`
+  Sites skipped during the last keepalive pass
+- `unknown_sites`
+  Fallback bucket for legacy or ambiguous results
+
+Example:
+
+```json
+{
+  "profile_name": "Profile 8",
+  "busy_state": "idle",
+  "active_session": false,
+  "online_sites": ["google", "youtube", "gmail"],
+  "signed_out_sites": ["github"],
+  "attention_sites": [],
+  "failed_sites": [],
+  "skipped_sites": [],
+  "unknown_sites": [],
+  "last_keepalive_status": "success"
+}
+```
+
+Recommended business-side selection rule:
+
+1. Query idle/available profiles.
+2. Filter by required site presence in `online_sites`.
+3. Acquire the chosen profile only after that filter passes.
 
 Important switching rule:
 
@@ -299,7 +350,8 @@ Production direction now implemented in the codebase:
 - stale non-MCP occupancies can be reaped automatically when the owning process disappears or a lease expires
 - the daemon exposes profile status, recent occupancy events, and explicit reclaim endpoints
 - the GUI shows profile occupancy state and provides manual reclaim for recovery workflows
-- managed automation session acquisition can override runtime launch behavior such as `headless`, `incognito`, `start_minimized`, `mute_audio`, `window_size`, and `extra_args` through a temporary runtime config layer
+- managed automation session acquisition can override runtime launch behavior such as `headless`, `incognito`, `start_minimized`, `mute_audio`, `window_size`, and `extra_args` through a temporary runtime config layer 
+- managed automation session acquisition also supports `runtime_options.resource_only=true` for callers that only need exclusive access to a governed profile's UserData files and do not need a live browser session
 
 The daemon now also exposes a managed automation HTTP flow for fixed scripts that should use the same governance model without speaking MCP directly:
 
@@ -313,6 +365,15 @@ Current daemon automation endpoints:
 - `POST /_daemon/automation/action`
 - `POST /_daemon/automation/heartbeat`
 - `POST /_daemon/automation/release`
+
+Daemon automation supports two acquisition styles:
+
+- normal browser session
+  starts a governed browser session and allows `/_daemon/automation/action`
+- resource lease
+  uses `runtime_options.resource_only=true`, does not start a browser window,
+  still acquires the same profile lock, and returns `user_data_dir` /
+  `profile_dir` for external tools such as `yt-dlp`
 
 Intended usage:
 
@@ -693,7 +754,7 @@ The release build entrypoints are now:
 - local cross-platform packager:
   `python scripts/build_release.py --artifact-name <name>`
 - icon asset generator:
-  `python scripts/generate_app_icons.py`
+  `python scripts/generate_app_icons.py --source <image-path>`
 - GitHub Actions workflow:
   `.github/workflows/build-release.yml`
 

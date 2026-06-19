@@ -13,7 +13,7 @@ per-profile UserData architecture:
 Target root configured in GUI:
 
 ```text
-D:\softs\chromium\UserData\UserDataSplited
+<tool_root>\UserData\UserDataSplited
 ```
 
 Target layout:
@@ -172,7 +172,7 @@ Target:
 
 GUI default:
 
-- `D:\softs\chromium\UserData\UserDataSplited`
+- `<tool_root>\UserData\UserDataSplited`
 
 ### Profile metadata
 

@@ -154,6 +154,8 @@ Runtime isolation note from WSL:
 
 - `runtime_options.incognito=true`
   is currently available on the managed daemon automation path when the caller wants the same governed profile selection but a fresh isolated browser session state for the target flow
+- `runtime_options.resource_only=true`
+  is currently available on the managed daemon automation path when the caller only needs exclusive access to the governed profile files and not a live browser session
 - do not assume the current `browserIdentity` MCP `start_profile_session(...)` tool directly accepts `runtime_options` from WSL; use daemon automation when incognito is required today
 
 How to switch engines explicitly:
@@ -201,7 +203,7 @@ On Linux/WSL, this is typically stored in:
 ~/.codex/config.toml
 ```
 
-Do not assume the Windows-side `C:\Users\Administrator\.codex\config.toml` is automatically reused by a WSL Codex environment. Treat them as separate client configurations unless you have explicitly unified them.
+Do not assume the Windows-side `%USERPROFILE%\.codex\config.toml` is automatically reused by a WSL Codex environment. Treat them as separate client configurations unless you have explicitly unified them.
 
 ## Connectivity Check
 
@@ -237,6 +239,7 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - Managed post-action context and `browser_diagnose_page` now include an `anti_bot` block. Treat `anti_bot.detected=true` with strong markers or structured signals as a likely real challenge page.
 - Do not treat every page that merely mentions Cloudflare as a challenge automatically. Normal search/detail pages can mention Cloudflare while still being valid result pages.
 - `runtime_options.incognito=true` on the managed daemon automation path remains subject to the same profile occupancy and session-governance rules; it is an isolation mode, not a concurrency bypass.
+- `runtime_options.resource_only=true` on the managed daemon automation path remains subject to the same profile occupancy and session-governance rules; it is a resource lease for external tools, not a way to bypass profile locking.
 - If the target page needs gesture/pattern unlock, drag, slider movement, continuous path input, or coordinate-level mouse fallback, do not assume the default engine is enough. Start the session with `engine="selenium_uc"` or `engine="patchright"` explicitly.
 - `browser_mouse_gesture_path(session_id, points=[...])` is the preferred gesture interface from WSL as well. Prefer `patchright` first for frontend-heavy pages and `selenium_uc` when stealth pressure is higher.
 - Use `get_session_capabilities(session_id)` when the task may need gesture actions. The capability surface distinguishes generic coordinate support from formal `gesture_actions` support.
