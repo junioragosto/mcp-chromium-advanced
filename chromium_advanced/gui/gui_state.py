@@ -58,6 +58,8 @@ def build_profile_runtime_state_text(
     control_scene_type = str(control_profile.get("occupancy_scene_type", "") or "").strip().lower()
     control_state = str(control_profile.get("occupancy_state", "") or "").strip().lower()
     control_owner_label = str(control_profile.get("occupancy_owner_label", "") or "").strip()
+    control_owner_source = str(control_profile.get("busy_owner_source", "") or "").strip().lower()
+    control_busy_owner_label = str(control_profile.get("busy_owner_label", "") or "").strip()
     control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
     occupancy = control_occupancy if control_occupancy else {}
     fallback_occupancy = occupancy_cache.get(profile_name, {}) if isinstance(occupancy_cache.get(profile_name, {}), dict) else {}
@@ -69,9 +71,10 @@ def build_profile_runtime_state_text(
             suffix = f" | {owner_label}" if owner_label else ""
             return f"{scene_type}:{state}{suffix}"
     if control_busy_state and control_busy_state not in {"idle", "released"}:
-        scene_type = control_scene_type or control_busy_state or "in_use"
+        scene_type = control_scene_type or control_owner_source or control_busy_state or "in_use"
         state = control_state or "active"
-        suffix = f" | {control_owner_label}" if control_owner_label else ""
+        owner_text = control_owner_label or control_busy_owner_label
+        suffix = f" | {owner_text}" if owner_text else ""
         return f"{scene_type}:{state}{suffix}"
     if fallback_occupancy:
         scene_type = str(fallback_occupancy.get("scene_type", "") or "").strip()
@@ -142,6 +145,8 @@ def build_profile_status_display(
     control_scene_type = str(control_profile.get("occupancy_scene_type", "") or "").strip().lower()
     control_state = str(control_profile.get("occupancy_state", "") or "").strip().lower()
     control_owner_label = str(control_profile.get("occupancy_owner_label", "") or "").strip()
+    control_owner_source = str(control_profile.get("busy_owner_source", "") or "").strip().lower()
+    control_busy_owner_label = str(control_profile.get("busy_owner_label", "") or "").strip()
     control_occupancy = control_profile.get("occupancy", {}) if isinstance(control_profile.get("occupancy", {}), dict) else {}
     occupancy = control_occupancy if control_occupancy else {}
     fallback_occupancy = occupancy_cache.get(profile_name, {}) if isinstance(occupancy_cache.get(profile_name, {}), dict) else {}
@@ -159,12 +164,12 @@ def build_profile_status_display(
             tooltip = f"{tooltip}\nsession={occupancy.get('session_id')}"
         return {"label": label, "tooltip": tooltip}
     if control_busy_state and control_busy_state not in {"idle", "released"}:
-        scene_type = control_scene_type or control_busy_state or "in_use"
+        scene_type = control_scene_type or control_owner_source or control_busy_state or "in_use"
         state = control_state or "active"
         label = format_scene_type_label(scene_type, tr)
         if state not in {"active", "running"}:
             label = f"{label}/{state}"
-        tooltip = control_owner_label or f"{scene_type} ({state})"
+        tooltip = control_owner_label or control_busy_owner_label or f"{scene_type} ({state})"
         return {"label": label, "tooltip": tooltip}
     if fallback_occupancy:
         scene_type = str(fallback_occupancy.get("scene_type", "") or "").strip() or "in_use"

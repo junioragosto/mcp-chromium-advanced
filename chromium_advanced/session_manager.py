@@ -688,6 +688,8 @@ class SessionManager:
             "created_at": active_summary.get("created_at", 0),
             "last_used_at": active_summary.get("last_used_at", 0),
             "busy_owner_profile_name": "",
+            "busy_owner_source": str(runtime_state.get("busy_owner_source", "") or ""),
+            "busy_owner_label": str(runtime_state.get("busy_owner_label", "") or ""),
             "busy_state": str(runtime_state.get("busy_state", "idle") or "idle"),
             "occupancy": dict(runtime_state.get("occupancy", {}) if isinstance(runtime_state.get("occupancy", {}), dict) else {}),
             "occupancy_state": str(runtime_state.get("occupancy_state", "") or ""),
@@ -711,8 +713,11 @@ class SessionManager:
         occupancy_state = str(normalized_occupancy.get("state", "") or "").strip()
         occupancy_owner_label = str(normalized_occupancy.get("owner_label", "") or "").strip()
         if sessions:
+            primary_session = sessions[0]
             return {
                 "busy_state": "active_sessions",
+                "busy_owner_source": str(primary_session.scene_type or "active_sessions"),
+                "busy_owner_label": str(primary_session.owner_label or ""),
                 "occupancy": normalized_occupancy,
                 "occupancy_state": occupancy_state,
                 "occupancy_scene_type": occupancy_scene_type,
@@ -723,6 +728,8 @@ class SessionManager:
         if normalized_occupancy:
             return {
                 "busy_state": occupancy_scene_type or occupancy_state or "occupied",
+                "busy_owner_source": occupancy_scene_type or occupancy_state or "occupied",
+                "busy_owner_label": occupancy_owner_label,
                 "occupancy": normalized_occupancy,
                 "occupancy_state": occupancy_state,
                 "occupancy_scene_type": occupancy_scene_type,
@@ -733,6 +740,8 @@ class SessionManager:
         if profile_lock_active:
             return {
                 "busy_state": "profile_lock_active",
+                "busy_owner_source": "profile_lock_active",
+                "busy_owner_label": "",
                 "occupancy": {},
                 "occupancy_state": "",
                 "occupancy_scene_type": "",
@@ -743,6 +752,8 @@ class SessionManager:
         if profile_processes:
             return {
                 "busy_state": "external_chromium_running",
+                "busy_owner_source": "manual",
+                "busy_owner_label": "",
                 "occupancy": {},
                 "occupancy_state": "",
                 "occupancy_scene_type": "",
@@ -752,6 +763,8 @@ class SessionManager:
             }
         return {
             "busy_state": "idle",
+            "busy_owner_source": "",
+            "busy_owner_label": "",
             "occupancy": {},
             "occupancy_state": "",
             "occupancy_scene_type": "",
