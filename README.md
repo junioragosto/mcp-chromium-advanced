@@ -310,7 +310,17 @@ That target-local shape is the preferred generic debugging surface when the task
 Managed verification results are also more uniform now:
 
 - `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
+- `browser_verify_target_value(...)` and `browser_verify_target_visible(...)` also normalize `verified`, `matched`, `target`, and `by`
 - `browser_describe_target(...)` and `browser_list_candidates(...)` now expose a lightweight `target_summary` for easier upstream reasoning
+
+On the default `patchright` path, successful high-frequency actions now also try to leave behind a richer post-action reasoning surface instead of only a minimal page pointer. In practice this means the returned `post_action_context` is more likely to already contain:
+
+- a bounded `snapshot`
+- derived `structured_page`
+- lightweight `interaction_hints`
+- recent action/session-health context
+
+The goal is to reduce how often callers need to immediately chain an extra `browser_snapshot(...)` or `browser_diagnose_page(...)` just to continue a normal multi-step flow.
 
 On the default `patchright` path, candidate ordering is also now more intentionally semantic instead of only DOM-order-ish. Popup items, filter/search controls, and likely primary actions receive stronger ranking signals so complex frontend follow-up steps are more likely to hit on the first pass.
 

@@ -753,6 +753,31 @@ class ManagedSessionDiagnosticsMixin:
             if bool(refreshed_modal_state.get("visible", False)):
                 modal_state = refreshed_modal_state
         active_tab_id = str(context.get("active_tab_id", "") or normalized_page.get("tab_id", "") or str(tab_id or "").strip())
+        structured_page = context.get("structured_page", {})
+        if not isinstance(structured_page, dict):
+            structured_page = {}
+        if not structured_page:
+            snapshot_text = ""
+            if isinstance(snapshot, dict):
+                snapshot_text = str(snapshot.get("snapshot", "") or "")
+            page_text = str(context.get("page_text_preview", "") or "")
+            if not page_text:
+                try:
+                    page_text_payload = (
+                        self._raw.get_page_text(tab_id=str(tab_id or "").strip())
+                        if str(tab_id or "").strip()
+                        else self._raw.get_page_text()
+                    )
+                    if isinstance(page_text_payload, dict):
+                        page_text = str(page_text_payload.get("text", "") or "")
+                except Exception:
+                    page_text = ""
+            structured_page = self._extract_structured_page_data(page_text, snapshot_text=snapshot_text)
+        interaction_hints = context.get("interaction_hints", {})
+        if not isinstance(interaction_hints, dict):
+            interaction_hints = {}
+        if not interaction_hints:
+            interaction_hints = self._build_interaction_hints(structured_page, active_element, modal_state)
         return {
             "action_name": str(context.get("action_name", "") or action_name or "inspect"),
             "page": normalized_page,
@@ -769,12 +794,51 @@ class ManagedSessionDiagnosticsMixin:
             if isinstance(context.get("anti_bot", None), dict)
             else self._build_anti_bot_detection(normalized_page),
             "snapshot": snapshot or {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
+            "structured_page": structured_page,
+            "interaction_hints": interaction_hints,
             "recent_actions": context.get("recent_actions", self._recent_actions_payload(limit=8))
             if isinstance(context.get("recent_actions", None), list)
             else self._recent_actions_payload(limit=8),
             "session_health": context.get("session_health", self._build_session_health_snapshot(page_payload=normalized_page))
             if isinstance(context.get("session_health", None), dict)
             else self._build_session_health_snapshot(page_payload=normalized_page),
+        }
+
+    def _build_interaction_hints(self, structured_page: Dict[str, Any], active_element: Dict[str, Any], modal_state: Dict[str, Any]) -> Dict[str, Any]:
+        primary_actions = structured_page.get("primary_actions", []) if isinstance(structured_page, dict) else []
+        search_controls = structured_page.get("search_controls", []) if isinstance(structured_page, dict) else []
+        filter_controls = structured_page.get("filter_controls", []) if isinstance(structured_page, dict) else []
+        navigation_controls = structured_page.get("navigation_controls", []) if isinstance(structured_page, dict) else []
+        active_label = str(
+            active_element.get("accessible_name", "")
+            or active_element.get("aria_label", "")
+            or active_element.get("text", "")
+            or active_element.get("value", "")
+            or ""
+        ).strip()
+        return {
+            "has_modal": bool(modal_state.get("visible", False)),
+            "primary_action_labels": [
+                str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+                for item in primary_actions[:6]
+                if isinstance(item, dict) and str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+            ],
+            "search_control_labels": [
+                str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+                for item in search_controls[:4]
+                if isinstance(item, dict) and str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+            ],
+            "filter_control_labels": [
+                str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+                for item in filter_controls[:4]
+                if isinstance(item, dict) and str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+            ],
+            "navigation_control_labels": [
+                str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+                for item in navigation_controls[:4]
+                if isinstance(item, dict) and str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+            ],
+            "active_element_label": active_label,
         }
 
     def _build_post_action_context(self, action_name: str, tab_id: str = "") -> Dict[str, Any]:
@@ -829,15 +893,46 @@ class ManagedSessionDiagnosticsMixin:
         except Exception:
             tabs = []
         active_tab_id = str(page.get("tab_id", "") or normalized_tab_id or "")
+        page_text = ""
+        snapshot_text = ""
+        try:
+            text_payload = (
+                self._raw.get_page_text(tab_id=normalized_tab_id)
+                if normalized_tab_id
+                else self._raw.get_page_text()
+            )
+            if isinstance(text_payload, dict):
+                page_text = str(text_payload.get("text", "") or "")
+        except Exception:
+            page_text = ""
+        snapshot_payload = {"unsupported": True, "message": "post-action context minimized for fast path."}
+        if self._capabilities.engine_name == "patchright" and callable(getattr(self._raw, "get_interaction_context", None)):
+            try:
+                raw_context_payload = (
+                    self._raw.get_interaction_context(tab_id=normalized_tab_id)
+                    if normalized_tab_id
+                    else self._raw.get_interaction_context()
+                )
+                raw_context = raw_context_payload.get("interaction_context", raw_context_payload) if isinstance(raw_context_payload, dict) else {}
+                snapshot_candidate = raw_context.get("snapshot", {}) if isinstance(raw_context, dict) else {}
+                if isinstance(snapshot_candidate, dict):
+                    snapshot_payload = snapshot_candidate
+                    snapshot_text = str(snapshot_candidate.get("snapshot", "") or "")
+            except Exception:
+                snapshot_payload = {"unsupported": True, "message": "post-action context minimized for fast path."}
+        structured_page = self._extract_structured_page_data(page_text, snapshot_text=snapshot_text)
+        modal_state = {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []}
         return {
             "action_name": str(action_name or "inspect"),
             "page": page,
             "tabs": tabs,
             "active_tab_id": active_tab_id,
             "active_element": {},
-            "modal_state": {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []},
+            "modal_state": modal_state,
             "anti_bot": self._build_anti_bot_detection(page),
-            "snapshot": {"unsupported": True, "message": "post-action context minimized for fast path."},
+            "snapshot": snapshot_payload,
+            "structured_page": structured_page,
+            "interaction_hints": self._build_interaction_hints(structured_page, {}, modal_state),
             "recent_actions": self._recent_actions_payload(limit=4),
             "session_health": self._build_session_health_snapshot(page_payload=page),
         }

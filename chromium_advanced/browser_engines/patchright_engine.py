@@ -688,6 +688,7 @@ class PatchrightBrowserSession(BrowserSession):
 
     def _post_action_context(self, action_name: str, page=None) -> Dict:
         current_page = page or self._resolve_page()
+        snapshot_payload = self._safe_page_snapshot(page=current_page, depth=4, max_chars=5000, update_cache=False)
         context = {
             "action_name": action_name,
             "page": self.get_current_url(tab_id=self._get_tab_id(current_page)),
@@ -695,7 +696,7 @@ class PatchrightBrowserSession(BrowserSession):
             "active_tab_id": self._get_tab_id(current_page),
             "active_element": {},
             "modal_state": self._safe_modal_state(page=current_page),
-            "snapshot": self._safe_page_snapshot(page=current_page, depth=4, max_chars=5000, update_cache=False),
+            "snapshot": snapshot_payload,
         }
         try:
             context["active_element"] = self._compact_element_details(
@@ -703,6 +704,12 @@ class PatchrightBrowserSession(BrowserSession):
             )
         except Exception as exc:
             context["active_element"] = {"error": str(exc)}
+        try:
+            page_text_payload = self.get_page_text(tab_id=self._get_tab_id(current_page))
+            context["page_text_preview"] = str(page_text_payload.get("text", "") or "").strip()[:1200]
+        except Exception as exc:
+            context["page_text_preview"] = ""
+            context["page_text_error"] = str(exc)
         return context
 
     def _action_error_payload(
@@ -1700,7 +1707,15 @@ class PatchrightBrowserSession(BrowserSession):
                     visible = False
             if not count or not visible:
                 raise ValueError(f'Text not visible: "{text}"')
-            return {**self.get_current_url(tab_id=self._get_tab_id(page)), "verified": True, "text": str(text), "count": count}
+            return {
+                **self.get_current_url(tab_id=self._get_tab_id(page)),
+                "verified": True,
+                "matched": True,
+                "text": str(text),
+                "expected_text": str(text),
+                "count": count,
+                "post_action_context": self._post_action_context("verify_text", page=page),
+            }
         except Exception as exc:
             return self._action_error_payload("verify_text", exc, text_filter=str(text))
 
@@ -1725,9 +1740,13 @@ class PatchrightBrowserSession(BrowserSession):
             return {
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "verified": True,
+                "matched": True,
                 "count": len(matched),
                 "dialog": matched[0],
                 "dialogs": matched,
+                "expected_accessible_name": str(accessible_name or ""),
+                "expected_text": str(text or ""),
+                "post_action_context": self._post_action_context("verify_dialog", page=page),
             }
         except Exception as exc:
             return self._action_error_payload(
@@ -1749,15 +1768,19 @@ class PatchrightBrowserSession(BrowserSession):
                 return {
                     **self.get_current_url(tab_id=self._get_tab_id(page)),
                     "verified": True,
+                    "matched": True,
                     "target": str(target),
                     "element": expected,
+                    "post_action_context": self._post_action_context("verify_active_element", page=page),
                 }
             if not active:
                 raise ValueError("No active element found.")
             return {
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "verified": True,
+                "matched": True,
                 "element": self._compact_element_details(active),
+                "post_action_context": self._post_action_context("verify_active_element", page=page),
             }
         except Exception as exc:
             return self._action_error_payload(
@@ -1780,9 +1803,12 @@ class PatchrightBrowserSession(BrowserSession):
             return {
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "verified": True,
+                "matched": True,
                 "target": str(target or "").strip(),
                 "expected_value": str(expected_value),
                 "actual_value": actual_value,
+                "by": str(by or "css"),
+                "post_action_context": self._post_action_context("verify_target_value", page=page),
             }
         except Exception as exc:
             return self._action_error_payload(
@@ -1805,10 +1831,13 @@ class PatchrightBrowserSession(BrowserSession):
             return {
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "verified": True,
+                "matched": True,
                 "target": str(target or "").strip(),
                 "visible": True,
                 "tag_name": details.get("tag_name", ""),
                 "text": details.get("text", ""),
+                "by": str(by or "css"),
+                "post_action_context": self._post_action_context("verify_target_visible", page=page),
             }
         except Exception as exc:
             return self._action_error_payload(
@@ -1932,9 +1961,13 @@ class PatchrightBrowserSession(BrowserSession):
             resolved = {
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "verified": True,
+                "matched": True,
                 "role": str(role),
                 "accessible_name": str(accessible_name),
+                "expected_role": str(role),
+                "expected_accessible_name": str(accessible_name),
                 "count": count,
+                "post_action_context": self._post_action_context("verify_element", page=page),
             }
             try:
                 resolved["box"] = _safe_bounding_box(first)

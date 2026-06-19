@@ -1607,6 +1607,9 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         if isinstance(result, dict) and result.get("found"):
             result.setdefault("condition", str(condition or "visible"))
             result.setdefault("by", str(by or "css"))
+            result.setdefault("matched", True)
+            result.setdefault("verified", True)
+            result.setdefault("selector", str(selector or "").strip())
         return result
 
     def wait_for_text(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
@@ -1617,6 +1620,9 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         )
         if isinstance(result, dict) and result.get("found"):
             result.setdefault("match_type", "text_visible")
+            result.setdefault("matched", True)
+            result.setdefault("verified", True)
+            result.setdefault("expected_text", str(text or ""))
         return result
 
     def wait_for_text_gone(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
@@ -1627,6 +1633,9 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         )
         if isinstance(result, dict) and result.get("gone"):
             result.setdefault("match_type", "text_gone")
+            result.setdefault("matched", True)
+            result.setdefault("verified", True)
+            result.setdefault("expected_text", str(text or ""))
         return result
 
     def wait_for_text_change(self, text: str = "", previous_text: str = "", timeout_seconds: int = 20, tab_id: str = "") -> Dict:
@@ -1778,6 +1787,9 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         )
         if isinstance(result, dict) and result.get("selected"):
             result.setdefault("by", str(by or "css"))
+            result.setdefault("selector", str(selector or "").strip())
+            result.setdefault("requested_values", normalized_values)
+            result.setdefault("matched", True)
         return result
 
     def handle_dialog(self, accept: bool = True, prompt_text: str = "", tab_id: str = "") -> Dict:
@@ -2124,18 +2136,33 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         )
 
     def verify_target_value(self, target: str, expected_value: str, element: str = "", by: str = "css") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "verify_target_value",
             lambda: self._raw.verify_target_value(target=target, expected_value=expected_value, element=element, by=by),
             fallback=lambda: self._fallback_verify_target_value(target=target, expected_value=expected_value, element=element, by=by),
         )
+        if isinstance(result, dict):
+            matched = bool(result.get("verified", result.get("matched", False)))
+            result.setdefault("verified", matched)
+            result.setdefault("matched", matched)
+            result.setdefault("expected_value", str(expected_value or ""))
+            result.setdefault("target", str(target or "").strip())
+            result.setdefault("by", str(by or "css"))
+        return result
 
     def verify_target_visible(self, target: str, element: str = "", by: str = "css") -> Dict:
-        return self._dispatch(
+        result = self._dispatch(
             "verify_target_visible",
             lambda: self._raw.verify_target_visible(target=target, element=element, by=by),
             fallback=lambda: self._fallback_verify_target_visible(target=target, element=element, by=by),
         )
+        if isinstance(result, dict):
+            matched = bool(result.get("verified", result.get("visible", False)))
+            result.setdefault("verified", matched)
+            result.setdefault("matched", matched)
+            result.setdefault("target", str(target or "").strip())
+            result.setdefault("by", str(by or "css"))
+        return result
 
     def describe_target(self, target: str, element: str = "", by: str = "css", include_box: bool = True) -> Dict:
         result = self._dispatch(

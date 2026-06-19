@@ -208,7 +208,17 @@ worker 运行策略现在也是显式可配的：
 当前受管验证结果也更统一了：
 
 - `browser_verify_text(...)`、`browser_verify_dialog(...)`、`browser_verify_element(...)` 会统一补 `verified`、`matched`
+- `browser_verify_target_value(...)`、`browser_verify_target_visible(...)` 也会统一补 `verified`、`matched`、`target`、`by`
 - `browser_describe_target(...)`、`browser_list_candidates(...)` 会补一个轻量的 `target_summary`
+
+在默认 `patchright` 主路径上，高频成功动作现在也会尽量留下更高信号的 `post_action_context`，而不只是一个最小页面指针。常见情况下，返回结果里会更容易直接带上：
+
+- 有界 `snapshot`
+- 推导后的 `structured_page`
+- 轻量 `interaction_hints`
+- 最近动作与会话健康上下文
+
+这样做的目的，是减少调用方在普通多步流程里，刚完成一步又立刻补一个 `browser_snapshot(...)` 或 `browser_diagnose_page(...)` 才能继续的情况。
 
 在默认 `patchright` 主路径上，候选排序现在也更偏语义优先，而不只是接近 DOM 顺序。弹层项、搜索/筛选控件、可能的主动作控件会获得更强的排序信号，复杂前端里的后续一步命中率会更高。
 
