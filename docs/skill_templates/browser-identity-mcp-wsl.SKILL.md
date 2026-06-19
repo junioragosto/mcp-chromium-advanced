@@ -150,10 +150,11 @@ Managed verification surfaces are also more uniform from WSL:
 
 On the default `patchright` path, candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries from WSL as well.
 
-Runtime isolation option from WSL:
+Runtime isolation note from WSL:
 
 - `runtime_options.incognito=true`
-  use this when the caller wants the same governed profile selection but a fresh isolated browser session state for the target flow
+  is currently available on the managed daemon automation path when the caller wants the same governed profile selection but a fresh isolated browser session state for the target flow
+- do not assume the current `browserIdentity` MCP `start_profile_session(...)` tool directly accepts `runtime_options` from WSL; use daemon automation when incognito is required today
 
 How to switch engines explicitly:
 
@@ -235,7 +236,7 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - `playwright_cli` now has safer generic script/text fallback behavior, but difficult dynamic frontends can still produce weaker structured extraction than `patchright`. Prefer engine switching over site-specific assumptions.
 - Managed post-action context and `browser_diagnose_page` now include an `anti_bot` block. Treat `anti_bot.detected=true` with strong markers or structured signals as a likely real challenge page.
 - Do not treat every page that merely mentions Cloudflare as a challenge automatically. Normal search/detail pages can mention Cloudflare while still being valid result pages.
-- `runtime_options.incognito=true` remains subject to the same profile occupancy and session-governance rules; it is an isolation mode, not a concurrency bypass.
+- `runtime_options.incognito=true` on the managed daemon automation path remains subject to the same profile occupancy and session-governance rules; it is an isolation mode, not a concurrency bypass.
 - If the target page needs gesture/pattern unlock, drag, slider movement, continuous path input, or coordinate-level mouse fallback, do not assume the default engine is enough. Start the session with `engine="selenium_uc"` or `engine="patchright"` explicitly.
 - `browser_mouse_gesture_path(session_id, points=[...])` is the preferred gesture interface from WSL as well. Prefer `patchright` first for frontend-heavy pages and `selenium_uc` when stealth pressure is higher.
 - Use `get_session_capabilities(session_id)` when the task may need gesture actions. The capability surface distinguishes generic coordinate support from formal `gesture_actions` support.

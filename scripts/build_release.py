@@ -34,6 +34,10 @@ FINGERPRINT_DOWNLOAD_HREF_PATTERN = re.compile(
     r'href="(?P<href>/omegaee/my-fingerprint/releases/download/[^"]+/my-fingerprint-chrome-[^"]+\.zip)"',
     re.IGNORECASE,
 )
+LOCAL_FINGERPRINT_FALLBACKS = [
+    Path(r"D:\softs\chromium\ChromiumProfileManager\extensions"),
+    PROJECT_ROOT / "extensions",
+]
 
 
 def run(command, *, cwd=None):
@@ -130,41 +134,77 @@ def resolve_latest_fingerprint_release() -> dict:
         return fetch_latest_fingerprint_release_from_html()
 
 
+def load_local_fingerprint_fallback() -> dict:
+    for base_dir in LOCAL_FINGERPRINT_FALLBACKS:
+        if not base_dir.exists():
+            continue
+        zip_path = base_dir / "fingerprint-extension.zip"
+        metadata_path = base_dir / "fingerprint-extension.release.json"
+        if not zip_path.exists():
+            continue
+        metadata = {}
+        if metadata_path.exists():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except Exception:
+                metadata = {}
+        return {
+            "zip_path": zip_path,
+            "metadata": {
+                "source_repo": str(metadata.get("source_repo", "") or "omegaee/my-fingerprint"),
+                "tag_name": str(metadata.get("tag_name", "") or "local-cache"),
+                "release_name": str(metadata.get("release_name", "") or "local-cache"),
+                "release_url": str(metadata.get("release_url", "") or ""),
+                "asset_name": str(metadata.get("asset_name", "") or zip_path.name),
+                "asset_download_url": str(metadata.get("asset_download_url", "") or ""),
+                "source_mode": "local-cache",
+                "source_path": str(zip_path),
+            },
+        }
+    raise RuntimeError("no local fingerprint extension fallback asset is available")
+
+
 def download_latest_fingerprint_zip(target_dir: Path) -> dict:
-    release = resolve_latest_fingerprint_release()
-    assets = release.get("assets", [])
-    asset = None
-    for candidate in assets:
-        name = str(candidate.get("name", "")).strip()
-        if FINGERPRINT_ASSET_PATTERN.match(name):
-            asset = candidate
-            break
-    if asset is None:
-        raise RuntimeError("latest my-fingerprint release does not contain a chrome zip asset")
-
-    download_url = str(asset.get("browser_download_url", "")).strip()
-    asset_name = str(asset.get("name", "")).strip() or "fingerprint-extension.zip"
-    if not download_url:
-        raise RuntimeError("latest my-fingerprint asset is missing browser_download_url")
-
     target_dir.mkdir(parents=True, exist_ok=True)
     zip_path = target_dir / "fingerprint-extension.zip"
     metadata_path = target_dir / "fingerprint-extension.release.json"
+    try:
+        release = resolve_latest_fingerprint_release()
+        assets = release.get("assets", [])
+        asset = None
+        for candidate in assets:
+            name = str(candidate.get("name", "")).strip()
+            if FINGERPRINT_ASSET_PATTERN.match(name):
+                asset = candidate
+                break
+        if asset is None:
+            raise RuntimeError("latest my-fingerprint release does not contain a chrome zip asset")
 
-    with urllib.request.urlopen(
-        urllib.request.Request(download_url, headers=github_headers()),
-        timeout=120,
-    ) as response:
-        zip_path.write_bytes(response.read())
+        download_url = str(asset.get("browser_download_url", "")).strip()
+        asset_name = str(asset.get("name", "")).strip() or "fingerprint-extension.zip"
+        if not download_url:
+            raise RuntimeError("latest my-fingerprint asset is missing browser_download_url")
 
-    metadata = {
-        "source_repo": "omegaee/my-fingerprint",
-        "tag_name": release.get("tag_name", ""),
-        "release_name": release.get("name", ""),
-        "release_url": release.get("html_url", ""),
-        "asset_name": asset_name,
-        "asset_download_url": download_url,
-    }
+        with urllib.request.urlopen(
+            urllib.request.Request(download_url, headers=github_headers()),
+            timeout=120,
+        ) as response:
+            zip_path.write_bytes(response.read())
+
+        metadata = {
+            "source_repo": "omegaee/my-fingerprint",
+            "tag_name": release.get("tag_name", ""),
+            "release_name": release.get("name", ""),
+            "release_url": release.get("html_url", ""),
+            "asset_name": asset_name,
+            "asset_download_url": download_url,
+            "source_mode": "network",
+        }
+    except Exception:
+        fallback = load_local_fingerprint_fallback()
+        shutil.copy2(fallback["zip_path"], zip_path)
+        metadata = dict(fallback["metadata"])
+
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return metadata
 

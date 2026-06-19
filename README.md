@@ -646,7 +646,7 @@ The worker also exposes structured debugging helpers that are meant to replace m
 - Sanitizes the upstream `playwright-cli` Chromium launch args so `AutomationControlled` is not injected through `--disable-blink-features`
 - Honors `mcp.start_minimized=true` by default, so visible MCP browser sessions start minimized in the taskbar instead of stealing desktop focus while still allowing the user to click in and take over when needed
 - Keeps `mcp.headless=false` by default; headless mode is only for explicit user-requested regression or background validation, not the normal MCP browsing path
-- Supports `runtime_options.incognito=true` for isolated validation when the caller wants the same governed profile path but does not want to inherit the normal regular-window session state
+- Supports isolated validation with `runtime_options.incognito=true` on the managed daemon automation path. The current `browserIdentity` MCP session tools do not yet expose `runtime_options` as a direct session-start parameter.
 - On session close, the runtime attempts to terminate owned `playwright-cli` daemon and Chromium processes and then cleans isolated runtime directories; startup also prunes stale empty or old `chromium-advanced-playwright-cli-*` temp directories that are not referenced by live processes
 - Shared-root runtime is now treated as a migration-only legacy layout. Normal operation should use `paths.user_data_profiles_root`
 - Keepalive is not routed through `playwright_cli` in this stage
@@ -729,7 +729,7 @@ The skill guidance should explicitly tell agents that:
 - `patchright` is the default engine for ordinary MCP work when the task values stronger structured extraction and richer diagnostics
 - `patchright` should be selected when structured extraction or deep frontend diagnostics matter more than throughput
 - `selenium_uc` should be selected when stealth, anti-bot tolerance, recurring challenge pages, gesture flows, or coordinate fallback matter more than speed
-- `runtime_options.incognito=true` is available when a flow should be validated without inheriting the current regular-window session state
+- If a flow must be validated without inheriting the current regular-window session state, use the managed daemon automation path with `runtime_options.incognito=true`. Do not assume the current `browserIdentity` MCP tool surface can pass that parameter directly at session start.
 
 ## Keepalive Plugins
 

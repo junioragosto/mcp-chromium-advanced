@@ -290,10 +290,11 @@ Managed verification surfaces are also more uniform now:
 
 On the default `patchright` path, candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries.
 
-Runtime isolation option:
+Runtime isolation note:
 
 - `runtime_options.incognito=true`
-  use this when the caller wants to keep the same governed profile selection but validate a flow without inheriting the normal regular-window site session state
+  is currently available on the managed daemon automation path when the caller wants to keep the same governed profile selection but validate a flow without inheriting the normal regular-window site session state
+- do not assume the current `browserIdentity` MCP `start_profile_session(...)` tool directly accepts `runtime_options`; use daemon automation when incognito is required today
 
 How to switch engines explicitly:
 
@@ -351,7 +352,7 @@ Important engine-switching boundary:
 - managed post-action context and `browser_diagnose_page` now include an `anti_bot` block. Treat `anti_bot.detected=true` with strong markers or structured signals as a likely real challenge page; do not treat every page mentioning Cloudflare as a challenge automatically.
 - Visible MCP browser sessions normally honor `mcp.start_minimized=true`, which should leave the browser in the taskbar instead of stealing foreground focus; users can click it open when they want to watch or take over.
 - Do not enable `mcp.headless=true` just to reduce desktop interference. Headless mode should only be used when the user explicitly asks for headless/regression/background validation.
-- `runtime_options.incognito=true` is supported when the task needs isolated validation without normal session carry-over, but it still uses the same profile governance and occupancy rules.
+- `runtime_options.incognito=true` is supported on the managed daemon automation path when the task needs isolated validation without normal session carry-over, and it still uses the same profile governance and occupancy rules.
 - When a `playwright_cli` session closes, the manager should release the named session and clean owned daemon/browser processes; startup also prunes stale temp dirs that are not referenced by live processes. If a browser window remains, treat it as an orphan-process bug and inspect the runtime root/session name.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.
