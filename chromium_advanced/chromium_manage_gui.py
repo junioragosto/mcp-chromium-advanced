@@ -1100,10 +1100,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.pending_ui_refresh_flags = {}
         if not flags:
             return
-        context: Dict[str, object] = {}
+        context: Dict[str, object] = dict(self.current_ui_refresh_context) if isinstance(self.current_ui_refresh_context, dict) else {}
         if flags.get("table") or flags.get("selected_status") or flags.get("bottom_stats") or flags.get("occupancy_tab"):
-            context["control_profiles_payload"] = self.query_control_profiles(force=False)
-            context["keepalive_runtime"] = self.query_control_keepalive_runtime()
+            context.setdefault("control_profiles_payload", self.query_control_profiles(force=False))
+            context.setdefault("keepalive_runtime", self.query_control_keepalive_runtime())
         self.current_ui_refresh_context = context
         if flags.get("mcp_status"):
             self.refresh_mcp_status_ui()
@@ -1361,7 +1361,11 @@ class ChromiumManagerWindow(QMainWindow):
             new_event_seen = True
         if new_event_seen:
             self.invalidate_control_profiles_cache()
-            self.query_control_profiles(force=True)
+            refreshed_profiles_payload = self.query_control_profiles(force=True)
+            self.current_ui_refresh_context = {
+                "control_profiles_payload": refreshed_profiles_payload,
+                "keepalive_runtime": self.query_control_keepalive_runtime(),
+            }
             self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
             return
         if emitted and hasattr(self, "tabs") and self.tabs.currentWidget() is self.occupancy_tab:
@@ -1373,7 +1377,7 @@ class ChromiumManagerWindow(QMainWindow):
         # This view is refreshed frequently through the generic UI refresh path.
         # Prefer the cached control snapshot unless the caller explicitly forced
         # a control refresh earlier in the same cycle.
-        profiles_payload = self.query_control_profiles(force=False)
+        profiles_payload = self.current_ui_refresh_context.get("control_profiles_payload", self.query_control_profiles(force=False))
         entries = {}
         profiles = profiles_payload.get("profiles", []) if isinstance(profiles_payload.get("profiles", []), list) else []
         for item in profiles:
@@ -1459,10 +1463,19 @@ class ChromiumManagerWindow(QMainWindow):
         return indexes[0].row()
 
     def get_selected_profile(self) -> Optional[Dict]:
-        row = self.get_selected_row()
-        if row < 0 or row >= len(self.config.get("profiles", [])):
+        profile_name = str(self.selected_profile_name or "").strip()
+        if not profile_name:
+            row = self.get_selected_row()
+            if row < 0:
+                return None
+            item = self.table.item(row, 0) if hasattr(self, "table") else None
+            profile_name = str(item.text() if item is not None else "").strip()
+        if not profile_name:
             return None
-        return self.config["profiles"][row]
+        for profile in self.config.get("profiles", []):
+            if str(profile.get("profile_name", "") or "").strip() == profile_name:
+                return profile
+        return None
 
     def on_table_double_clicked(self, row: int, column: int):
         if column in (0, 1):
