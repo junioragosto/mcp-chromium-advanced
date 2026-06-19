@@ -291,9 +291,11 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_consecutive_failures = 0
         self.control_profiles_cache: Dict = {}
         self.control_profiles_last_query_at = 0.0
+        self.profile_table_row_cache: Dict[str, Dict[str, object]] = {}
         self.control_events_seen_keys: set[str] = set()
         self.control_keepalive_cache: Dict = {}
         self.control_keepalive_last_query_at = 0.0
+        self.current_ui_refresh_context: Dict[str, object] = {}
         self.window_state_dirty = False
         self.occupancy_event_file_offset = 0
         self.pending_ui_refresh_flags: Dict[str, bool] = {}
@@ -1017,6 +1019,7 @@ class ChromiumManagerWindow(QMainWindow):
 
     def refresh_bottom_stats(self):
         mcp_status_text = self.mcp_status_label.text() if hasattr(self, "mcp_status_label") else ""
+        control_profiles_payload = self.current_ui_refresh_context.get("control_profiles_payload", self.control_profiles_cache)
         self.bottom_stats_label.setText(
             build_bottom_stats_text(
                 self.config,
@@ -1025,7 +1028,7 @@ class ChromiumManagerWindow(QMainWindow):
                 self.mcp_status_cache,
                 mcp_status_text,
                 self.tr,
-                self.control_profiles_cache,
+                control_profiles_payload if isinstance(control_profiles_payload, dict) else self.control_profiles_cache,
             )
         )
 
@@ -1097,6 +1100,11 @@ class ChromiumManagerWindow(QMainWindow):
         self.pending_ui_refresh_flags = {}
         if not flags:
             return
+        context: Dict[str, object] = {}
+        if flags.get("table") or flags.get("selected_status") or flags.get("bottom_stats") or flags.get("occupancy_tab"):
+            context["control_profiles_payload"] = self.query_control_profiles(force=False)
+            context["keepalive_runtime"] = self.query_control_keepalive_runtime()
+        self.current_ui_refresh_context = context
         if flags.get("mcp_status"):
             self.refresh_mcp_status_ui()
             flags["bottom_stats"] = False
@@ -1110,6 +1118,7 @@ class ChromiumManagerWindow(QMainWindow):
             self.refresh_bottom_stats()
         if flags.get("occupancy_tab"):
             self.refresh_occupancy_tab()
+        self.current_ui_refresh_context = {}
 
     def clear_logs(self):
         self.pending_log_lines = []
@@ -1147,7 +1156,7 @@ class ChromiumManagerWindow(QMainWindow):
     def build_external_profile_process_map(self) -> Dict[str, List[int]]:
         # Reuse the cached control payload during steady-state refreshes; the
         # daemon-side profiles endpoint is one of the heaviest GUI polling calls.
-        profiles_payload = self.query_control_profiles(force=False)
+        profiles_payload = self.current_ui_refresh_context.get("control_profiles_payload", self.query_control_profiles(force=False))
         profiles = profiles_payload.get("profiles", []) if isinstance(profiles_payload.get("profiles", []), list) else []
         raw_map: Dict[str, List[int]] = {}
         for item in profiles:
@@ -1466,7 +1475,7 @@ class ChromiumManagerWindow(QMainWindow):
 
     def update_selected_profile_status(self):
         profile = self.get_selected_profile()
-        keepalive_runtime = self.query_control_keepalive_runtime()
+        keepalive_runtime = self.current_ui_refresh_context.get("keepalive_runtime", self.query_control_keepalive_runtime())
         control_profile = self.get_control_profile_entry(profile.get("profile_name", "") if profile else "")
         self.selected_profile_status.setPlainText(
             build_selected_profile_status_text(
@@ -1522,11 +1531,15 @@ class ChromiumManagerWindow(QMainWindow):
         return QColor(color_hex) if color_hex else None
 
     def create_profile_site_selector(self, profile: Dict) -> QWidget:
+        return self.create_profile_site_selector_from_runtime(profile, self.query_control_keepalive_runtime())
+
+    def create_profile_site_selector_from_runtime(self, profile: Dict, keepalive_runtime: Optional[Dict] = None) -> QWidget:
         wrapper = QWidget()
         layout = QHBoxLayout(wrapper)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(6)
-        keepalive_running_globally = bool(self.query_control_keepalive_runtime().get("running", False))
+        keepalive_runtime = keepalive_runtime if isinstance(keepalive_runtime, dict) else {}
+        keepalive_running_globally = bool(keepalive_runtime.get("running", False))
         payloads = build_profile_site_selector_payloads(
             profile=profile,
             keepalive_site_ids=get_keepalive_site_ids(self.config),
@@ -1564,6 +1577,144 @@ class ChromiumManagerWindow(QMainWindow):
             layout.addWidget(checkbox)
         layout.addStretch()
         return wrapper
+
+    def build_profile_site_selector_signature(self, profile: Dict, keepalive_runtime: Optional[Dict] = None) -> str:
+        keepalive_runtime = keepalive_runtime if isinstance(keepalive_runtime, dict) else {}
+        payloads = build_profile_site_selector_payloads(
+            profile=profile,
+            keepalive_site_ids=get_keepalive_site_ids(self.config),
+            keepalive_running_globally=bool(keepalive_runtime.get("running", False)),
+            get_site_label=lambda site_name: self.tr(f"site_name_{site_name}", get_keepalive_site_label(site_name, self.config)),
+            get_site_icon_path=lambda site_name: get_keepalive_site_icon_path(site_name, self.config, fetch=False),
+            site_checkbox_tooltip=self.tr("site_checkbox_tooltip"),
+            format_keepalive_site_status=format_keepalive_site_status,
+            normalize_keepalive_site_result_for_display=normalize_keepalive_site_result_for_display,
+            tr=self.tr,
+        )
+        try:
+            return json.dumps(payloads, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(payloads)
+
+    def _apply_profile_table_row_payload(
+        self,
+        *,
+        row: int,
+        profile: Dict,
+        row_payload: Dict[str, object],
+        keepalive_runtime: Dict,
+    ) -> None:
+        profile_name = str(row_payload.get("profile_name", "") or "").strip()
+        row_cache = self.profile_table_row_cache.setdefault(profile_name, {})
+        try:
+            row_signature = json.dumps(
+                {
+                    "profile": profile,
+                    "row_payload": row_payload,
+                    "keepalive_running": bool(keepalive_runtime.get("running", False)),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        except Exception:
+            row_signature = str((profile, row_payload, bool(keepalive_runtime.get("running", False))))
+        row_tooltip = str(row_payload.get("row_tooltip", "") or "")
+        status_tooltip = str(row_payload.get("status_tooltip", "") or row_tooltip)
+        color = self.status_color_for_profile(profile)
+
+        if row_cache.get("row_signature") == row_signature:
+            return
+        row_cache["row_signature"] = row_signature
+
+        profile_item = self.table.item(row, 0)
+        if profile_item is None:
+            profile_item = QTableWidgetItem()
+            self.table.setItem(row, 0, profile_item)
+        profile_item.setText(str(row_payload.get("profile_name", "") or ""))
+        profile_item.setToolTip(row_tooltip)
+        if color:
+            profile_item.setForeground(color)
+
+        account_item = self.table.item(row, 1)
+        if account_item is None:
+            account_item = QTableWidgetItem()
+            self.table.setItem(row, 1, account_item)
+        account_item.setText(str(row_payload.get("account_text", "") or ""))
+        account_item.setToolTip(row_tooltip)
+        if color:
+            account_item.setForeground(color)
+
+        status_item = self.table.item(row, 2)
+        if status_item is None:
+            status_item = QTableWidgetItem()
+            self.table.setItem(row, 2, status_item)
+        status_item.setText(str(row_payload.get("status_text", "") or ""))
+        status_item.setToolTip(status_tooltip)
+        if color:
+            status_item.setForeground(color)
+
+        site_selector_signature = self.build_profile_site_selector_signature(profile, keepalive_runtime)
+        if row_cache.get("site_selector_signature") != site_selector_signature:
+            self.table.removeCellWidget(row, 3)
+            self.table.setCellWidget(row, 3, self.create_profile_site_selector_from_runtime(profile, keepalive_runtime))
+            row_cache["site_selector_signature"] = site_selector_signature
+
+        keepalive_wrapper = row_cache.get("keepalive_wrapper")
+        keepalive_checkbox = row_cache.get("keepalive_checkbox")
+        if not isinstance(keepalive_wrapper, QWidget) or not isinstance(keepalive_checkbox, QCheckBox):
+            keepalive_wrapper, keepalive_checkbox = create_centered_checkbox_widget(
+                checked=bool(row_payload.get("keepalive_checked", False)),
+                enabled=bool(row_payload.get("keepalive_enabled", False)),
+                on_state_changed=lambda state, name=profile_name: self.set_profile_keepalive_enabled(name, state == Qt.Checked),
+            )
+            self.table.setCellWidget(row, 4, keepalive_wrapper)
+            row_cache["keepalive_wrapper"] = keepalive_wrapper
+            row_cache["keepalive_checkbox"] = keepalive_checkbox
+        keepalive_checkbox.blockSignals(True)
+        keepalive_checkbox.setChecked(bool(row_payload.get("keepalive_checked", False)))
+        keepalive_checkbox.setEnabled(bool(row_payload.get("keepalive_enabled", False)))
+        keepalive_checkbox.blockSignals(False)
+
+        button_wrapper = row_cache.get("button_wrapper")
+        launch_button = row_cache.get("launch_button")
+        keepalive_button = row_cache.get("keepalive_button")
+        if not isinstance(button_wrapper, QWidget) or launch_button is None or keepalive_button is None:
+            button_wrapper, launch_button, keepalive_button = create_profile_action_buttons_widget(
+                launch_text=str(row_payload.get("launch_text", "") or ""),
+                launch_enabled=bool(row_payload.get("launch_enabled", False)),
+                launch_tooltip=str(row_payload.get("launch_tooltip", "") or ""),
+                on_launch_clicked=lambda _=False, name=profile_name: self.toggle_profile_launch_by_name(name),
+                keepalive_text=str(row_payload.get("keepalive_button_text", "") or ""),
+                keepalive_enabled=bool(row_payload.get("keepalive_button_enabled", False)),
+                keepalive_tooltip=str(row_payload.get("keepalive_button_tooltip", "") or ""),
+                keepalive_style=str(row_payload.get("keepalive_button_style", "") or ""),
+                on_keepalive_clicked=lambda _=False, name=profile_name: self.run_keepalive_for_profile(name),
+            )
+            self.table.setCellWidget(row, 5, button_wrapper)
+            row_cache["button_wrapper"] = button_wrapper
+            row_cache["launch_button"] = launch_button
+            row_cache["keepalive_button"] = keepalive_button
+        launch_button.setText(str(row_payload.get("launch_text", "") or ""))
+        launch_button.setEnabled(bool(row_payload.get("launch_enabled", False)))
+        launch_button.setToolTip(str(row_payload.get("launch_tooltip", "") or ""))
+        keepalive_button.setText(str(row_payload.get("keepalive_button_text", "") or ""))
+        keepalive_button.setEnabled(bool(row_payload.get("keepalive_button_enabled", False)))
+        keepalive_button.setToolTip(str(row_payload.get("keepalive_button_tooltip", "") or ""))
+        keepalive_button.setStyleSheet(str(row_payload.get("keepalive_button_style", "") or ""))
+
+    def _rebuild_profile_table_rows(self, profiles: List[Dict], view_model: Dict[str, object], keepalive_runtime: Dict) -> None:
+        expected_names = [str(item.get("profile_name", "") or "").strip() for item in profiles if str(item.get("profile_name", "") or "").strip()]
+        expected_set = set(expected_names)
+        for stale_name in [name for name in list(self.profile_table_row_cache.keys()) if name not in expected_set]:
+            self.profile_table_row_cache.pop(stale_name, None)
+        self.table.setRowCount(len(profiles))
+        for row, row_entry in enumerate(view_model["rows"]):
+            self._apply_profile_table_row_payload(
+                row=row,
+                profile=profiles[row],
+                row_payload=dict(row_entry["row_payload"]),
+                keepalive_runtime=keepalive_runtime,
+            )
 
     def warm_keepalive_icon_cache_async(self):
         try:
@@ -1815,51 +1966,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.table.setUpdatesEnabled(False)
         self.table.blockSignals(True)
         try:
-            self.table.setRowCount(0)
-            for row, row_entry in enumerate(view_model["rows"]):
-                profile = profiles[row]
-                row_payload = dict(row_entry["row_payload"])
-                profile_name = str(row_entry["profile_name"])
-                self.table.insertRow(row)
-                profile_item = QTableWidgetItem(str(row_payload["profile_name"]))
-                account_item = QTableWidgetItem(str(row_payload["account_text"]))
-                status_item = QTableWidgetItem(str(row_payload["status_text"]))
-                color = self.status_color_for_profile(profile)
-                if color:
-                    profile_item.setForeground(color)
-                    account_item.setForeground(color)
-                    status_item.setForeground(color)
-                tooltip = str(row_payload["row_tooltip"])
-                profile_item.setToolTip(tooltip)
-                account_item.setToolTip(tooltip)
-                status_item.setToolTip(str(row_payload["status_tooltip"]))
-                self.table.setItem(row, 0, profile_item)
-                self.table.setItem(row, 1, account_item)
-                self.table.setItem(row, 2, status_item)
-                self.table.setCellWidget(row, 3, self.create_profile_site_selector(profile))
-
-                keepalive_wrapper, _keepalive_checkbox = create_centered_checkbox_widget(
-                    checked=bool(row_payload["keepalive_checked"]),
-                    enabled=bool(row_payload["keepalive_enabled"]),
-                    on_state_changed=lambda state, name=profile_name: self.set_profile_keepalive_enabled(
-                        name, state == Qt.Checked
-                    ),
-                )
-                self.table.setCellWidget(row, 4, keepalive_wrapper)
-
-                button_wrapper, _launch_button, _keepalive_button = create_profile_action_buttons_widget(
-                    launch_text=str(row_payload["launch_text"]),
-                    launch_enabled=bool(row_payload["launch_enabled"]),
-                    launch_tooltip=str(row_payload["launch_tooltip"]),
-                    on_launch_clicked=lambda _=False, name=profile_name: self.toggle_profile_launch_by_name(name),
-                    keepalive_text=str(row_payload["keepalive_button_text"]),
-                    keepalive_enabled=bool(row_payload["keepalive_button_enabled"]),
-                    keepalive_tooltip=str(row_payload["keepalive_button_tooltip"]),
-                    keepalive_style=str(row_payload["keepalive_button_style"]),
-                    on_keepalive_clicked=lambda _=False, name=profile_name: self.run_keepalive_for_profile(name),
-                )
-                self.table.setCellWidget(row, 5, button_wrapper)
-
+            self._rebuild_profile_table_rows(profiles, view_model, keepalive_runtime)
             if bool(view_model["has_profiles"]):
                 self.table.selectRow(int(view_model["selected_row"]))
         finally:
