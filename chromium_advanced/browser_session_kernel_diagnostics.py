@@ -52,6 +52,152 @@ PRIMARY_ACTION_KEYWORDS = ("save", "submit", "apply", "confirm", "continue", "ne
 
 
 class ManagedSessionDiagnosticsMixin:
+    def _next_step_suggestions_for_context(
+        self,
+        *,
+        action_name: str,
+        session_health: Dict[str, Any] | None = None,
+        structured_page: Dict[str, Any] | None = None,
+        interaction_hints: Dict[str, Any] | None = None,
+        resolution_trace: Dict[str, Any] | None = None,
+    ) -> list[str]:
+        health = session_health if isinstance(session_health, dict) else {}
+        page = structured_page if isinstance(structured_page, dict) else {}
+        hints = interaction_hints if isinstance(interaction_hints, dict) else {}
+        trace = resolution_trace if isinstance(resolution_trace, dict) else {}
+        suggestions: list[str] = []
+        recovery_hint = str(health.get("recovery_hint", "") or "")
+        if recovery_hint == "reactivate_expected_tab":
+            suggestions.append("reactivate_expected_tab_or_reopen_expected_url")
+        elif recovery_hint == "wait_for_page_stable":
+            suggestions.append("wait_for_page_stable_then_retry")
+        elif recovery_hint == "refresh_candidates_or_snapshot":
+            suggestions.append("refresh_candidates_or_snapshot_then_retry")
+        elif recovery_hint == "retry_or_diagnose_page":
+            suggestions.append("retry_once_then_diagnose_page")
+        elif recovery_hint == "diagnose_page":
+            suggestions.append("diagnose_page_before_retry")
+        elif recovery_hint == "recreate_session":
+            suggestions.append("recreate_session")
+
+        if bool(hints.get("has_modal", False)):
+            suggestions.append("prefer_modal_or_dialog_scoped_controls")
+        if str(hints.get("interaction_region", "") or "") in {"overlay", "dialog"}:
+            suggestions.append("prefer_hot_region_controls_over_global_page_scan")
+        if trace.get("matched") is False:
+            suggestions.append("broaden_target_or_use_text_filter")
+        if str(trace.get("stage", "") or "") == "ranked_dom_query":
+            suggestions.append("inspect_top_ranked_candidates_before_custom_script")
+        if int(page.get("search_control_count", 0) or 0) > 0:
+            suggestions.append("prefer_search_or_filter_controls_when_narrowing_scope")
+        if int(page.get("primary_action_count", 0) or 0) > 0 and action_name in {"diagnose_page", "diagnose_target"}:
+            suggestions.append("prefer_primary_action_controls_for_next_step")
+
+        deduped: list[str] = []
+        for item in suggestions:
+            if item and item not in deduped:
+                deduped.append(item)
+        return deduped[:6]
+
+    def _candidate_text_fields(self, entry: Dict[str, Any]) -> Dict[str, str]:
+        if not isinstance(entry, dict):
+            return {}
+        return {
+            "text": str(entry.get("text", "") or "").strip(),
+            "text_preview": str(entry.get("text_preview", "") or "").strip(),
+            "aria_label": str(entry.get("aria_label", "") or "").strip(),
+            "accessible_name": str(entry.get("accessible_name", "") or "").strip(),
+            "name": str(entry.get("name", "") or "").strip(),
+            "id": str(entry.get("id", "") or "").strip(),
+            "value": str(entry.get("value", "") or "").strip(),
+            "role": str(entry.get("role", "") or "").strip(),
+            "class": str(entry.get("class", "") or "").strip(),
+            "placeholder": str(entry.get("placeholder", "") or "").strip(),
+            "title_attr": str(entry.get("title_attr", "") or "").strip(),
+            "control_type": str(entry.get("control_type", "") or "").strip(),
+            "ancestry_path": str(entry.get("ancestry_path", "") or "").strip(),
+        }
+
+    def _candidate_relevance_details(self, entry: Dict[str, Any], text_filter: str = "") -> Dict[str, Any]:
+        if not isinstance(entry, dict):
+            return {"score": -1, "reasons": ["invalid_candidate"], "matched_fields": []}
+        score = 0
+        reasons: list[str] = []
+        matched_fields: list[str] = []
+        if entry.get("visible"):
+            score += 30
+            reasons.append("visible")
+        if entry.get("enabled", True):
+            score += 10
+            reasons.append("enabled")
+        tag_name = str(entry.get("tag_name", "") or "").lower()
+        role = str(entry.get("role", "") or "").lower()
+        control_type = str(entry.get("control_type", "") or "").lower()
+        if tag_name in {"button", "a", "input", "textarea", "select", "summary"}:
+            score += 12
+            reasons.append(f"interactive_tag:{tag_name}")
+        if role in {"button", "link", "textbox", "option", "menuitem", "tab", "combobox", "listbox"}:
+            score += 10
+            reasons.append(f"interactive_role:{role}")
+        if control_type in {"button", "textbox", "menuitem", "option", "combobox", "listbox"}:
+            score += 8
+            reasons.append(f"control_type:{control_type}")
+        if str(entry.get("aria_haspopup", "") or "").strip():
+            score += 16
+            reasons.append("has_popup")
+        if str(entry.get("aria_expanded", "") or "").strip().lower() == "true":
+            score += 18
+            reasons.append("expanded")
+        if role in {"menuitem", "option"}:
+            score += 24
+            reasons.append(f"transient_choice_role:{role}")
+        if entry.get("in_overlay"):
+            score += 18
+            reasons.append("inside_overlay")
+        if entry.get("in_dialog"):
+            score += 14
+            reasons.append("inside_dialog")
+        if bool(entry.get("selected")):
+            score += 8
+            reasons.append("selected")
+        if bool(entry.get("checked")):
+            score += 8
+            reasons.append("checked")
+        classes = str(entry.get("class", "") or "").lower()
+        if any(token in classes for token in ("menu", "dropdown", "popup", "dialog", "sheet", "overlay")):
+            score += 10
+            reasons.append("overlay_class_affinity")
+        if role in {"menuitem", "option", "listbox"} and (
+            str(entry.get("aria_haspopup", "") or "").strip()
+            or str(entry.get("aria_expanded", "") or "").strip().lower() == "true"
+            or any(token in classes for token in ("menu", "dropdown", "popup", "dialog", "sheet", "overlay"))
+        ):
+            score += 140
+            reasons.append("transient_control_priority")
+        filter_text = str(text_filter or "").strip().lower()
+        if not filter_text:
+            return {"score": score, "reasons": reasons, "matched_fields": matched_fields}
+        haystacks = self._candidate_text_fields(entry)
+        for key, raw_value in haystacks.items():
+            value = raw_value.lower()
+            if not value:
+                continue
+            bonus = 0
+            if value == filter_text:
+                bonus = 220 if key in {"text", "aria_label", "accessible_name"} else 180
+                reasons.append(f"exact_match:{key}")
+            elif value.startswith(filter_text):
+                bonus = 140 if key in {"text", "aria_label", "accessible_name"} else 100
+                reasons.append(f"prefix_match:{key}")
+            elif filter_text in value:
+                bonus = 90 if key in {"text", "aria_label", "accessible_name", "text_preview"} else 60
+                reasons.append(f"contains_match:{key}")
+            if bonus:
+                score += bonus
+                if key not in matched_fields:
+                    matched_fields.append(key)
+        return {"score": score, "reasons": reasons, "matched_fields": matched_fields}
+
     def _build_anti_bot_detection(self, page_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         page = page_payload if isinstance(page_payload, dict) else {}
         tab_id = str(page.get("tab_id", "") or "")
@@ -396,6 +542,7 @@ class ManagedSessionDiagnosticsMixin:
         navigation_controls: list[Dict[str, Any]] = []
         primary_actions: list[Dict[str, Any]] = []
         interactive_labels_preview: list[str] = []
+        region_summaries: dict[str, Dict[str, Any]] = {}
         region_counts = {"dialog": 0, "menu": 0, "listbox": 0, "tab": 0}
         scope_counts = {"overlay": 0, "dialog": 0, "expanded": 0}
         role_counts: Dict[str, int] = {}
@@ -495,6 +642,25 @@ class ManagedSessionDiagnosticsMixin:
                     if any(token in lowered_label for token in STATUS_KEYWORDS):
                         if label not in status_candidates:
                             status_candidates.append(label)
+            if scope_hint or tag_name in {"dialog", "menu", "menuitem", "listbox", "option", "tab", "toolbar", "form"}:
+                region_key = scope_hint or tag_name or "generic"
+                region_summary = region_summaries.setdefault(
+                    region_key,
+                    {
+                        "region_kind": region_key,
+                        "control_count": 0,
+                        "labels_preview": [],
+                        "refs": [],
+                        "control_roles": {},
+                    },
+                )
+                region_summary["control_count"] += 1
+                if label and label not in region_summary["labels_preview"] and len(region_summary["labels_preview"]) < 8:
+                    region_summary["labels_preview"].append(label)
+                if ref and ref not in region_summary["refs"] and len(region_summary["refs"]) < 8:
+                    region_summary["refs"].append(ref)
+                if tag_name:
+                    region_summary["control_roles"][tag_name] = int(region_summary["control_roles"].get(tag_name, 0) or 0) + 1
         comments: list[Dict[str, Any]] = []
         index = 0
         while index < len(cleaned):
@@ -583,6 +749,18 @@ class ManagedSessionDiagnosticsMixin:
                 "table_signal_count": int(table_signal_count),
                 "comment_thread_count": len(comments),
             },
+            "region_summaries": sorted(
+                [
+                    {
+                        **summary,
+                        "control_roles": dict(
+                            sorted(summary.get("control_roles", {}).items(), key=lambda item: (-int(item[1]), str(item[0])))
+                        ),
+                    }
+                    for summary in region_summaries.values()
+                ],
+                key=lambda item: (-int(item.get("control_count", 0) or 0), str(item.get("region_kind", "") or "")),
+            )[:8],
             "status_candidates": status_candidates[:12],
             "role_counts": dict(sorted(role_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))),
             "control_type_counts": dict(control_type_counts),
@@ -624,6 +802,9 @@ class ManagedSessionDiagnosticsMixin:
         primary_actions: list[Dict[str, Any]] = []
         search_like_controls: list[Dict[str, Any]] = []
         status_controls: list[Dict[str, Any]] = []
+        visible_controls: list[Dict[str, Any]] = []
+        overlay_controls: list[Dict[str, Any]] = []
+        dialog_controls: list[Dict[str, Any]] = []
         for item in candidates:
             tag_name = str(item.get("tag_name", "") or "").lower()
             if tag_name:
@@ -641,6 +822,12 @@ class ManagedSessionDiagnosticsMixin:
                     "enabled": bool(item.get("enabled", True)),
                 }
                 interactive_controls.append(control)
+                if control["visible"] and len(visible_controls) < 12:
+                    visible_controls.append(dict(control))
+                if bool(item.get("in_overlay")) and len(overlay_controls) < 8:
+                    overlay_controls.append(dict(control))
+                if bool(item.get("in_dialog")) and len(dialog_controls) < 8:
+                    dialog_controls.append(dict(control))
                 lowered_label = label.lower()
                 if lowered_label and any(token in lowered_label for token in PRIMARY_ACTION_KEYWORDS):
                     primary_actions.append(dict(control))
@@ -662,6 +849,9 @@ class ManagedSessionDiagnosticsMixin:
             region_kind = "option_group"
         elif input_like:
             region_kind = "form"
+        control_density = 0.0
+        if candidates:
+            control_density = round(float(len(interactive_controls)) / float(len(candidates)), 3)
         return {
             "target": str(base.get("target", "") or ""),
             "tag_name": str(base.get("tag_name", "") or ""),
@@ -674,10 +864,14 @@ class ManagedSessionDiagnosticsMixin:
             "link_count": len(links),
             "option_count": len(options),
             "input_like_count": len(input_like),
+            "interactive_density": control_density,
             "status_candidates": status_candidates[:12],
             "labels_preview": texts[:20],
             "role_counts": dict(sorted(role_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))),
             "interactive_controls": interactive_controls[:12],
+            "visible_controls": visible_controls[:12],
+            "overlay_controls": overlay_controls[:8],
+            "dialog_controls": dialog_controls[:8],
             "primary_actions": primary_actions[:8],
             "search_like_controls": search_like_controls[:8],
             "status_controls": status_controls[:8],
@@ -760,6 +954,18 @@ class ManagedSessionDiagnosticsMixin:
             snapshot_text = ""
             if isinstance(snapshot, dict):
                 snapshot_text = str(snapshot.get("snapshot", "") or "")
+            if not snapshot_text and callable(getattr(self._raw, "snapshot", None)):
+                try:
+                    snapshot_payload = (
+                        self._raw.snapshot(tab_id=str(tab_id or "").strip())
+                        if str(tab_id or "").strip()
+                        else self._raw.snapshot()
+                    )
+                    if isinstance(snapshot_payload, dict):
+                        snapshot = snapshot_payload
+                        snapshot_text = str(snapshot_payload.get("snapshot", "") or "")
+                except Exception:
+                    snapshot_text = ""
             page_text = str(context.get("page_text_preview", "") or "")
             if not page_text:
                 try:
@@ -778,6 +984,9 @@ class ManagedSessionDiagnosticsMixin:
             interaction_hints = {}
         if not interaction_hints:
             interaction_hints = self._build_interaction_hints(structured_page, active_element, modal_state)
+        session_health = context.get("session_health", self._build_session_health_snapshot(page_payload=normalized_page))
+        if not isinstance(session_health, dict):
+            session_health = self._build_session_health_snapshot(page_payload=normalized_page)
         return {
             "action_name": str(context.get("action_name", "") or action_name or "inspect"),
             "page": normalized_page,
@@ -796,12 +1005,17 @@ class ManagedSessionDiagnosticsMixin:
             "snapshot": snapshot or {"unsupported": True, "message": "Structured post-action snapshot is not available in this runtime path."},
             "structured_page": structured_page,
             "interaction_hints": interaction_hints,
+            "next_steps": self._next_step_suggestions_for_context(
+                action_name=str(context.get("action_name", "") or action_name or "inspect"),
+                session_health=session_health,
+                structured_page=structured_page,
+                interaction_hints=interaction_hints,
+                resolution_trace=context.get("resolution_trace", {}) if isinstance(context.get("resolution_trace", {}), dict) else {},
+            ),
             "recent_actions": context.get("recent_actions", self._recent_actions_payload(limit=8))
             if isinstance(context.get("recent_actions", None), list)
             else self._recent_actions_payload(limit=8),
-            "session_health": context.get("session_health", self._build_session_health_snapshot(page_payload=normalized_page))
-            if isinstance(context.get("session_health", None), dict)
-            else self._build_session_health_snapshot(page_payload=normalized_page),
+            "session_health": session_health,
         }
 
     def _build_interaction_hints(self, structured_page: Dict[str, Any], active_element: Dict[str, Any], modal_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -809,6 +1023,7 @@ class ManagedSessionDiagnosticsMixin:
         search_controls = structured_page.get("search_controls", []) if isinstance(structured_page, dict) else []
         filter_controls = structured_page.get("filter_controls", []) if isinstance(structured_page, dict) else []
         navigation_controls = structured_page.get("navigation_controls", []) if isinstance(structured_page, dict) else []
+        region_summaries = structured_page.get("region_summaries", []) if isinstance(structured_page, dict) else []
         active_label = str(
             active_element.get("accessible_name", "")
             or active_element.get("aria_label", "")
@@ -816,6 +1031,7 @@ class ManagedSessionDiagnosticsMixin:
             or active_element.get("value", "")
             or ""
         ).strip()
+        current_region = structured_page.get("interaction_region_summary", {}) if isinstance(structured_page, dict) else {}
         return {
             "has_modal": bool(modal_state.get("visible", False)),
             "primary_action_labels": [
@@ -839,6 +1055,23 @@ class ManagedSessionDiagnosticsMixin:
                 if isinstance(item, dict) and str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
             ],
             "active_element_label": active_label,
+            "active_element_role": str(active_element.get("role", "") or active_element.get("control_type", "") or "").strip(),
+            "interaction_region": str(structured_page.get("interaction_region", "") or ""),
+            "interaction_region_controls": {
+                "button_count": int(current_region.get("button_count", 0) or 0),
+                "form_control_count": int(current_region.get("form_control_count", 0) or 0),
+                "option_count": int(current_region.get("option_count", 0) or 0),
+                "overlay_control_count": int(current_region.get("overlay_control_count", 0) or 0),
+            },
+            "top_regions": [
+                {
+                    "region_kind": str(item.get("region_kind", "") or ""),
+                    "control_count": int(item.get("control_count", 0) or 0),
+                    "labels_preview": list(item.get("labels_preview", []))[:4],
+                }
+                for item in region_summaries[:4]
+                if isinstance(item, dict)
+            ],
         }
 
     def _build_post_action_context(self, action_name: str, tab_id: str = "") -> Dict[str, Any]:
@@ -922,6 +1155,8 @@ class ManagedSessionDiagnosticsMixin:
                 snapshot_payload = {"unsupported": True, "message": "post-action context minimized for fast path."}
         structured_page = self._extract_structured_page_data(page_text, snapshot_text=snapshot_text)
         modal_state = {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []}
+        interaction_hints = self._build_interaction_hints(structured_page, {}, modal_state)
+        session_health = self._build_session_health_snapshot(page_payload=page)
         return {
             "action_name": str(action_name or "inspect"),
             "page": page,
@@ -932,9 +1167,16 @@ class ManagedSessionDiagnosticsMixin:
             "anti_bot": self._build_anti_bot_detection(page),
             "snapshot": snapshot_payload,
             "structured_page": structured_page,
-            "interaction_hints": self._build_interaction_hints(structured_page, {}, modal_state),
+            "interaction_hints": interaction_hints,
+            "next_steps": self._next_step_suggestions_for_context(
+                action_name=str(action_name or "inspect"),
+                session_health=session_health,
+                structured_page=structured_page,
+                interaction_hints=interaction_hints,
+                resolution_trace={},
+            ),
             "recent_actions": self._recent_actions_payload(limit=4),
-            "session_health": self._build_session_health_snapshot(page_payload=page),
+            "session_health": session_health,
         }
 
     def _attach_post_action_context(self, action_name: str, payload: Dict[str, Any], *, failure: bool = False) -> Dict[str, Any]:
@@ -1008,6 +1250,13 @@ class ManagedSessionDiagnosticsMixin:
             normalized["post_action_context"]["recent_actions"] = self._recent_actions_payload(limit=8)
             normalized["post_action_context"]["session_health"] = self._build_session_health_snapshot(
                 page_payload=normalized.get("post_action_context", {}).get("page", {})
+            )
+            normalized["post_action_context"]["next_steps"] = self._next_step_suggestions_for_context(
+                action_name=str(normalized.get("post_action_context", {}).get("action_name", "") or action_name),
+                session_health=normalized["post_action_context"].get("session_health", {}),
+                structured_page=normalized["post_action_context"].get("structured_page", {}),
+                interaction_hints=normalized["post_action_context"].get("interaction_hints", {}),
+                resolution_trace=normalized.get("resolution_trace", {}) if isinstance(normalized.get("resolution_trace", {}), dict) else {},
             )
         return normalized
 
@@ -1084,6 +1333,15 @@ class ManagedSessionDiagnosticsMixin:
                 subtree_candidates if isinstance(subtree_candidates, list) else [],
             )
         payload["session_health"] = self._build_session_health_snapshot(page_payload=payload)
+        payload["next_steps"] = self._next_step_suggestions_for_context(
+            action_name=action_name,
+            session_health=payload.get("session_health", {}),
+            structured_page=payload.get("structured_page", {}),
+            interaction_hints=payload.get("interaction_context", {}).get("interaction_hints", {})
+            if isinstance(payload.get("interaction_context", {}), dict)
+            else {},
+            resolution_trace=payload.get("resolution_trace", {}) if isinstance(payload.get("resolution_trace", {}), dict) else {},
+        )
         return payload
 
     def _normalize_html_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1118,81 +1376,29 @@ class ManagedSessionDiagnosticsMixin:
         return payload
 
     def _candidate_relevance_score(self, entry: Dict[str, Any], text_filter: str = "") -> int:
-        if not isinstance(entry, dict):
-            return -1
-        score = 0
-        if entry.get("visible"):
-            score += 30
-        if entry.get("enabled", True):
-            score += 10
-        tag_name = str(entry.get("tag_name", "") or "").lower()
-        role = str(entry.get("role", "") or "").lower()
-        if tag_name in {"button", "a", "input", "textarea", "select", "summary"}:
-            score += 12
-        if role in {"button", "link", "textbox", "option", "menuitem", "tab", "combobox", "listbox"}:
-            score += 10
-        if str(entry.get("aria_haspopup", "") or "").strip():
-            score += 16
-        if str(entry.get("aria_expanded", "") or "").strip().lower() == "true":
-            score += 18
-        if role in {"menuitem", "option"}:
-            score += 24
-        if entry.get("in_overlay"):
-            score += 18
-        if entry.get("in_dialog"):
-            score += 14
-        classes = str(entry.get("class", "") or "").lower()
-        if any(token in classes for token in ("menu", "dropdown", "popup", "dialog", "sheet", "overlay")):
-            score += 10
-        if role in {"menuitem", "option", "listbox"} and (
-            str(entry.get("aria_haspopup", "") or "").strip()
-            or str(entry.get("aria_expanded", "") or "").strip().lower() == "true"
-            or any(token in classes for token in ("menu", "dropdown", "popup", "dialog", "sheet", "overlay"))
-        ):
-            score += 140
-        filter_text = str(text_filter or "").strip().lower()
-        if not filter_text:
-            return score
-        haystacks = {
-            "text": str(entry.get("text", "") or "").strip(),
-            "text_preview": str(entry.get("text_preview", "") or "").strip(),
-            "aria_label": str(entry.get("aria_label", "") or "").strip(),
-            "accessible_name": str(entry.get("accessible_name", "") or "").strip(),
-            "name": str(entry.get("name", "") or "").strip(),
-            "id": str(entry.get("id", "") or "").strip(),
-            "value": str(entry.get("value", "") or "").strip(),
-            "role": role,
-            "class": str(entry.get("class", "") or "").strip(),
-            "placeholder": str(entry.get("placeholder", "") or "").strip(),
-            "title_attr": str(entry.get("title_attr", "") or "").strip(),
-            "control_type": str(entry.get("control_type", "") or "").strip(),
-            "ancestry_path": str(entry.get("ancestry_path", "") or "").strip(),
-        }
-        for key, raw_value in haystacks.items():
-            value = raw_value.lower()
-            if not value:
-                continue
-            if value == filter_text:
-                score += 220 if key in {"text", "aria_label", "accessible_name"} else 180
-            elif value.startswith(filter_text):
-                score += 140 if key in {"text", "aria_label", "accessible_name"} else 100
-            elif filter_text in value:
-                score += 90 if key in {"text", "aria_label", "accessible_name", "text_preview"} else 60
-        return score
+        return int(self._candidate_relevance_details(entry, text_filter=text_filter).get("score", -1) or -1)
 
     def _candidate_scope_boost(self, entry: Dict[str, Any], scope: Dict[str, Any]) -> int:
+        return int(self._candidate_scope_details(entry, scope).get("score", 0) or 0)
+
+    def _candidate_scope_details(self, entry: Dict[str, Any], scope: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(entry, dict) or not isinstance(scope, dict):
-            return 0
+            return {"score": 0, "reasons": []}
         score = 0
+        reasons: list[str] = []
         role = str(entry.get("role", "") or "").lower()
         if scope.get("prefer_overlay") and (entry.get("in_overlay") or role in {"menuitem", "option", "listbox"}):
             score += 120
+            reasons.append("prefer_overlay")
         if scope.get("prefer_dialog") and entry.get("in_dialog"):
             score += 90
+            reasons.append("prefer_dialog")
         if scope.get("prefer_expanded") and str(entry.get("aria_expanded", "") or "").lower() == "true":
             score += 70
+            reasons.append("prefer_expanded")
         if scope.get("prefer_overlay") and any(token in role for token in ("menuitem", "option")):
             score += 60
+            reasons.append("overlay_choice_role")
         if scope.get("prefer_expanded") and any(
             token in " ".join(
                 [
@@ -1205,6 +1411,7 @@ class ManagedSessionDiagnosticsMixin:
             for token in ("newest", "latest", "sort", "filter", "apply")
         ):
             score += 40
+            reasons.append("expanded_keyword_affinity")
         hints = " ".join(
             [
                 str(entry.get("text", "") or ""),
@@ -1218,7 +1425,8 @@ class ManagedSessionDiagnosticsMixin:
         for token in scope.get("recent_target_hints", []):
             if token and token in hints:
                 score += 26
-        return score
+                reasons.append(f"recent_hint:{token}")
+        return {"score": score, "reasons": reasons}
 
     def _is_unsupported_result(self, result: Dict[str, Any]) -> bool:
         if not isinstance(result, dict):

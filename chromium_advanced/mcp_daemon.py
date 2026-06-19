@@ -1702,38 +1702,12 @@ def create_daemon_app(
                 scripts = args.get("scripts") or []
                 if not isinstance(scripts, list) or not scripts:
                     raise HTTPException(status_code=400, detail="scripts is required for run_script_batch")
-                tab_id = str(args.get("tab_id", "") or "")
-                stop_on_error = bool(args.get("stop_on_error", True))
-                batch_results = []
-                for index, script in enumerate(scripts):
-                    script_text = str(script or "")
-                    item = {
-                        "index": index,
-                        "script": script_text,
-                    }
-                    try:
-                        item_result = browser_session.run_script(script_text, tab_id=tab_id)
-                        item["result"] = item_result
-                        failed, message, error_type = _extract_action_level_error(item_result)
-                        item["ok"] = not failed
-                        if failed:
-                            if message:
-                                item["error"] = message
-                            if error_type:
-                                item["error_type"] = error_type
-                            if stop_on_error:
-                                raise RuntimeError(message or "run_script_batch item failed")
-                    except Exception as exc:
-                        item["ok"] = False
-                        item["error_type"] = type(exc).__name__
-                        item["error"] = str(exc)
-                        if stop_on_error:
-                            raise
-                    batch_results.append(item)
                 return {
-                    "count": len(batch_results),
-                    "stop_on_error": stop_on_error,
-                    "items": batch_results,
+                    **browser_session.run_script_batch(
+                        scripts=scripts,
+                        tab_id=str(args.get("tab_id", "") or ""),
+                        stop_on_error=bool(args.get("stop_on_error", True)),
+                    ),
                     "action_pipeline": {
                         "action_name": action,
                         "pipeline_version": 1,

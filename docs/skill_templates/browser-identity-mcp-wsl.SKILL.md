@@ -138,6 +138,10 @@ For target-local debugging from WSL, prefer `browser_diagnose_target(...)` when 
 
 - `region_kind`
 - `interactive_controls`
+- `visible_controls`
+- `overlay_controls`
+- `dialog_controls`
+- `interactive_density`
 - `primary_actions`
 - `search_like_controls`
 - `status_controls`
@@ -148,6 +152,8 @@ Managed verification surfaces are also more uniform from WSL:
 - `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
 - `browser_verify_target_value(...)` and `browser_verify_target_visible(...)` also normalize `verified`, `matched`, `target`, and `by`
 - `browser_describe_target(...)` and `browser_list_candidates(...)` expose a lightweight `target_summary`
+- `browser_list_candidates(...)` candidates now also expose `match_reason` and `ranking_reason`, so retry logic from WSL should inspect ranking intent before broadening selectors
+- `run_script_batch(...)` now also returns `ok_count`, `error_count`, `all_ok`, and `first_error` in addition to per-item results
 
 On the default `patchright` path, successful high-frequency actions also leave behind a richer `post_action_context` more often than before. Use that as the first continuation surface before escalating to a heavier extra call. In normal cases it can already include:
 

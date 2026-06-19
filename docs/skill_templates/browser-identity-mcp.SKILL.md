@@ -278,6 +278,10 @@ For target-local debugging, prefer `browser_diagnose_target(...)` when the task 
 
 - `region_kind`
 - `interactive_controls`
+- `visible_controls`
+- `overlay_controls`
+- `dialog_controls`
+- `interactive_density`
 - `primary_actions`
 - `search_like_controls`
 - `status_controls`
@@ -288,6 +292,8 @@ Managed verification surfaces are also more uniform now:
 - `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
 - `browser_verify_target_value(...)` and `browser_verify_target_visible(...)` also normalize `verified`, `matched`, `target`, and `by`
 - `browser_describe_target(...)` and `browser_list_candidates(...)` expose a lightweight `target_summary`
+- `browser_list_candidates(...)` candidates now also expose `match_reason` and `ranking_reason`, which should be used before blind retries on dense dynamic pages
+- `run_script_batch(...)` now also returns `ok_count`, `error_count`, `all_ok`, and `first_error` in addition to per-item results
 
 On the default `patchright` path, successful high-frequency actions also leave behind a richer `post_action_context` more often than before. Treat that as the first continuation surface before jumping to a heavier follow-up call. In normal cases it can already include:
 

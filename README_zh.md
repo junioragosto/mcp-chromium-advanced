@@ -198,6 +198,10 @@ worker 运行策略现在也是显式可配的：
 
 - `region_kind`
 - `interactive_controls`
+- `visible_controls`
+- `overlay_controls`
+- `dialog_controls`
+- `interactive_density`
 - `primary_actions`
 - `search_like_controls`
 - `status_controls`
@@ -210,6 +214,8 @@ worker 运行策略现在也是显式可配的：
 - `browser_verify_text(...)`、`browser_verify_dialog(...)`、`browser_verify_element(...)` 会统一补 `verified`、`matched`
 - `browser_verify_target_value(...)`、`browser_verify_target_visible(...)` 也会统一补 `verified`、`matched`、`target`、`by`
 - `browser_describe_target(...)`、`browser_list_candidates(...)` 会补一个轻量的 `target_summary`
+- `browser_list_candidates(...)` 返回的候选项现在还会补 `match_reason` 和 `ranking_reason`，方便调用方理解为什么某个候选排在最前面
+- `run_script_batch(...)` 现在除了逐项结果，还会统一返回 `ok_count`、`error_count`、`all_ok` 和 `first_error`
 
 在默认 `patchright` 主路径上，高频成功动作现在也会尽量留下更高信号的 `post_action_context`，而不只是一个最小页面指针。常见情况下，返回结果里会更容易直接带上：
 
@@ -619,6 +625,22 @@ skill 模板里应明确告诉 agent：
   提供给 Codex 或其它 AI 工作流复用的 skill 模板
 - `resources/bookmarks_template.html`
   项目附带的书签模板
+
+## 最新发布验证
+
+- `2026-06-19` 已基于安装目录 `D:\softs\chromium\ChromiumProfileManager` 完成最新一轮打包版发布验证
+- 打包版 GUI 启动后能够稳定存活，并能正确拉起打包版 daemon / worker 运行时
+- 打包版运行时下，`get_server_status()` 已确认默认引擎为 `patchright`
+- 真实登录态验证已通过：`Profile 1` 可正常进入 Gmail Inbox
+- 并行验证已通过：`Profile 1` 与 `Profile 4` 可同时建立独立 MCP 会话而不发生状态串扰
+- 无痕验证已通过：可通过 daemon automation 路径配合 `runtime_options.incognito=true` 完成隔离启动与释放
+- 清理验证已通过：所有会话释放后，服务状态会回到 `idle`
+
+## 当前已确认边界
+
+- 复杂页面下，当前最可靠的验收与读取面仍然是高层结构化路径：`structured_page`、`browser_list_candidates(...)`、`browser_get_interaction_context(...)`、action trace 与 screenshot
+- `run_script(...)` 在部分真实动态页面上仍可能出现“执行成功但 `result=null`”的情况，这应被视为当前读回边界，而不是自动判定为脚本执行失败
+- 如果任务依赖复杂动态前端上的高保真结构化提取，应优先使用默认的 `patchright` 路径，并优先调用高层结构化工具，而不是直接把原始脚本执行结果当作唯一读数面
 
 ## License
 

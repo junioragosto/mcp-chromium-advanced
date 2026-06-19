@@ -182,6 +182,9 @@ class BrowserSession(Protocol):
     def run_script(self, script: str, tab_id: str = "") -> Dict:
         ...
 
+    def run_script_batch(self, scripts: list[str], tab_id: str = "", stop_on_error: bool = True) -> Dict:
+        ...
+
     def watch_page_state(
         self,
         text: str = "",

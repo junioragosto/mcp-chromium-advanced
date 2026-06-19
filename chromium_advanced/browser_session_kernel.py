@@ -16,6 +16,7 @@ SNAPSHOT_LINE_REF_PATTERN = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
 HTML_PREVIEW_LIMIT = 12000
 RECENT_ACTION_LIMIT = 40
 SNAPSHOT_REF_CACHE_LIMIT = 5000
+RESOLUTION_CACHE_LIMIT = 40
 
 CAPABILITY_MATRIX = {
     "snapshot": "supports_snapshot",
@@ -139,6 +140,7 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         self._last_snapshot_text = ""
         self._next_snapshot_ref = 1
         self._recent_actions: list[Dict[str, Any]] = []
+        self._resolution_cache: Dict[str, Dict[str, Any]] = {}
 
     def _safe_int(self, value: Any, default: int = 0) -> int:
         try:
@@ -195,6 +197,23 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         overflow = len(self._recent_actions) - RECENT_ACTION_LIMIT
         if overflow > 0:
             del self._recent_actions[:overflow]
+        if action_name in {
+            "navigate",
+            "open_tab",
+            "activate_tab",
+            "close_tab",
+            "click",
+            "click_target",
+            "type_text",
+            "type_target",
+            "type_target_and_verify",
+            "select_option",
+            "drag_target",
+            "handle_dialog",
+            "navigate_back",
+            "navigate_forward",
+        }:
+            self._clear_resolution_cache()
 
     def _recent_actions_payload(self, limit: int = 10) -> list[Dict[str, Any]]:
         bounded = max(1, int(limit))
@@ -248,6 +267,104 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 if len(hints) >= max(1, int(limit)):
                     return hints
         return hints
+
+    def _clear_resolution_cache(self) -> None:
+        self._resolution_cache.clear()
+
+    def _resolution_cache_key(
+        self,
+        *,
+        action_name: str,
+        target: str,
+        by: str,
+        text_filter: str,
+        limit: int,
+        include_boxes: bool,
+        tab_id: str,
+    ) -> str:
+        return json.dumps(
+            {
+                "action_name": str(action_name or ""),
+                "target": str(target or ""),
+                "by": str(by or "css"),
+                "text_filter": str(text_filter or ""),
+                "limit": int(limit or 0),
+                "include_boxes": bool(include_boxes),
+                "tab_id": str(tab_id or ""),
+                "engine_name": self._capabilities.engine_name,
+                "recent_target_hints": self._recent_target_hints(limit=6),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    def _cached_resolution(
+        self,
+        *,
+        action_name: str,
+        target: str,
+        by: str,
+        text_filter: str,
+        limit: int,
+        include_boxes: bool,
+        tab_id: str,
+    ) -> Dict[str, Any] | None:
+        key = self._resolution_cache_key(
+            action_name=action_name,
+            target=target,
+            by=by,
+            text_filter=text_filter,
+            limit=limit,
+            include_boxes=include_boxes,
+            tab_id=tab_id,
+        )
+        cached = self._resolution_cache.get(key)
+        if not isinstance(cached, dict):
+            return None
+        payload = dict(cached)
+        trace = dict(payload.get("trace", {})) if isinstance(payload.get("trace", {}), dict) else {}
+        trace["source"] = f"{trace.get('source', '')}+cache" if trace.get("source") else "resolution_cache"
+        trace["stage"] = f"{trace.get('stage', '')}+cache" if trace.get("stage") else "cache_hit"
+        payload["trace"] = trace
+        return payload
+
+    def _store_resolution_cache(
+        self,
+        *,
+        action_name: str,
+        target: str,
+        by: str,
+        text_filter: str,
+        limit: int,
+        include_boxes: bool,
+        tab_id: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        if not isinstance(payload, dict):
+            return
+        key = self._resolution_cache_key(
+            action_name=action_name,
+            target=target,
+            by=by,
+            text_filter=text_filter,
+            limit=limit,
+            include_boxes=include_boxes,
+            tab_id=tab_id,
+        )
+        stored = {
+            "entry": dict(payload.get("entry", {})) if isinstance(payload.get("entry", {}), dict) else payload.get("entry"),
+            "trace": dict(payload.get("trace", {})) if isinstance(payload.get("trace", {}), dict) else {},
+            "scope": dict(payload.get("scope", {})) if isinstance(payload.get("scope", {}), dict) else {},
+            "resolved": dict(payload.get("resolved", {})) if isinstance(payload.get("resolved", {}), dict) else payload.get("resolved"),
+            "candidates": [dict(item) for item in payload.get("candidates", []) if isinstance(item, dict)]
+            if isinstance(payload.get("candidates", []), list)
+            else [],
+        }
+        self._resolution_cache[key] = stored
+        overflow = len(self._resolution_cache) - RESOLUTION_CACHE_LIMIT
+        if overflow > 0:
+            for old_key in list(self._resolution_cache.keys())[:overflow]:
+                self._resolution_cache.pop(old_key, None)
 
     def _build_resolution_scope(self, action_name: str, target: str = "", by: str = "css", text_filter: str = "") -> Dict[str, Any]:
         filter_terms: list[str] = []
@@ -529,10 +646,16 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
           const accessibleName = inferAccessibleName(el);
           const ancestryPath = ancestry.map(node => (node.tagName || '').toLowerCase()).filter(Boolean).slice(0, 10).join(' > ');
           const controlType = role || inputType || (el.tagName || '').toLowerCase();
+          const popupRole = normalize(el.getAttribute('aria-haspopup') || '');
+          const selected = ('selected' in el) ? !!el.selected : normalize(el.getAttribute('aria-selected') || '') === 'true';
+          const expanded = normalize(el.getAttribute('aria-expanded') || '') === 'true';
+          const disabled = !!el.disabled || el.getAttribute('aria-disabled') === 'true';
           const scopeTags = [];
           if (dialogAncestors.length) scopeTags.push('dialog');
           if (overlayAncestors.length) scopeTags.push('overlay');
-          if (normalize(el.getAttribute('aria-expanded') || '') === 'true') scopeTags.push('expanded');
+          if (expanded) scopeTags.push('expanded');
+          if (selected) scopeTags.push('selected');
+          if (popupRole) scopeTags.push('popup');
           if ((el.tagName || '').includes('-') || customTagPreview(ancestry).length) scopeTags.push('custom-element');
           return {
             tag_name: (el.tagName || '').toLowerCase(),
@@ -540,8 +663,11 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             text_preview: textPreview(el.innerText || el.textContent || ''),
             value: 'value' in el ? String(el.value || '') : '',
             visible,
-            enabled: !el.disabled && el.getAttribute('aria-disabled') !== 'true',
+            enabled: !disabled,
             checked: 'checked' in el ? !!el.checked : null,
+            selected,
+            expanded,
+            disabled,
             id: normalize(el.id || ''),
             name: normalize(el.getAttribute('name') || ''),
             class: normalize(el.getAttribute('class') || ''),
@@ -549,7 +675,7 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             title_attr: normalize(el.getAttribute('title') || ''),
             aria_label: normalize(el.getAttribute('aria-label') || ''),
             aria_expanded: normalize(el.getAttribute('aria-expanded') || ''),
-            aria_haspopup: normalize(el.getAttribute('aria-haspopup') || ''),
+            aria_haspopup: popupRole,
             role,
             input_type: inputType,
             control_type: controlType,
@@ -813,6 +939,110 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             result["verified"] = True
         return result
 
+    def _semantic_select_option_fallback(self, selector: str, by: str, values: list[str]) -> Dict[str, Any]:
+        normalized_selector = str(selector or "").strip()
+        normalized_by = str(by or "css")
+        normalized_values = [str(item or "").strip() for item in (values or []) if str(item or "").strip()]
+        if not normalized_selector:
+            raise ValueError("selector is required")
+        if not normalized_values:
+            raise ValueError("at least one value is required")
+
+        trigger_details = self._fallback_describe_target(normalized_selector, by=normalized_by, include_box=True)
+        trigger_role = str(trigger_details.get("role", "") or "").lower()
+        trigger_control_type = str(trigger_details.get("control_type", "") or "").lower()
+        expanded = str(trigger_details.get("aria_expanded", "") or "").lower() == "true" or bool(trigger_details.get("expanded"))
+        opens_popup = bool(str(trigger_details.get("aria_haspopup", "") or "").strip()) or trigger_role in {"combobox", "button"} or trigger_control_type in {"combobox", "button"}
+
+        if opens_popup and not expanded:
+            click_result = self.click(normalized_selector, by=normalized_by)
+            if isinstance(click_result, dict) and click_result.get("ok") is False:
+                raise RuntimeError(str(click_result.get("error", "") or f'failed to open option surface for "{normalized_selector}"'))
+
+        chosen_candidates: list[Dict[str, Any]] = []
+        clicked_targets: list[str] = []
+        allowed_roles = {"option", "menuitem", "listbox", "tab"}
+        allowed_control_types = {"option", "menuitem", "listbox", "tab", "button"}
+        for requested in normalized_values:
+            candidates_payload = self.list_candidates(text_filter=requested, limit=12, include_boxes=True)
+            candidates = candidates_payload.get("candidates", []) if isinstance(candidates_payload, dict) else []
+            if not isinstance(candidates, list):
+                candidates = []
+            ranked = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                role = str(candidate.get("role", "") or "").lower()
+                control_type = str(candidate.get("control_type", "") or "").lower()
+                text_blob = " ".join(
+                    [
+                        str(candidate.get("text", "") or ""),
+                        str(candidate.get("aria_label", "") or ""),
+                        str(candidate.get("accessible_name", "") or ""),
+                    ]
+                ).lower()
+                semantic_bonus = 0
+                if role in allowed_roles:
+                    semantic_bonus += 120
+                if control_type in allowed_control_types:
+                    semantic_bonus += 70
+                if candidate.get("in_overlay") or candidate.get("in_dialog"):
+                    semantic_bonus += 40
+                if requested.lower() == text_blob.strip():
+                    semantic_bonus += 80
+                elif requested.lower() in text_blob:
+                    semantic_bonus += 35
+                ranked.append((int(candidate.get("match_score", 0) or 0) + semantic_bonus, candidate))
+            ranked.sort(key=lambda item: -item[0])
+            if not ranked:
+                raise ValueError(f'No option candidate found for "{requested}"')
+            selected_candidate = dict(ranked[0][1])
+            target_ref = str(selected_candidate.get("ref", "") or selected_candidate.get("target", "") or "").strip()
+            target_by = str(selected_candidate.get("by", "") or "css")
+            target_selector = str(selected_candidate.get("selector", "") or "").strip()
+            if not target_ref and target_selector:
+                target_ref = target_selector
+            if not target_ref:
+                raise ValueError(f'No actionable target found for option "{requested}"')
+            click_result = self.click_target(target_ref, by=target_by)
+            if isinstance(click_result, dict) and click_result.get("ok") is False:
+                raise RuntimeError(str(click_result.get("error", "") or f'Failed to click option "{requested}"'))
+            clicked_targets.append(target_ref)
+            chosen_candidates.append(selected_candidate)
+
+        current = self._raw.get_current_url()
+        final_candidate = chosen_candidates[-1] if chosen_candidates else {}
+        return {
+            **current,
+            "selected": True,
+            "matched": True,
+            "selection_mode": "semantic_option_surface",
+            "selector": normalized_selector,
+            "by": normalized_by,
+            "requested_values": normalized_values,
+            "matched_values": [
+                str(item.get("text", "") or item.get("aria_label", "") or item.get("accessible_name", "") or "").strip()
+                for item in chosen_candidates
+            ],
+            "clicked_targets": clicked_targets,
+            "trigger_details": trigger_details,
+            "selected_candidate": final_candidate,
+        }
+
+    def _select_option_with_fallback(self, selector: str, by: str, values: list[str]) -> Dict[str, Any]:
+        try:
+            return self._execute_managed_target_action(
+                "select_option",
+                selector,
+                by,
+                values=values,
+            )
+        except Exception as exc:
+            message = str(exc or "").lower()
+            if any(token in message for token in ("not a selectable control", "unsupported managed action", "target not found")):
+                return self._semantic_select_option_fallback(selector, by, values)
+            raise
+
     def _fallback_wait_for_text(self, text: str, timeout_seconds: int = 20, tab_id: str = "") -> Dict[str, Any]:
         deadline = time.time() + max(1, int(timeout_seconds))
         last_text = ""
@@ -1016,9 +1246,23 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             ).strip()
             if lowered_filter and lowered_filter not in merged.lower():
                 continue
-            score = self._candidate_relevance_score(entry, text_filter=lowered_filter)
-            score += self._candidate_scope_boost(entry, scope)
-            ranked_entries.append((score, index, entry))
+            relevance = self._candidate_relevance_details(entry, text_filter=lowered_filter)
+            scope_details = self._candidate_scope_details(entry, scope)
+            score = int(relevance.get("score", 0) or 0) + int(scope_details.get("score", 0) or 0)
+            enriched = dict(entry)
+            enriched["match_reason"] = {
+                "score": score,
+                "relevance_reasons": list(relevance.get("reasons", []))[:12],
+                "scope_reasons": list(scope_details.get("reasons", []))[:12],
+                "matched_fields": list(relevance.get("matched_fields", []))[:8],
+            }
+            enriched["ranking_reason"] = "; ".join(
+                [
+                    *[str(item) for item in list(relevance.get("reasons", []))[:4]],
+                    *[str(item) for item in list(scope_details.get("reasons", []))[:4]],
+                ]
+            )
+            ranked_entries.append((score, index, enriched))
         ranked_entries.sort(key=lambda item: (-item[0], item[1]))
         return ranked_entries
 
@@ -1036,6 +1280,17 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         normalized_target = str(target or "").strip()
         normalized_by = str(by or "css")
         normalized_filter = str(text_filter or "")
+        cached = self._cached_resolution(
+            action_name=action_name,
+            target=normalized_target,
+            by=normalized_by,
+            text_filter=normalized_filter,
+            limit=limit,
+            include_boxes=include_boxes,
+            tab_id=tab_id,
+        )
+        if cached is not None:
+            return cached
         scope = self._build_resolution_scope(action_name, normalized_target, normalized_by, normalized_filter)
         if SNAPSHOT_REF_PATTERN.match(normalized_target):
             resolved = self._resolve_snapshot_ref(normalized_target)
@@ -1050,7 +1305,18 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 matched=True,
                 scope=scope,
             )
-            return {"entry": None, "trace": trace, "scope": scope, "resolved": resolved, "candidates": []}
+            result = {"entry": None, "trace": trace, "scope": scope, "resolved": resolved, "candidates": []}
+            self._store_resolution_cache(
+                action_name=action_name,
+                target=normalized_target,
+                by=normalized_by,
+                text_filter=normalized_filter,
+                limit=limit,
+                include_boxes=include_boxes,
+                tab_id=tab_id,
+                payload=result,
+            )
+            return result
 
         if self._capabilities.engine_name == "playwright_cli" and normalized_target:
             trace = self._build_resolution_trace(
@@ -1064,13 +1330,24 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 matched=True,
                 scope=scope,
             )
-            return {
+            result = {
                 "entry": None,
                 "trace": trace,
                 "scope": scope,
                 "resolved": {"selector": normalized_target, "by": normalized_by},
                 "candidates": [],
             }
+            self._store_resolution_cache(
+                action_name=action_name,
+                target=normalized_target,
+                by=normalized_by,
+                text_filter=normalized_filter,
+                limit=limit,
+                include_boxes=include_boxes,
+                tab_id=tab_id,
+                payload=result,
+            )
+            return result
 
         if self._capabilities.engine_name == "playwright_cli" and not normalized_target:
             snapshot_result = self._raw.snapshot(tab_id=tab_id)
@@ -1096,13 +1373,25 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 matched=bool(snapshot_candidates),
                 scope=scope,
             )
-            return {
-                "entry": dict(snapshot_candidates[0]) if snapshot_candidates else None,
-                "trace": trace,
-                "scope": scope,
-                "resolved": None,
-                "candidates": snapshot_candidates[: max(1, int(limit))],
-            }
+            if snapshot_candidates:
+                result = {
+                    "entry": dict(snapshot_candidates[0]),
+                    "trace": trace,
+                    "scope": scope,
+                    "resolved": None,
+                    "candidates": snapshot_candidates[: max(1, int(limit))],
+                }
+                self._store_resolution_cache(
+                    action_name=action_name,
+                    target=normalized_target,
+                    by=normalized_by,
+                    text_filter=normalized_filter,
+                    limit=limit,
+                    include_boxes=include_boxes,
+                    tab_id=tab_id,
+                    payload=result,
+                )
+                return result
 
         dom_selector = normalized_target or "a,button,input,textarea,select,summary,[role],[aria-label],[title],[placeholder]"
         dom_by = normalized_by if normalized_target else "css"
@@ -1128,7 +1417,18 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 matched=True,
                 scope=scope,
             )
-            return {"entry": dict(candidates[0]), "trace": trace, "scope": scope, "resolved": None, "candidates": candidates}
+            result = {"entry": dict(candidates[0]), "trace": trace, "scope": scope, "resolved": None, "candidates": candidates}
+            self._store_resolution_cache(
+                action_name=action_name,
+                target=normalized_target,
+                by=normalized_by,
+                text_filter=normalized_filter,
+                limit=limit,
+                include_boxes=include_boxes,
+                tab_id=tab_id,
+                payload=result,
+            )
+            return result
 
         trace = self._build_resolution_trace(
             action_name,
@@ -1141,7 +1441,18 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             matched=False,
             scope=scope,
         )
-        return {"entry": None, "trace": trace, "scope": scope, "resolved": None, "candidates": []}
+        result = {"entry": None, "trace": trace, "scope": scope, "resolved": None, "candidates": []}
+        self._store_resolution_cache(
+            action_name=action_name,
+            target=normalized_target,
+            by=normalized_by,
+            text_filter=normalized_filter,
+            limit=limit,
+            include_boxes=include_boxes,
+            tab_id=tab_id,
+            payload=result,
+        )
+        return result
 
     def _fallback_candidates(self, target: str = "", by: str = "css", text_filter: str = "", limit: int = 25, include_boxes: bool = True, tab_id: str = "") -> Dict[str, Any]:
         resolution = self._resolve_target_pipeline(
@@ -1778,12 +2089,7 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         result = self._dispatch(
             "select_option",
             lambda: self._raw.select_option(selector, values=normalized_values, by=by, timeout_seconds=timeout_seconds),
-            fallback=lambda: self._execute_managed_target_action(
-                "select_option",
-                selector,
-                by,
-                values=normalized_values,
-            ),
+            fallback=lambda: self._select_option_with_fallback(selector, by, normalized_values),
         )
         if isinstance(result, dict) and result.get("selected"):
             result.setdefault("by", str(by or "css"))
@@ -1897,6 +2203,57 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             else:
                 result.setdefault("script_result_state", "value")
         return result
+
+    def run_script_batch(self, scripts: list[str], tab_id: str = "", stop_on_error: bool = True) -> Dict:
+        if not isinstance(scripts, list) or not scripts:
+            raise ValueError("scripts is required")
+        items = []
+        normalized_tab_id = str(tab_id or "")
+        stop = bool(stop_on_error)
+        for index, script in enumerate(scripts):
+            script_text = str(script or "")
+            item = {
+                "index": index,
+                "script": script_text,
+            }
+            try:
+                item_result = self.run_script(script_text, tab_id=normalized_tab_id)
+                item["result"] = item_result
+                item["ok"] = item_result.get("ok") is not False if isinstance(item_result, dict) else True
+                if isinstance(item_result, dict) and item["ok"] is False:
+                    if item_result.get("error"):
+                        item["error"] = str(item_result.get("error", "") or "")
+                    if item_result.get("error_type"):
+                        item["error_type"] = str(item_result.get("error_type", "") or "")
+                    if stop:
+                        raise RuntimeError(item["error"] or "run_script_batch item failed")
+            except Exception as exc:
+                item["ok"] = False
+                item["error_type"] = type(exc).__name__
+                item["error"] = str(exc)
+                if stop:
+                    items.append(item)
+                    error_items = [entry for entry in items if not bool(entry.get("ok", False))]
+                    return {
+                        "count": len(items),
+                        "stop_on_error": stop,
+                        "ok_count": len(items) - len(error_items),
+                        "error_count": len(error_items),
+                        "all_ok": not error_items,
+                        "first_error": error_items[0] if error_items else None,
+                        "items": items,
+                    }
+            items.append(item)
+        error_items = [item for item in items if not bool(item.get("ok", False))]
+        return {
+            "count": len(items),
+            "stop_on_error": stop,
+            "ok_count": len(items) - len(error_items),
+            "error_count": len(error_items),
+            "all_ok": not error_items,
+            "first_error": error_items[0] if error_items else None,
+            "items": items,
+        }
 
     def _target_watch_signature(self, details: Dict[str, Any]) -> str:
         important = {

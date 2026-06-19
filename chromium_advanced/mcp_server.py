@@ -1024,37 +1024,9 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
 
         def _call() -> dict:
             browser_session = session_manager.resolve_session(session_id)
-            items = []
-            for index, script in enumerate(scripts):
-                script_text = str(script or "")
-                item = {
-                    "index": index,
-                    "script": script_text,
-                }
-                try:
-                    item_result = browser_session.run_script(script_text, tab_id=tab_id)
-                    item["result"] = item_result
-                    failed, message, error_type = _extract_action_level_error(item_result)
-                    item["ok"] = not failed
-                    if failed:
-                        if message:
-                            item["error"] = message
-                        if error_type:
-                            item["error_type"] = error_type
-                        if stop_on_error:
-                            raise RuntimeError(message or "run_script_batch item failed")
-                except Exception as exc:
-                    item["ok"] = False
-                    item["error_type"] = type(exc).__name__
-                    item["error"] = str(exc)
-                    if stop_on_error:
-                        raise
-                items.append(item)
             return {
                 "session_id": session_id,
-                "count": len(items),
-                "stop_on_error": bool(stop_on_error),
-                "items": items,
+                **browser_session.run_script_batch(scripts=scripts, tab_id=tab_id, stop_on_error=bool(stop_on_error)),
             }
 
         return _trace_mcp_tool("run_script_batch", _call, session_id=session_id)

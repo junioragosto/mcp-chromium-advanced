@@ -300,6 +300,10 @@ For target-local diagnostics, `browser_diagnose_target(...)` now also returns a 
 
 - `region_kind`
 - `interactive_controls`
+- `visible_controls`
+- `overlay_controls`
+- `dialog_controls`
+- `interactive_density`
 - `primary_actions`
 - `search_like_controls`
 - `status_controls`
@@ -312,6 +316,8 @@ Managed verification results are also more uniform now:
 - `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
 - `browser_verify_target_value(...)` and `browser_verify_target_visible(...)` also normalize `verified`, `matched`, `target`, and `by`
 - `browser_describe_target(...)` and `browser_list_candidates(...)` now expose a lightweight `target_summary` for easier upstream reasoning
+- candidate entries from `browser_list_candidates(...)` also carry `match_reason` and `ranking_reason` so the caller can see why a candidate was ranked first
+- `run_script_batch(...)` now reports `ok_count`, `error_count`, `all_ok`, and `first_error` in addition to item-level results
 
 On the default `patchright` path, successful high-frequency actions now also try to leave behind a richer post-action reasoning surface instead of only a minimal page pointer. In practice this means the returned `post_action_context` is more likely to already contain:
 
@@ -786,6 +792,19 @@ Windows packaged runtime notes:
 - Windows autostart should target the root launcher with `--start-minimized`
 - `ChromiumProfileManager.exe --exit-existing-instance` now requests the running GUI instance to exit and waits for the GUI/daemon lifecycle to shut down cleanly
 - explicit exit validation has confirmed that the installed GUI process, daemon process, and `28888` listener are all reclaimed together
+- latest packaged release validation on `2026-06-19` succeeded against `D:\softs\chromium\ChromiumProfileManager`
+- packaged startup validation confirmed that the GUI stayed alive and correctly launched the packaged daemon/worker runtime
+- packaged runtime validation confirmed `get_server_status().default_engine_name == "patchright"`
+- packaged authenticated validation succeeded on `Profile 1` with Gmail inbox access
+- packaged parallel validation succeeded with independent MCP sessions on `Profile 1` and `Profile 4`
+- packaged isolated validation succeeded through the managed daemon automation path with `runtime_options.incognito=true`
+- packaged cleanup validation succeeded: all sessions released cleanly and the service returned to `idle`
+
+Current packaged-runtime boundary:
+
+- the strongest validation surface on complex pages is still the higher-level structured path: `structured_page`, `browser_list_candidates(...)`, `browser_get_interaction_context(...)`, action traces, and screenshots
+- `run_script(...)` can still legitimately complete with `result=null` on some healthy live pages; treat that as a diagnostic boundary, not an automatic script failure
+- when a flow depends on high-fidelity structured extraction from difficult dynamic frontends, prefer the default `patchright` path and use the higher-level structured tools before assuming raw script execution is the right readback surface
 
 ## Skill templates
 

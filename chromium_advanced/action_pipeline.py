@@ -24,6 +24,7 @@ class ActionPipeline:
             "type_target_and_verify": self._type_target_and_verify,
             "press_key": self._press_key,
             "run_script": self._run_script,
+            "run_script_batch": self._run_script_batch,
             "watch_page_state": self._watch_page_state,
             "watch_target_state": self._watch_target_state,
             "wait_for": self._wait_for,
@@ -196,6 +197,13 @@ class ActionPipeline:
         return self.browser_session.run_script(
             str(args.get("script", "") or ""),
             tab_id=str(args.get("tab_id", "") or ""),
+        )
+
+    def _run_script_batch(self, args: Dict[str, Any]):
+        return self.browser_session.run_script_batch(
+            scripts=list(args.get("scripts", []) or []),
+            tab_id=str(args.get("tab_id", "") or ""),
+            stop_on_error=bool(args.get("stop_on_error", True)),
         )
 
     def _watch_page_state(self, args: Dict[str, Any]):
