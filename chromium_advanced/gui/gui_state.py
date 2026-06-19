@@ -844,16 +844,16 @@ def build_profile_table_view_model(
     profiles: List[Dict],
     *,
     selected_profile_name: str,
-    get_status_payload: Callable[[str], Dict[str, str]],
-    build_action_state: Callable[[str], Dict[str, object]],
+    get_status_payload: Callable[[Dict], Dict[str, str]],
+    build_action_state: Callable[[Dict], Dict[str, object]],
     keepalive_running_globally: bool,
     tr: TranslateFunc,
 ) -> Dict[str, object]:
     rows: List[Dict[str, object]] = []
     for profile in profiles:
         profile_name = str(profile.get("profile_name", "") or "").strip()
-        status_payload = get_status_payload(profile_name)
-        action_state = build_action_state(profile_name)
+        status_payload = get_status_payload(profile)
+        action_state = build_action_state(profile)
         row_payload = build_profile_table_row_payload(
             profile,
             status_payload=status_payload,

@@ -1466,6 +1466,7 @@ class ChromiumManagerWindow(QMainWindow):
 
     def update_selected_profile_status(self):
         profile = self.get_selected_profile()
+        keepalive_runtime = self.query_control_keepalive_runtime()
         control_profile = self.get_control_profile_entry(profile.get("profile_name", "") if profile else "")
         self.selected_profile_status.setPlainText(
             build_selected_profile_status_text(
@@ -1475,18 +1476,17 @@ class ChromiumManagerWindow(QMainWindow):
                 build_profile_detail_text,
                 self.profile_occupancy_cache,
                 self.external_profile_process_map,
-                self.is_profile_keepalive_running,
+                lambda profile_name: self._is_profile_keepalive_running_from_runtime(profile_name, keepalive_runtime),
                 self.tr,
                 control_profile,
             )
         )
 
-    def is_profile_keepalive_running(self, profile_name: str) -> bool:
+    def _is_profile_keepalive_running_from_runtime(self, profile_name: str, runtime: Dict) -> bool:
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             return False
-        runtime = self.query_control_keepalive_runtime()
-        if not bool(runtime.get("running", False)):
+        if not isinstance(runtime, dict) or not bool(runtime.get("running", False)):
             return False
         current_profile_name = str(runtime.get("current_profile_name", "") or "").strip()
         selected_profiles = [str(item).strip() for item in runtime.get("selected_profiles", []) if str(item).strip()]
@@ -1494,21 +1494,28 @@ class ChromiumManagerWindow(QMainWindow):
             return True
         return profile_name in selected_profiles
 
+    def is_profile_keepalive_running(self, profile_name: str) -> bool:
+        runtime = self.query_control_keepalive_runtime()
+        return self._is_profile_keepalive_running_from_runtime(profile_name, runtime)
+
     def is_single_profile_keepalive_active(self) -> bool:
         runtime = self.query_control_keepalive_runtime()
         selected_profiles = [str(item).strip() for item in runtime.get("selected_profiles", []) if str(item).strip()]
         return bool(runtime.get("running", False)) and len(selected_profiles) == 1
 
-    def is_profile_keepalive_ui_locked(self, profile_name: str) -> bool:
+    def _is_profile_keepalive_ui_locked_from_runtime(self, profile_name: str, runtime: Dict) -> bool:
         profile_name = str(profile_name or "").strip()
         if not profile_name:
             return False
-        runtime = self.query_control_keepalive_runtime()
-        if not bool(runtime.get("running", False)):
+        if not isinstance(runtime, dict) or not bool(runtime.get("running", False)):
             return False
         selected_profiles = [str(item).strip() for item in runtime.get("selected_profiles", []) if str(item).strip()]
         current_profile_name = str(runtime.get("current_profile_name", "") or "").strip()
         return profile_name == current_profile_name or profile_name in selected_profiles
+
+    def is_profile_keepalive_ui_locked(self, profile_name: str) -> bool:
+        runtime = self.query_control_keepalive_runtime()
+        return self._is_profile_keepalive_ui_locked_from_runtime(profile_name, runtime)
 
     def status_color_for_profile(self, profile: Dict) -> Optional[QColor]:
         color_hex = get_profile_status_color_hex(profile)
@@ -1519,10 +1526,11 @@ class ChromiumManagerWindow(QMainWindow):
         layout = QHBoxLayout(wrapper)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(6)
+        keepalive_running_globally = bool(self.query_control_keepalive_runtime().get("running", False))
         payloads = build_profile_site_selector_payloads(
             profile=profile,
             keepalive_site_ids=get_keepalive_site_ids(self.config),
-            keepalive_running_globally=bool(self.query_control_keepalive_runtime().get("running", False)),
+            keepalive_running_globally=keepalive_running_globally,
             get_site_label=lambda site_name: self.tr(f"site_name_{site_name}", get_keepalive_site_label(site_name, self.config)),
             get_site_icon_path=lambda site_name: get_keepalive_site_icon_path(site_name, self.config, fetch=False),
             site_checkbox_tooltip=self.tr("site_checkbox_tooltip"),
@@ -1769,27 +1777,39 @@ class ChromiumManagerWindow(QMainWindow):
 
     def refresh_table(self):
         profiles = sorted(self.config.get("profiles", []), key=lambda item: profile_sort_key(item.get("profile_name", "")))
+        keepalive_runtime = self.query_control_keepalive_runtime()
+        keepalive_running_globally = bool(keepalive_runtime.get("running", False))
+        control_profiles = (
+            self.control_profiles_cache.get("profiles", [])
+            if isinstance(self.control_profiles_cache, dict)
+            else []
+        )
+        control_profile_map = {
+            str(item.get("profile_name", "") or "").strip(): item
+            for item in control_profiles
+            if isinstance(item, dict) and str(item.get("profile_name", "") or "").strip()
+        }
         view_model = build_profile_table_view_model(
             profiles,
             selected_profile_name=self.selected_profile_name,
-            get_status_payload=lambda profile_name: build_profile_status_display(
-                profile_name,
+            get_status_payload=lambda profile: build_profile_status_display(
+                str(profile.get("profile_name", "") or "").strip(),
                 self.profile_occupancy_cache,
                 self.external_profile_process_map,
-                self.is_profile_keepalive_running,
+                lambda name: self._is_profile_keepalive_running_from_runtime(name, keepalive_runtime),
                 self.tr,
-                self.get_control_profile_entry(profile_name),
+                control_profile_map.get(str(profile.get("profile_name", "") or "").strip(), {}),
             ),
-            build_action_state=lambda profile_name: build_profile_row_action_state(
-                profile_name,
+            build_action_state=lambda profile: build_profile_row_action_state(
+                str(profile.get("profile_name", "") or "").strip(),
                 self.external_profile_process_map,
-                self.is_profile_keepalive_running,
-                self.is_profile_keepalive_ui_locked,
-                bool(self.query_control_keepalive_runtime().get("running", False)),
+                lambda name: self._is_profile_keepalive_running_from_runtime(name, keepalive_runtime),
+                lambda name: self._is_profile_keepalive_ui_locked_from_runtime(name, keepalive_runtime),
+                keepalive_running_globally,
                 self.tr,
-                self.get_control_profile_entry(profile_name),
+                control_profile_map.get(str(profile.get("profile_name", "") or "").strip(), {}),
             ),
-            keepalive_running_globally=bool(self.query_control_keepalive_runtime().get("running", False)),
+            keepalive_running_globally=keepalive_running_globally,
             tr=self.tr,
         )
         self.table.setUpdatesEnabled(False)
