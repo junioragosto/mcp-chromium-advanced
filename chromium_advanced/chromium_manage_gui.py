@@ -1240,7 +1240,11 @@ class ChromiumManagerWindow(QMainWindow):
         self.refresh_fallback_profile_occupancy_cache()
         if not initial_bootstrap:
             self.refresh_scheduler_status()
-            self.query_control_profiles(force=False)
+            self.current_ui_refresh_context = {
+                "control_profiles_payload": self.query_control_profiles(force=False),
+                "keepalive_runtime": self.query_control_keepalive_runtime(),
+                **(self.current_ui_refresh_context if isinstance(self.current_ui_refresh_context, dict) else {}),
+            }
         self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, delay_ms=0)
 
     def complete_startup_refresh(self):
@@ -1252,7 +1256,11 @@ class ChromiumManagerWindow(QMainWindow):
         ):
             self.start_mcp_service()
         self.refresh_scheduler_status()
-        self.query_control_profiles(force=False)
+        self.current_ui_refresh_context = {
+            "control_profiles_payload": self.query_control_profiles(force=False),
+            "keepalive_runtime": self.query_control_keepalive_runtime(),
+            **(self.current_ui_refresh_context if isinstance(self.current_ui_refresh_context, dict) else {}),
+        }
         self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True, delay_ms=0)
 
     def reload_config_from_disk(self):
@@ -3417,6 +3425,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.global_task_status.setText(view_model["status"])
         self.global_task_next_run.setText(view_model["next_run"])
         self.global_task_last_result.setText(view_model["last_result"])
+        self.current_ui_refresh_context["scheduler_keepalive_runtime"] = runtime
 
     def on_scheduler_timer(self):
         if self.is_ui_interaction_busy():
@@ -3425,8 +3434,8 @@ class ChromiumManagerWindow(QMainWindow):
             return
 
         self.refresh_scheduler_status()
-
-        if bool(self.query_control_keepalive_runtime().get("running", False)):
+        scheduler_runtime = self.current_ui_refresh_context.get("scheduler_keepalive_runtime", {})
+        if bool((scheduler_runtime if isinstance(scheduler_runtime, dict) else {}).get("running", False)):
             return
 
         enabled_profiles = self.get_enabled_keepalive_profiles()
