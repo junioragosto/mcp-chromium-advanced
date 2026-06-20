@@ -309,6 +309,10 @@ def build_posix_binaries():
             "--collect-submodules",
             "rich._unicode_data",
         ]
+        if sys.platform == "darwin" and macos_icon_path.exists():
+            command.extend(["--icon", str(macos_icon_path)])
+        elif sys.platform.startswith("win") and windows_icon_path.exists():
+            command.extend(["--icon", str(windows_icon_path)])
         if collect_patchright:
             command.extend(["--collect-all", "patchright"])
         for hidden_import in common_hidden_imports():

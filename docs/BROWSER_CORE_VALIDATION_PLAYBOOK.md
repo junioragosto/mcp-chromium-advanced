@@ -93,6 +93,8 @@ When validating browser-core behavior on difficult frontends:
 - treat raw `run_script(...)` as a supplemental readback surface, not the only truth source
 - if `run_script(...)` returns `result=null`, treat that as a diagnostic runtime boundary rather than immediate proof that the page is broken
 - if `run_script(...)` returns `script_result_state="stringified"`, treat that as a serialization boundary rather than a normal structured success
+- verify that follow-up candidate selection is using recent structured context instead of reverting to broad full-page probing immediately after a successful action
+- on collection-heavy pages, verify that later reads/actions stay biased toward the active collection kind and current interaction region when that is the semantically correct path
 
 ## Performance Baseline Checks
 
@@ -103,6 +105,7 @@ Every large release validation should also record:
 - whether the new path reduced exploratory round-trips compared with the prior build
 - whether diagnostics/logging stayed readable instead of exploding in volume
 - whether successful high-frequency actions stayed on the lightweight post-action path instead of silently triggering heavy follow-up probes
+- whether recent structured context improved follow-up hit rate on popup/filter/search/result-list style pages
 
 ## Validation Output
 

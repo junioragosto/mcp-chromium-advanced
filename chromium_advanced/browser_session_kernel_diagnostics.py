@@ -103,6 +103,15 @@ class ManagedSessionDiagnosticsMixin:
             suggestions.append("inspect_top_ranked_candidates_before_custom_script")
         if int(page.get("search_control_count", 0) or 0) > 0:
             suggestions.append("prefer_search_or_filter_controls_when_narrowing_scope")
+        if str(page.get("primary_collection_kind", "") or "") in {"comment_threads", "message_list", "result_list", "repository_list"}:
+            suggestions.append("prefer_collection_scoped_reads_before_full_page_probe")
+        if int(page.get("status_candidate_count", 0) or 0) > 0 and action_name in {
+            "watch_page_state",
+            "watch_target_state",
+            "wait_for_page_stable",
+            "diagnose_page",
+        }:
+            suggestions.append("prefer_status_surfaces_before_raw_script_polling")
         if int(page.get("primary_action_count", 0) or 0) > 0 and action_name in {"diagnose_page", "diagnose_target"}:
             suggestions.append("prefer_primary_action_controls_for_next_step")
 
@@ -552,6 +561,7 @@ class ManagedSessionDiagnosticsMixin:
         status_candidates: list[str] = []
         search_controls: list[Dict[str, Any]] = []
         filter_controls: list[Dict[str, Any]] = []
+        toolbar_controls: list[Dict[str, Any]] = []
         navigation_controls: list[Dict[str, Any]] = []
         primary_actions: list[Dict[str, Any]] = []
         interactive_labels_preview: list[str] = []
@@ -568,6 +578,7 @@ class ManagedSessionDiagnosticsMixin:
         }
         list_signal_count = 0
         table_signal_count = 0
+        status_surfaces: list[Dict[str, Any]] = []
         for raw_line in str(snapshot_text or "").splitlines():
             line = str(raw_line or "").strip()
             if not line:
@@ -613,6 +624,17 @@ class ManagedSessionDiagnosticsMixin:
                     candidate_text = summary_status_source.strip()
                     if candidate_text and candidate_text not in status_candidates:
                         status_candidates.append(candidate_text)
+                    if len(status_surfaces) < 12:
+                        status_surfaces.append(
+                            {
+                                "ref": ref,
+                                "tag_name": tag_name,
+                                "label": label or candidate_text,
+                                "summary": summary,
+                                "is_custom_element": bool(tag_name and "-" in tag_name),
+                                "scope_hint": scope_hint,
+                            }
+                        )
             if tag_name and "-" in tag_name and tag_name not in custom_elements:
                 custom_elements.append(tag_name)
             if tag_name in {"button", "link", "textbox", "input", "select", "option", "menuitem", "checkbox", "radio", "tab"}:
@@ -643,18 +665,34 @@ class ManagedSessionDiagnosticsMixin:
                     tabs.append(dict(control))
                     control_type_counts["tab"] += 1
                 lowered_label = label.lower() if label else ""
-                if lowered_label and any(token in lowered_label for token in SEARCH_KEYWORDS):
+                if (
+                    lowered_label and any(token in lowered_label for token in SEARCH_KEYWORDS)
+                ) or (
+                    tag_name in {"textbox", "input"} and any(token in lowered_summary for token in SEARCH_KEYWORDS)
+                ):
                     search_controls.append(dict(control))
-                if lowered_label and any(token in lowered_label for token in FILTER_KEYWORDS):
+                if (
+                    lowered_label and any(token in lowered_label for token in FILTER_KEYWORDS)
+                ) or (
+                    any(token in lowered_summary for token in FILTER_KEYWORDS)
+                    and tag_name in {"button", "menuitem", "option", "select", "tab"}
+                ):
                     filter_controls.append(dict(control))
                 if tag_name in {"link", "tab"}:
                     navigation_controls.append(dict(control))
+                if tag_name in {"button", "textbox", "input", "select", "tab"} and any(
+                    token in lowered_summary for token in ("toolbar", "filter", "search", "sort", "view")
+                ):
+                    toolbar_controls.append(dict(control))
                 if lowered_label and any(token in lowered_label for token in PRIMARY_ACTION_KEYWORDS):
                     primary_actions.append(dict(control))
                 if label and len(label) <= 120:
-                    if any(token in lowered_label for token in STATUS_KEYWORDS):
+                    if any(token in lowered_label for token in STATUS_KEYWORDS) or any(
+                        token in lowered_summary for token in STATUS_KEYWORDS
+                    ):
                         if label not in status_candidates:
                             status_candidates.append(label)
+                        status_surfaces.append(dict(control))
             if scope_hint or tag_name in {"dialog", "menu", "menuitem", "listbox", "option", "tab", "toolbar", "form"}:
                 region_key = scope_hint or tag_name or "generic"
                 region_summary = region_summaries.setdefault(
@@ -716,6 +754,21 @@ class ManagedSessionDiagnosticsMixin:
                 }
             )
             index = lookahead
+        message_items: list[Dict[str, Any]] = []
+        result_items: list[Dict[str, Any]] = []
+        repository_items: list[Dict[str, Any]] = []
+        for idx, line in enumerate(cleaned):
+            lowered = line.lower()
+            if "@" in line and ("hour" in lowered or "day" in lowered or "minute" in lowered):
+                continue
+            if re.search(r"\b(inbox|unread|drafts|sent|starred)\b", lowered):
+                continue
+            if re.search(r"\bfrom[:\s]|subject[:\s]", lowered):
+                message_items.append({"label": line, "line_index": idx})
+            if "/" in line and re.search(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", line.strip()):
+                repository_items.append({"label": line.strip(), "line_index": idx})
+            if re.search(r"\b(result|issue|pull request|repository|video|comment)\b", lowered):
+                result_items.append({"label": line, "line_index": idx})
         snapshot_refs = re.findall(r"\[ref=((?:f\d+)?e\d+)\]", str(snapshot_text or ""))
         primary_region = ""
         primary_region_count = 0
@@ -723,6 +776,54 @@ class ManagedSessionDiagnosticsMixin:
             if region_count > primary_region_count:
                 primary_region = region_name
                 primary_region_count = region_count
+        collection_summaries: list[Dict[str, Any]] = []
+        if comments:
+            collection_summaries.append(
+                {
+                    "kind": "comment_threads",
+                    "count": len(comments),
+                    "labels_preview": [item.get("author", "") for item in comments[:4] if str(item.get("author", "") or "")],
+                }
+            )
+        if message_items:
+            collection_summaries.append(
+                {
+                    "kind": "message_list",
+                    "count": len(message_items),
+                    "labels_preview": [item.get("label", "") for item in message_items[:4] if str(item.get("label", "") or "")],
+                }
+            )
+        if repository_items:
+            collection_summaries.append(
+                {
+                    "kind": "repository_list",
+                    "count": len(repository_items),
+                    "labels_preview": [item.get("label", "") for item in repository_items[:4] if str(item.get("label", "") or "")],
+                }
+            )
+        if result_items:
+            collection_summaries.append(
+                {
+                    "kind": "result_list",
+                    "count": len(result_items),
+                    "labels_preview": [item.get("label", "") for item in result_items[:4] if str(item.get("label", "") or "")],
+                }
+            )
+        collection_priority = {
+            "comment_threads": 4,
+            "message_list": 3,
+            "repository_list": 2,
+            "result_list": 1,
+        }
+        collection_summaries = sorted(
+            collection_summaries,
+            key=lambda item: (
+                -int(collection_priority.get(str(item.get("kind", "") or ""), 0) or 0),
+                -int(item.get("count", 0) or 0),
+                str(item.get("kind", "") or ""),
+            ),
+        )[:6]
+        primary_collection_kind = str(collection_summaries[0].get("kind", "") or "") if collection_summaries else ""
         return {
             "headings": headings,
             "interactive_controls": interactive_controls[:20],
@@ -741,6 +842,8 @@ class ManagedSessionDiagnosticsMixin:
             "search_control_count": len(search_controls),
             "filter_controls": filter_controls[:12],
             "filter_control_count": len(filter_controls),
+            "toolbar_controls": toolbar_controls[:12],
+            "toolbar_control_count": len(toolbar_controls),
             "navigation_controls": navigation_controls[:12],
             "navigation_control_count": len(navigation_controls),
             "primary_actions": primary_actions[:12],
@@ -749,6 +852,12 @@ class ManagedSessionDiagnosticsMixin:
             "custom_element_count": len(custom_elements),
             "comment_threads": comments[:12],
             "comment_thread_count": len(comments),
+            "message_items": message_items[:12],
+            "message_item_count": len(message_items),
+            "repository_items": repository_items[:12],
+            "repository_item_count": len(repository_items),
+            "result_items": result_items[:12],
+            "result_item_count": len(result_items),
             "snapshot_ref_count": len(snapshot_refs),
             "dialog_count": int(region_counts["dialog"]),
             "menu_count": int(region_counts["menu"]),
@@ -761,7 +870,12 @@ class ManagedSessionDiagnosticsMixin:
                 "list_signal_count": int(list_signal_count),
                 "table_signal_count": int(table_signal_count),
                 "comment_thread_count": len(comments),
+                "message_item_count": len(message_items),
+                "repository_item_count": len(repository_items),
+                "result_item_count": len(result_items),
             },
+            "collection_summaries": collection_summaries,
+            "primary_collection_kind": primary_collection_kind,
             "region_summaries": sorted(
                 [
                     {
@@ -775,6 +889,9 @@ class ManagedSessionDiagnosticsMixin:
                 key=lambda item: (-int(item.get("control_count", 0) or 0), str(item.get("region_kind", "") or "")),
             )[:8],
             "status_candidates": status_candidates[:12],
+            "status_candidate_count": len(status_candidates),
+            "status_surfaces": status_surfaces[:12],
+            "status_surface_count": len(status_surfaces),
             "role_counts": dict(sorted(role_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))),
             "control_type_counts": dict(control_type_counts),
             "interaction_region": primary_region,
@@ -1035,8 +1152,10 @@ class ManagedSessionDiagnosticsMixin:
         primary_actions = structured_page.get("primary_actions", []) if isinstance(structured_page, dict) else []
         search_controls = structured_page.get("search_controls", []) if isinstance(structured_page, dict) else []
         filter_controls = structured_page.get("filter_controls", []) if isinstance(structured_page, dict) else []
+        toolbar_controls = structured_page.get("toolbar_controls", []) if isinstance(structured_page, dict) else []
         navigation_controls = structured_page.get("navigation_controls", []) if isinstance(structured_page, dict) else []
         region_summaries = structured_page.get("region_summaries", []) if isinstance(structured_page, dict) else []
+        collection_summaries = structured_page.get("collection_summaries", []) if isinstance(structured_page, dict) else []
         active_label = str(
             active_element.get("accessible_name", "")
             or active_element.get("aria_label", "")
@@ -1067,9 +1186,24 @@ class ManagedSessionDiagnosticsMixin:
                 for item in navigation_controls[:4]
                 if isinstance(item, dict) and str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
             ],
+            "toolbar_control_labels": [
+                str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+                for item in toolbar_controls[:4]
+                if isinstance(item, dict) and str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+            ],
             "active_element_label": active_label,
             "active_element_role": str(active_element.get("role", "") or active_element.get("control_type", "") or "").strip(),
             "interaction_region": str(structured_page.get("interaction_region", "") or ""),
+            "primary_collection_kind": str(structured_page.get("primary_collection_kind", "") or ""),
+            "collection_summaries": [
+                {
+                    "kind": str(item.get("kind", "") or ""),
+                    "count": int(item.get("count", 0) or 0),
+                    "labels_preview": list(item.get("labels_preview", []))[:4],
+                }
+                for item in collection_summaries[:4]
+                if isinstance(item, dict)
+            ],
             "interaction_region_controls": {
                 "button_count": int(current_region.get("button_count", 0) or 0),
                 "form_control_count": int(current_region.get("form_control_count", 0) or 0),
@@ -1322,6 +1456,10 @@ class ManagedSessionDiagnosticsMixin:
             normalized["post_action_context"]["session_health"] = self._build_session_health_snapshot(
                 page_payload=normalized.get("post_action_context", {}).get("page", {})
             )
+            self._remember_structured_context(
+                normalized["post_action_context"].get("structured_page", {}),
+                normalized["post_action_context"].get("interaction_hints", {}),
+            )
         return normalized
 
     def _augment_diagnosis_payload(self, action_name: str, payload: Dict[str, Any], *, target: str = "", by: str = "css", text_filter: str = "") -> Dict[str, Any]:
@@ -1383,6 +1521,10 @@ class ManagedSessionDiagnosticsMixin:
             if isinstance(payload.get("interaction_context", {}), dict)
             else {},
             resolution_trace=payload.get("resolution_trace", {}) if isinstance(payload.get("resolution_trace", {}), dict) else {},
+        )
+        self._remember_structured_context(
+            payload.get("structured_page", {}),
+            payload.get("interaction_context", {}).get("interaction_hints", {}) if isinstance(payload.get("interaction_context", {}), dict) else {},
         )
         return payload
 

@@ -294,6 +294,8 @@ The structured diagnostics model is now broader than that initial baseline. In c
 - search and filter style controls
 - navigation-oriented controls such as links and tabs
 - collection signals for list/table/thread-heavy pages
+- collection summaries such as comment threads, message lists, repository lists, and generic result lists
+- toolbar controls and status surfaces that can be reused by the next follow-up action
 - lightweight role density and interactive label previews
 
 For target-local diagnostics, `browser_diagnose_target(...)` now also returns a richer `structured_region` block with:
@@ -331,6 +333,15 @@ The goal is to reduce how often callers need to immediately chain an extra `brow
 On ordinary successful fast-path actions, that continuation surface is also intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so callers keep useful continuation context without paying a hidden full-page diagnostics cost after every click or type action.
 
 On the default `patchright` path, candidate ordering is also now more intentionally semantic instead of only DOM-order-ish. Popup items, filter/search controls, and likely primary actions receive stronger ranking signals so complex frontend follow-up steps are more likely to hit on the first pass.
+
+Current follow-up ranking also reuses recent managed context instead of treating each action as stateless. In practice this means:
+
+- recent `structured_page` and `interaction_hints` are cached inside the managed session
+- follow-up candidate ranking can now prefer the active interaction region such as `overlay` or `dialog`
+- collection-oriented pages can bias later reads toward the current collection kind such as `comment_threads`, `message_list`, `repository_list`, or `result_list`
+- toolbar/filter/search/status labels extracted from the previous step can boost the next candidate search before falling back to broad full-page probing
+
+The intended result is fewer blind retries and fewer cases where a normal multi-step flow immediately degrades into full-page scanning after every successful click.
 
 ## Managed automation scripts
 

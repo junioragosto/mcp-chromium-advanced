@@ -141,6 +141,8 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         self._next_snapshot_ref = 1
         self._recent_actions: list[Dict[str, Any]] = []
         self._resolution_cache: Dict[str, Dict[str, Any]] = {}
+        self._last_structured_page: Dict[str, Any] = {}
+        self._last_interaction_hints: Dict[str, Any] = {}
 
     def _safe_int(self, value: Any, default: int = 0) -> int:
         try:
@@ -271,6 +273,55 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
     def _clear_resolution_cache(self) -> None:
         self._resolution_cache.clear()
 
+    def _remember_structured_context(self, structured_page: Any = None, interaction_hints: Any = None) -> None:
+        if isinstance(structured_page, dict) and structured_page:
+            self._last_structured_page = dict(structured_page)
+        if isinstance(interaction_hints, dict) and interaction_hints:
+            self._last_interaction_hints = dict(interaction_hints)
+
+    def _recent_structured_context(self) -> Dict[str, Any]:
+        structured_page = dict(self._last_structured_page) if isinstance(self._last_structured_page, dict) else {}
+        interaction_hints = dict(self._last_interaction_hints) if isinstance(self._last_interaction_hints, dict) else {}
+        toolbar_labels = [
+            str(item).strip().lower()
+            for item in interaction_hints.get("toolbar_control_labels", [])
+            if str(item or "").strip()
+        ] if isinstance(interaction_hints.get("toolbar_control_labels", []), list) else []
+        filter_labels = [
+            str(item).strip().lower()
+            for item in interaction_hints.get("filter_control_labels", [])
+            if str(item or "").strip()
+        ] if isinstance(interaction_hints.get("filter_control_labels", []), list) else []
+        search_labels = [
+            str(item).strip().lower()
+            for item in interaction_hints.get("search_control_labels", [])
+            if str(item or "").strip()
+        ] if isinstance(interaction_hints.get("search_control_labels", []), list) else []
+        status_labels = [
+            str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip().lower()
+            for item in structured_page.get("status_surfaces", [])
+            if isinstance(item, dict) and str(item.get("label", "") or item.get("text", "") or item.get("accessible_name", "") or "").strip()
+        ] if isinstance(structured_page.get("status_surfaces", []), list) else []
+        collection_labels: list[str] = []
+        if isinstance(interaction_hints.get("collection_summaries", []), list):
+            for item in interaction_hints.get("collection_summaries", [])[:6]:
+                if not isinstance(item, dict):
+                    continue
+                for label in item.get("labels_preview", [])[:4]:
+                    normalized = str(label or "").strip().lower()
+                    if normalized and normalized not in collection_labels:
+                        collection_labels.append(normalized)
+        return {
+            "primary_collection_kind": str(interaction_hints.get("primary_collection_kind", "") or structured_page.get("primary_collection_kind", "") or "").strip().lower(),
+            "interaction_region": str(interaction_hints.get("interaction_region", "") or structured_page.get("interaction_region", "") or "").strip().lower(),
+            "has_modal": bool(interaction_hints.get("has_modal", False)),
+            "toolbar_labels": toolbar_labels[:8],
+            "filter_labels": filter_labels[:8],
+            "search_labels": search_labels[:8],
+            "status_labels": status_labels[:8],
+            "collection_labels": collection_labels[:8],
+        }
+
     def _resolution_cache_key(
         self,
         *,
@@ -293,6 +344,7 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 "tab_id": str(tab_id or ""),
                 "engine_name": self._capabilities.engine_name,
                 "recent_target_hints": self._recent_target_hints(limit=6),
+                "structured_context": self._recent_structured_context(),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -382,11 +434,18 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         prefer_overlay = any(term in combined for term in transient_terms)
         prefer_dialog = any(term in combined for term in ("dialog", "modal", "confirm", "sheet", "popup"))
         prefer_expanded = any(term in combined for term in ("sort", "filter", "menu", "dropdown", "option", "newest", "latest"))
+        context = self._recent_structured_context()
         if not (prefer_overlay or prefer_dialog or prefer_expanded):
             recent_text = " ".join(recent_hints)
             prefer_overlay = any(term in recent_text for term in ("menu", "dropdown", "popup", "sort", "filter"))
             prefer_dialog = any(term in recent_text for term in ("dialog", "modal", "sheet"))
             prefer_expanded = any(term in recent_text for term in ("expanded", "sort", "filter", "menu"))
+        if not prefer_overlay and bool(context.get("has_modal")):
+            prefer_overlay = True
+        if not prefer_dialog and bool(context.get("has_modal")):
+            prefer_dialog = True
+        if not prefer_expanded:
+            prefer_expanded = bool(context.get("filter_labels") or context.get("toolbar_labels"))
         return {
             "action_name": str(action_name or ""),
             "target": str(target or ""),
@@ -398,6 +457,7 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             "prefer_dialog": prefer_dialog,
             "prefer_expanded": prefer_expanded,
             "explicit_target": bool(str(target or "").strip()),
+            "structured_context": context,
         }
 
     def _normalize_page_drift(self, payload: Any) -> Dict[str, Any]:
@@ -1217,6 +1277,8 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 "prefer_dialog": bool(scope.get("prefer_dialog")),
                 "prefer_expanded": bool(scope.get("prefer_expanded")),
                 "recent_target_hints": list(scope.get("recent_target_hints", []))[:6],
+                "interaction_region": str((scope.get("structured_context", {}) or {}).get("interaction_region", "") or ""),
+                "primary_collection_kind": str((scope.get("structured_context", {}) or {}).get("primary_collection_kind", "") or ""),
             },
         }
 
@@ -1230,6 +1292,16 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
     def _rank_entries(self, entries: list[Dict[str, Any]], text_filter: str, scope: Dict[str, Any]) -> list[tuple[int, int, Dict[str, Any]]]:
         ranked_entries: list[tuple[int, int, Dict[str, Any]]] = []
         lowered_filter = str(text_filter or "").strip().lower()
+        context = scope.get("structured_context", {}) if isinstance(scope.get("structured_context"), dict) else {}
+        context_tokens: list[str] = []
+        for key in ("toolbar_labels", "filter_labels", "search_labels", "status_labels", "collection_labels"):
+            values = context.get(key, [])
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                normalized = str(value or "").strip().lower()
+                if normalized and normalized not in context_tokens:
+                    context_tokens.append(normalized)
         for index, entry in enumerate(entries):
             if not isinstance(entry, dict):
                 continue
@@ -1242,24 +1314,57 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                     str(entry.get("role", "") or ""),
                     str(entry.get("name", "") or ""),
                     str(entry.get("value", "") or ""),
+                    str(entry.get("ancestry_path", "") or ""),
+                    str(entry.get("control_type", "") or ""),
                 ]
             ).strip()
             if lowered_filter and lowered_filter not in merged.lower():
                 continue
             relevance = self._candidate_relevance_details(entry, text_filter=lowered_filter)
             scope_details = self._candidate_scope_details(entry, scope)
-            score = int(relevance.get("score", 0) or 0) + int(scope_details.get("score", 0) or 0)
+            context_score = 0
+            context_reasons: list[str] = []
+            merged_lower = merged.lower()
+            if str(context.get("primary_collection_kind", "") or ""):
+                kind = str(context.get("primary_collection_kind", "") or "")
+                role = str(entry.get("role", "") or "").lower()
+                control_type = str(entry.get("control_type", "") or "").lower()
+                if kind == "message_list" and any(token in role or token in control_type for token in ("row", "listitem", "article", "link")):
+                    context_score += 40
+                    context_reasons.append("primary_collection:message_list")
+                elif kind == "comment_threads" and any(token in role or token in control_type for token in ("article", "listitem", "comment", "button")):
+                    context_score += 40
+                    context_reasons.append("primary_collection:comment_threads")
+                elif kind == "repository_list" and any(token in role or token in control_type for token in ("link", "row", "listitem")):
+                    context_score += 40
+                    context_reasons.append("primary_collection:repository_list")
+                elif kind == "result_list" and any(token in role or token in control_type for token in ("link", "button", "row", "listitem", "menuitem")):
+                    context_score += 40
+                    context_reasons.append("primary_collection:result_list")
+            for token in context_tokens[:8]:
+                if token and token in merged_lower:
+                    context_score += 12
+                    context_reasons.append(f"context_label:{token}")
+                    break
+            if str(context.get("interaction_region", "") or "") == "overlay" and bool(entry.get("in_overlay")):
+                context_score += 35
+                context_reasons.append("interaction_region:overlay")
+            if str(context.get("interaction_region", "") or "") == "dialog" and bool(entry.get("in_dialog")):
+                context_score += 35
+                context_reasons.append("interaction_region:dialog")
+            score = int(relevance.get("score", 0) or 0) + int(scope_details.get("score", 0) or 0) + context_score
             enriched = dict(entry)
             enriched["match_reason"] = {
                 "score": score,
                 "relevance_reasons": list(relevance.get("reasons", []))[:12],
-                "scope_reasons": list(scope_details.get("reasons", []))[:12],
+                "scope_reasons": [*list(scope_details.get("reasons", []))[:12], *context_reasons[:8]],
                 "matched_fields": list(relevance.get("matched_fields", []))[:8],
             }
             enriched["ranking_reason"] = "; ".join(
                 [
                     *[str(item) for item in list(relevance.get("reasons", []))[:4]],
                     *[str(item) for item in list(scope_details.get("reasons", []))[:4]],
+                    *[str(item) for item in context_reasons[:4]],
                 ]
             )
             ranked_entries.append((score, index, enriched))
@@ -1870,6 +1975,10 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 action_name="inspect",
                 tab_id=str(result.get("tab_id", "") or tab_id or ""),
             )
+            self._remember_structured_context(
+                result["interaction_context"].get("structured_page", {}),
+                result["interaction_context"].get("interaction_hints", {}),
+            )
         return result
 
     def snapshot(self, target: str = "", by: str = "css", depth: int | None = None, boxes: bool = False, filename: str = "", tab_id: str = "") -> Dict:
@@ -2471,7 +2580,12 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             )
         else:
             result = self._dispatch("diagnose_page", lambda: self._raw.diagnose_page(tab_id=tab_id))
-        return self._augment_diagnosis_payload("diagnose_page", result)
+        augmented = self._augment_diagnosis_payload("diagnose_page", result)
+        self._remember_structured_context(
+            augmented.get("structured_page", {}),
+            augmented.get("interaction_context", {}).get("interaction_hints", {}) if isinstance(augmented.get("interaction_context", {}), dict) else {},
+        )
+        return augmented
 
     def verify_text(self, text: str) -> Dict:
         result = self._dispatch("verify_text", lambda: self._raw.verify_text(text))

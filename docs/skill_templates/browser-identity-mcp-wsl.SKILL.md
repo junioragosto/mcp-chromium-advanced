@@ -132,6 +132,8 @@ That structured page model is now broader as well. It can additionally expose:
 - search and filter style controls
 - navigation-oriented controls
 - collection signals for list/table/thread-heavy pages
+- collection summaries such as comment threads, message lists, repository lists, and generic result lists
+- toolbar controls and status surfaces that can guide the next follow-up action
 - lightweight role density and interactive label previews
 
 For target-local debugging from WSL, prefer `browser_diagnose_target(...)` when the task is about one control or local panel. Its `structured_region` block now includes:
@@ -165,6 +167,13 @@ On the default `patchright` path, successful high-frequency actions also leave b
 On ordinary successful fast-path actions, that continuation surface is also intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so the caller still gets useful continuation context without paying a hidden full-page diagnostics cost after every click or type action.
 
 On the default `patchright` path, candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries from WSL as well.
+
+That follow-up ranking also now reuses recent managed context:
+
+- recent `structured_page` and `interaction_hints` are cached inside the managed session
+- the active interaction region such as `overlay` or `dialog` can bias the next candidate search
+- collection-heavy pages can bias follow-up steps toward the active collection kind such as `comment_threads`, `message_list`, `repository_list`, or `result_list`
+- toolbar/filter/search/status labels extracted from the previous step can boost the next ranking pass before the runtime falls back to broad full-page probing
 
 Runtime isolation note from WSL:
 

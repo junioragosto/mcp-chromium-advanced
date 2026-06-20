@@ -272,6 +272,8 @@ In current builds that structured page model is broader than the initial version
 - search and filter style controls
 - navigation-oriented controls
 - collection signals for list/table/thread-heavy pages
+- collection summaries such as comment threads, message lists, repository lists, and generic result lists
+- toolbar controls and status surfaces that help drive the next follow-up action
 - lightweight role density and interactive label previews
 
 For target-local debugging, prefer `browser_diagnose_target(...)` when the task is really about one control or one local region. Its `structured_region` block now includes:
@@ -305,6 +307,13 @@ On the default `patchright` path, successful high-frequency actions also leave b
 On ordinary successful fast-path actions, that continuation surface is also intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so the caller gets useful continuation context without paying a hidden full-page diagnostics cost after every click or type action.
 
 On the default `patchright` path, candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries.
+
+Recent managed context also participates in that ranking now:
+
+- recent `structured_page` and `interaction_hints` are cached per managed session
+- the active interaction region such as `overlay` or `dialog` can bias the next candidate search
+- collection-heavy pages can bias later follow-up steps toward the active collection kind such as `comment_threads`, `message_list`, `repository_list`, or `result_list`
+- toolbar/filter/search/status labels extracted from the prior step can boost the next candidate ranking before the runtime falls back to broad full-page probing
 
 Runtime isolation note:
 
