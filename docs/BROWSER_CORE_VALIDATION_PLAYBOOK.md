@@ -56,6 +56,10 @@ Every large release validation pass should cover all of the following:
   - challenge-heavy site access
   - stealth-sensitive browsing
   - slider / drag / gesture-style interaction
+- for gesture/pattern pages, validate the high-level path first:
+  - `browser_detect_gesture_grid(...)`
+  - `browser_unlock_gesture_pattern(...)`
+- do not count a release as gesture-validated if the flow only succeeded through ad hoc `run_script + screenshot + manual coordinate stitching`
 
 7. Cleanup validation
 - all sessions release cleanly

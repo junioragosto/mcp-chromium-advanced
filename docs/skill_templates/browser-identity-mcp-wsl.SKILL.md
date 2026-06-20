@@ -63,6 +63,10 @@ Important engine capability examples from WSL remain the same:
   prefer this for lightweight compatibility flows and bounded diagnostics
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as engine-scoped capabilities, not as guaranteed fallback tools on every runtime
+- prefer the high-level gesture path first:
+  - `browser_detect_gesture_grid(...)`
+  - `browser_unlock_gesture_pattern(...)`
+- only drop to raw coordinate/continuous-path calls when gesture-grid detection fails or the control is genuinely freeform
 
 Recently strengthened high-level actions from WSL are the same:
 

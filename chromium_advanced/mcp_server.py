@@ -1311,6 +1311,52 @@ def build_server(config_path: Optional[str] = None) -> FastMCP:
             ),
         }
 
+    @server.tool(annotations=browser_read_annotations)
+    def browser_detect_gesture_grid(
+        session_id: str,
+        container_target: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class"] = "css",
+        tab_id: str = "",
+        min_nodes: int = 4,
+    ) -> dict:
+        """Detect a gesture/pattern-lock style node grid and return ordered node centers."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.detect_gesture_grid(
+                container_target=container_target,
+                by=str(by or "css"),
+                tab_id=tab_id,
+                min_nodes=int(min_nodes),
+            ),
+        }
+
+    @server.tool(annotations=trusted_browser_action_annotations)
+    def browser_unlock_gesture_pattern(
+        session_id: str,
+        pattern: list[str | int],
+        container_target: str = "",
+        by: Literal["css", "xpath", "id", "name", "tag", "class"] = "css",
+        tab_id: str = "",
+        steps_per_segment: int = 18,
+        hold_before_ms: int = 0,
+        segment_delay_ms: int = 0,
+    ) -> dict:
+        """Detect a gesture node grid and perform one continuous gesture by node order/labels."""
+        browser_session = session_manager.resolve_session(session_id)
+        return {
+            "session_id": session_id,
+            **browser_session.unlock_gesture_pattern(
+                pattern=list(pattern or []),
+                container_target=container_target,
+                by=str(by or "css"),
+                tab_id=tab_id,
+                steps_per_segment=int(steps_per_segment),
+                hold_before_ms=int(hold_before_ms),
+                segment_delay_ms=int(segment_delay_ms),
+            ),
+        }
+
     @server.tool(annotations=trusted_browser_action_annotations)
     def drag_target(
         session_id: str,

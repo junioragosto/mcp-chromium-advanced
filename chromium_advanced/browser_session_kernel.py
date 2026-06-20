@@ -2714,6 +2714,232 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             ),
         )
 
+    def detect_gesture_grid(
+        self,
+        container_target: str = "",
+        by: str = "css",
+        tab_id: str = "",
+        min_nodes: int = 4,
+    ) -> Dict:
+        normalized_target = str(container_target or "").strip()
+        normalized_by = str(by or "css")
+        min_nodes = max(4, int(min_nodes))
+        target_expr = json.dumps(normalized_target, ensure_ascii=False)
+        by_expr = json.dumps(normalized_by, ensure_ascii=False)
+        script = f"""
+const target = {target_expr};
+const by = {by_expr};
+const minNodes = {int(min_nodes)};
+
+function resolveRootTarget(targetValue, byValue) {{
+  if (!targetValue) return null;
+  try {{
+    if (byValue === 'css') return document.querySelector(targetValue);
+    if (byValue === 'xpath') return document.evaluate(targetValue, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+    if (byValue === 'id') return document.getElementById(targetValue);
+    if (byValue === 'name') return document.querySelector(`[name="${{String(targetValue).replace(/"/g, '\\"')}}"]`);
+    if (byValue === 'class') return document.querySelector(`.${{String(targetValue).trim().split(/\\s+/).join('.')}}`);
+    if (byValue === 'tag') return document.querySelector(String(targetValue));
+  }} catch (error) {{
+    return null;
+  }}
+  return null;
+}}
+
+function textOf(node) {{
+  return String(node?.innerText || node?.textContent || '').replace(/\\s+/g, ' ').trim();
+}}
+
+function asBox(rect) {{
+  return {{
+    x: Number(rect.left.toFixed(2)),
+    y: Number(rect.top.toFixed(2)),
+    width: Number(rect.width.toFixed(2)),
+    height: Number(rect.height.toFixed(2)),
+  }};
+}}
+
+function centerForRect(rect) {{
+  return {{
+    x: Number((rect.left + rect.width / 2).toFixed(2)),
+    y: Number((rect.top + rect.height / 2).toFixed(2)),
+  }};
+}}
+
+const root = resolveRootTarget(target, by) || document;
+const strongSelector = '.node, [data-index], [data-node], [data-point], [data-key]';
+const fallbackSelector = '[role="button"], button, [aria-label]';
+
+function collectCandidates(selectorText) {{
+  const items = [];
+  for (const element of root.querySelectorAll(selectorText)) {{
+    if (!(element instanceof HTMLElement)) continue;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 18 || rect.height < 18) continue;
+    const label = String(
+      element.getAttribute('data-index') ||
+      element.getAttribute('data-id') ||
+      element.getAttribute('data-node') ||
+      element.getAttribute('data-point') ||
+      element.getAttribute('data-key') ||
+      element.getAttribute('aria-label') ||
+      textOf(element) ||
+      ''
+    ).trim();
+    const match = label.match(/\\d+/);
+    items.push({{
+      label,
+      numeric: match ? Number(match[0]) : 0,
+      active:
+        element.classList.contains('active') ||
+        element.classList.contains('selected') ||
+        element.classList.contains('current') ||
+        element.getAttribute('aria-pressed') === 'true' ||
+        element.getAttribute('aria-selected') === 'true',
+      center: centerForRect(rect),
+      box: asBox(rect),
+      classes: String(element.className || ''),
+    }});
+  }}
+  return items;
+}}
+
+let nodes = collectCandidates(strongSelector);
+if (nodes.length < minNodes) {{
+  const seen = new Set(nodes.map((item) => `${{item.center.x}}:${{item.center.y}}:${{item.label}}`));
+  for (const item of collectCandidates(fallbackSelector)) {{
+    const key = `${{item.center.x}}:${{item.center.y}}:${{item.label}}`;
+    if (!seen.has(key)) {{
+      nodes.push(item);
+      seen.add(key);
+    }}
+  }}
+}}
+if (nodes.length < minNodes) {{
+  return {{
+    detected: false,
+    requested_target: target,
+    requested_by: by,
+    reason: target ? 'no_candidate_nodes_inside_target' : 'no_candidate_gesture_grid_found',
+  }};
+}}
+const numbered = nodes.filter((item) => item.numeric > 0);
+const numberingMode = numbered.length >= Math.ceil(nodes.length / 2) ? 'numeric_label' : 'visual_order';
+const ordered = [...nodes].sort((a, b) => {{
+  if (numberingMode === 'numeric_label') {{
+    if (a.numeric !== b.numeric) return a.numeric - b.numeric;
+  }}
+  if (a.center.y !== b.center.y) return a.center.y - b.center.y;
+  return a.center.x - b.center.x;
+}});
+const rows = new Set(ordered.map((item) => Math.round(item.center.y / 40))).size;
+const cols = new Set(ordered.map((item) => Math.round(item.center.x / 40))).size;
+return {{
+  detected: true,
+  requested_target: target,
+  requested_by: by,
+  numbering_mode: numberingMode,
+  node_count: ordered.length,
+  rows,
+  cols,
+  nodes: ordered.map((item, index) => ({{
+    index: index + 1,
+    label: item.label,
+    numeric: item.numeric,
+    active: item.active,
+    center: item.center,
+    box: item.box,
+    classes: item.classes,
+  }})),
+}};
+"""
+        result = self.run_script(script, tab_id=tab_id)
+        payload = result.get("result") if isinstance(result, dict) else None
+        if isinstance(payload, dict):
+            payload.setdefault("requested_target", normalized_target)
+            payload.setdefault("requested_by", normalized_by)
+            return payload
+        return {
+            "detected": False,
+            "requested_target": normalized_target,
+            "requested_by": normalized_by,
+            "error": "gesture_grid_detection_failed",
+            "raw_result": result,
+        }
+
+    def unlock_gesture_pattern(
+        self,
+        pattern: list[Any],
+        *,
+        container_target: str = "",
+        by: str = "css",
+        tab_id: str = "",
+        steps_per_segment: int = 18,
+        hold_before_ms: int = 0,
+        segment_delay_ms: int = 0,
+    ) -> Dict:
+        normalized_pattern = [str(item).strip() for item in list(pattern or []) if str(item).strip()]
+        if len(normalized_pattern) < 2:
+            raise ValueError("pattern must contain at least two node ids")
+        grid = self.detect_gesture_grid(container_target=container_target, by=by, tab_id=tab_id)
+        if not bool(grid.get("detected")):
+            return {
+                "unlocked": False,
+                "gesture_performed": False,
+                "pattern": list(normalized_pattern),
+                "grid": grid,
+                "error": "gesture_grid_not_detected",
+            }
+        mapping: Dict[str, Dict[str, Any]] = {}
+        for item in list(grid.get("nodes", []) or []):
+            for key in (
+                str(item.get("index", "") or "").strip(),
+                str(item.get("numeric", "") or "").strip(),
+                str(item.get("label", "") or "").strip(),
+            ):
+                if key and key not in mapping:
+                    mapping[key] = item
+        missing = [item for item in normalized_pattern if item not in mapping]
+        if missing:
+            return {
+                "unlocked": False,
+                "gesture_performed": False,
+                "pattern": list(normalized_pattern),
+                "grid": grid,
+                "error": "gesture_nodes_missing",
+                "missing_nodes": missing,
+            }
+        points = []
+        resolved_nodes = []
+        for key in normalized_pattern:
+            item = mapping[key]
+            center = item.get("center", {}) if isinstance(item, dict) else {}
+            points.append({"x": float(center.get("x", 0.0)), "y": float(center.get("y", 0.0))})
+            resolved_nodes.append(
+                {
+                    "requested": key,
+                    "index": int(item.get("index", 0) or 0),
+                    "numeric": int(item.get("numeric", 0) or 0),
+                    "label": str(item.get("label", "") or ""),
+                    "center": dict(center) if isinstance(center, dict) else {},
+                }
+            )
+        action = self.mouse_gesture_path(
+            points,
+            steps_per_segment=int(steps_per_segment),
+            hold_before_ms=int(hold_before_ms),
+            segment_delay_ms=int(segment_delay_ms),
+        )
+        return {
+            "unlocked": bool(action.get("gesture_performed", False)),
+            "gesture_performed": bool(action.get("gesture_performed", False)),
+            "pattern": list(normalized_pattern),
+            "resolved_nodes": resolved_nodes,
+            "point_count": len(points),
+            "grid": grid,
+            **(dict(action) if isinstance(action, dict) else {"action_result": action}),
+        }
+
     def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
         return self._dispatch("screenshot", lambda: self._raw.screenshot(filename=filename, tab_id=tab_id))
 

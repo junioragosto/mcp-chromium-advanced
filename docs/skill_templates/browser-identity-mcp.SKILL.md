@@ -203,6 +203,10 @@ Important engine capability examples:
   prefer this for lightweight compatibility flows, bounded diagnostics, or lower-overhead tasks when the stronger `patchright` path is not required
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as a formal capability boundary rather than a generic fallback every engine should support
+- prefer the high-level gesture path first:
+  - `browser_detect_gesture_grid(...)`
+  - `browser_unlock_gesture_pattern(...)`
+- only fall back to raw XY or `browser_mouse_gesture_path(...)` when gesture-grid detection fails or the control is genuinely freeform
 
 Recently strengthened high-level actions:
 
