@@ -1020,11 +1020,26 @@ class SeleniumBrowserSession(BrowserSession):
         handle = self._resolve_handle(tab_id=tab_id)
         self._activate_handle(handle)
         result = self.driver.execute_script(script)
+        serialization_error = ""
         try:
             serialized = json.loads(json.dumps(result))
-        except TypeError:
+            result_state = "value" if serialized is not None else "null"
+        except TypeError as exc:
             serialized = str(result)
-        return {**self.get_current_url(tab_id=handle), "result": serialized}
+            serialization_error = str(exc or "")
+            result_state = "stringified"
+        payload = {
+            **self.get_current_url(tab_id=handle),
+            "result": serialized,
+            "script_result_state": result_state,
+            "script_result_type": type(result).__name__ if result is not None else "NoneType",
+        }
+        if serialization_error:
+            payload["serialization_error"] = serialization_error
+            payload["diagnostic_hint"] = "run_script returned a non-JSON-serializable value and was stringified."
+        elif result_state == "null":
+            payload["diagnostic_hint"] = "run_script returned null."
+        return payload
 
     def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:
         self._poll_debug_logs()

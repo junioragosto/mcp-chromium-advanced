@@ -473,7 +473,7 @@ class WorkerManager:
         self._active_browser_session_ids: set[str] = set()
         self._worker_listening_cache = False
         self._worker_listening_cache_at = 0.0
-        self._worker_listening_cache_ttl_seconds = 2.0
+        self._worker_listening_cache_ttl_seconds = 4.0
         self._worker_log_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
@@ -821,10 +821,10 @@ def create_daemon_app(
     housekeeping_interval_seconds = 30.0
     runtime_status_cache: Dict[str, object] = {}
     runtime_status_cache_at = 0.0
-    runtime_status_cache_ttl_seconds = 2.0
+    runtime_status_cache_ttl_seconds = 4.0
     control_profiles_cache: Dict[str, object] = {}
     control_profiles_cache_at = 0.0
-    control_profiles_cache_ttl_seconds = 2.0
+    control_profiles_cache_ttl_seconds = 4.0
 
     def maybe_run_housekeeping(force: bool = False) -> None:
         nonlocal housekeeping_last_run_at

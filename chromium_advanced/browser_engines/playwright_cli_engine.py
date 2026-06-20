@@ -1388,7 +1388,15 @@ class PlaywrightCliBrowserSession(BrowserSession):
             result = self._eval_json(self._build_safe_eval_function(script), tab_id=effective_tab_id)
         except Exception:
             result = self._eval_json(self._build_eval_function(script), tab_id=effective_tab_id)
-        return {**self.get_current_url(tab_id=effective_tab_id), "result": result}
+        payload = {
+            **self.get_current_url(tab_id=effective_tab_id),
+            "result": result,
+            "script_result_state": "value" if result is not None else "null",
+            "script_result_type": type(result).__name__ if result is not None else "NoneType",
+        }
+        if result is None:
+            payload["diagnostic_hint"] = "run_script returned null."
+        return payload
 
     def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:
         effective_tab_id = self._preferred_tab_id(tab_id=tab_id)

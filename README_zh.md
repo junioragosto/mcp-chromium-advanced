@@ -641,6 +641,9 @@ skill 模板里应明确告诉 agent：
 - 复杂页面下，当前最可靠的验收与读取面仍然是高层结构化路径：`structured_page`、`browser_list_candidates(...)`、`browser_get_interaction_context(...)`、action trace 与 screenshot
 - `run_script(...)` 在部分真实动态页面上仍可能出现“执行成功但 `result=null`”的情况，这应被视为当前读回边界，而不是自动判定为脚本执行失败
 - 如果任务依赖复杂动态前端上的高保真结构化提取，应优先使用默认的 `patchright` 路径，并优先调用高层结构化工具，而不是直接把原始脚本执行结果当作唯一读数面
+- 标准浏览器核心验证手册见 `docs/BROWSER_CORE_VALIDATION_PLAYBOOK.md`，其中同时定义了大版本发布验证剧本与小迭代 smoke 剧本
+- 本地空闲运行时测量可使用 `python scripts/measure_idle_runtime.py`
+- 当前的产品目标不是“空闲永远 0 CPU”，而是让空闲占用可度量、可解释、可跨版本比较
 
 ## License
 

@@ -2194,14 +2194,21 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         result = self._dispatch("run_script", lambda: self._raw.run_script(script, tab_id=tab_id))
         if isinstance(result, dict):
             script_result = result.get("result")
-            if script_result is None:
-                result.setdefault("script_result_state", "null")
+            result.setdefault("script_result_type", type(script_result).__name__ if script_result is not None else "NoneType")
+            current_state = str(result.get("script_result_state", "") or "").strip().lower()
+            if not current_state:
+                current_state = "value" if script_result is not None else "null"
+                result["script_result_state"] = current_state
+            if current_state == "null":
                 result.setdefault(
                     "diagnostic_hint",
-                    "run_script returned null; the page may still be rendering, the queried node may not exist yet, or the script may not have returned a value.",
+                    "run_script returned null; the page may still be rendering, the queried node may not exist yet, the script may not have returned a value, or the page returned an empty structured result.",
                 )
-            else:
-                result.setdefault("script_result_state", "value")
+            elif current_state == "stringified":
+                result.setdefault(
+                    "diagnostic_hint",
+                    "run_script returned a non-JSON-serializable value and the runtime stringified it.",
+                )
         return result
 
     def run_script_batch(self, scripts: list[str], tab_id: str = "", stop_on_error: bool = True) -> Dict:

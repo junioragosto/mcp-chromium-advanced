@@ -52,6 +52,19 @@ PRIMARY_ACTION_KEYWORDS = ("save", "submit", "apply", "confirm", "continue", "ne
 
 
 class ManagedSessionDiagnosticsMixin:
+    def _deferred_anti_bot_snapshot(self) -> Dict[str, Any]:
+        return {
+            "detected": False,
+            "confidence": "deferred",
+            "deferred": True,
+            "strong_markers": [],
+            "weak_markers": [],
+            "structured_signals": {},
+            "page_signals": {},
+            "text_error": "",
+            "html_error": "",
+        }
+
     def _next_step_suggestions_for_context(
         self,
         *,
@@ -1109,7 +1122,14 @@ class ManagedSessionDiagnosticsMixin:
             "mouse_drag_xy",
         }
 
-    def _minimal_post_action_context(self, action_name: str, tab_id: str = "") -> Dict[str, Any]:
+    def _minimal_post_action_context(
+        self,
+        action_name: str,
+        tab_id: str = "",
+        *,
+        include_anti_bot: bool = False,
+        include_session_health: bool = True,
+    ) -> Dict[str, Any]:
         normalized_tab_id = str(tab_id or "").strip()
         try:
             page = (
@@ -1156,7 +1176,24 @@ class ManagedSessionDiagnosticsMixin:
         structured_page = self._extract_structured_page_data(page_text, snapshot_text=snapshot_text)
         modal_state = {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []}
         interaction_hints = self._build_interaction_hints(structured_page, {}, modal_state)
-        session_health = self._build_session_health_snapshot(page_payload=page)
+        session_health = (
+            self._build_session_health_snapshot(page_payload=page)
+            if include_session_health
+            else {
+                "alive": True,
+                "current_url": str(page.get("url", "") or ""),
+                "title": str(page.get("title", "") or ""),
+                "engine_name": self._capabilities.engine_name,
+                "runtime_profile": self._capabilities.runtime_profile,
+                "recent_action_count": len(self._recent_actions),
+                "recent_failure_count": len([item for item in self._recent_actions if not item.get("ok")]),
+                "last_action_name": str(self._recent_actions[-1].get("action_name", "") or "") if self._recent_actions else "",
+                "failure_classification": "healthy",
+                "recovery_hint": "none",
+                "recovery_actions": [],
+                "page_drift": self._normalize_page_drift({}),
+            }
+        )
         return {
             "action_name": str(action_name or "inspect"),
             "page": page,
@@ -1164,7 +1201,7 @@ class ManagedSessionDiagnosticsMixin:
             "active_tab_id": active_tab_id,
             "active_element": {},
             "modal_state": modal_state,
-            "anti_bot": self._build_anti_bot_detection(page),
+            "anti_bot": self._build_anti_bot_detection(page) if include_anti_bot else self._deferred_anti_bot_snapshot(),
             "snapshot": snapshot_payload,
             "structured_page": structured_page,
             "interaction_hints": interaction_hints,
@@ -1195,7 +1232,12 @@ class ManagedSessionDiagnosticsMixin:
         payload["post_action_context"] = (
             self._build_post_action_context(context_action, tab_id=str(payload.get("tab_id", "") or ""))
             if payload.get("ok") is False or failure
-            else self._minimal_post_action_context(context_action, tab_id=str(payload.get("tab_id", "") or ""))
+            else self._minimal_post_action_context(
+                context_action,
+                tab_id=str(payload.get("tab_id", "") or ""),
+                include_anti_bot=False,
+                include_session_health=True,
+            )
         )
         return payload
 

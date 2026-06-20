@@ -328,6 +328,8 @@ On the default `patchright` path, successful high-frequency actions now also try
 
 The goal is to reduce how often callers need to immediately chain an extra `browser_snapshot(...)` or `browser_diagnose_page(...)` just to continue a normal multi-step flow.
 
+On ordinary successful fast-path actions, that continuation surface is also intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so callers keep useful continuation context without paying a hidden full-page diagnostics cost after every click or type action.
+
 On the default `patchright` path, candidate ordering is also now more intentionally semantic instead of only DOM-order-ish. Popup items, filter/search controls, and likely primary actions receive stronger ranking signals so complex frontend follow-up steps are more likely to hit on the first pass.
 
 ## Managed automation scripts
@@ -820,6 +822,21 @@ The skill guidance should explicitly tell agents that:
 - `patchright` should be selected when structured extraction or deep frontend diagnostics matter more than throughput
 - `selenium_uc` should be selected when stealth, anti-bot tolerance, recurring challenge pages, gesture flows, or coordinate fallback matter more than speed
 - If a flow must be validated without inheriting the current regular-window session state, use the managed daemon automation path with `runtime_options.incognito=true`. Do not assume the current `browserIdentity` MCP tool surface can pass that parameter directly at session start.
+
+Standard browser-core validation is now documented in:
+
+- `docs/BROWSER_CORE_VALIDATION_PLAYBOOK.md`
+
+That playbook defines both:
+
+- a large-release validation pass
+- a smaller iteration smoke pass
+
+For local idle-runtime measurement, use:
+
+- `python scripts/measure_idle_runtime.py`
+
+The current product goal for idle measurement is not “zero CPU forever”, but a clearly bounded and explainable idle footprint that can be compared across iterations before release.
 
 ## Keepalive Plugins
 

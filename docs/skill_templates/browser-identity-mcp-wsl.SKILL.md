@@ -162,6 +162,8 @@ On the default `patchright` path, successful high-frequency actions also leave b
 - lightweight `interaction_hints`
 - recent action/session-health context
 
+On ordinary successful fast-path actions, that continuation surface is also intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so the caller still gets useful continuation context without paying a hidden full-page diagnostics cost after every click or type action.
+
 On the default `patchright` path, candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries from WSL as well.
 
 Runtime isolation note from WSL:
@@ -176,6 +178,8 @@ How to switch engines explicitly:
 
 - `can_start_profile_session(profile_name="Profile 4", engine="patchright")`
 - `start_profile_session(profile_name="Profile 4", engine="selenium_uc")`
+- for difficult dynamic pages from WSL as well, prefer `browser_get_interaction_context(...)`, `browser_list_candidates(...)`, and other structured surfaces before depending on raw `run_script(...)` readback
+- if `run_script(...)` returns `script_result_state="stringified"`, treat that as a serialization boundary, not as a normal structured success
 
 Do not assume the service is single-engine. This MCP exposes multiple browser backends behind one profile/session interface, and the caller is allowed to choose the engine per new session.
 

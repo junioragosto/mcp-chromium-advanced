@@ -302,6 +302,8 @@ On the default `patchright` path, successful high-frequency actions also leave b
 - lightweight `interaction_hints`
 - recent action/session-health context
 
+On ordinary successful fast-path actions, that continuation surface is also intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so the caller gets useful continuation context without paying a hidden full-page diagnostics cost after every click or type action.
+
 On the default `patchright` path, candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries.
 
 Runtime isolation note:
@@ -318,6 +320,8 @@ How to switch engines explicitly:
 - set `engine="selenium_uc"` when a page needs gesture/drag/XY mouse actions
 - set `engine="patchright"` explicitly when the caller wants to pin the strongest structured path
 - set `engine="playwright_cli"` only when a lightweight compatibility path is intentionally desired
+- for difficult dynamic pages, prefer `browser_get_interaction_context(...)`, `browser_list_candidates(...)`, and other structured surfaces before depending on raw `run_script(...)` readback
+- if `run_script(...)` returns `script_result_state="stringified"`, treat that as a serialization boundary rather than a normal structured success
 
 Example:
 
