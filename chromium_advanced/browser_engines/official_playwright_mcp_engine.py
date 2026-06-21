@@ -117,9 +117,11 @@ class OfficialPlaywrightMcpBrowserSession(BrowserSession):
 
     def get_summary(self) -> BrowserSessionSummary:
         payload = self.get_current_url()
+        current_url = str(payload.get("url", "") or payload.get("href", "") or "").strip()
+        title = str(payload.get("title", "") or "").strip()
         return BrowserSessionSummary(
-            current_url=str(payload.get("url", "") or ""),
-            title=str(payload.get("title", "") or ""),
+            current_url=current_url,
+            title=title,
             alive=bool(payload.get("alive", True)),
         )
 

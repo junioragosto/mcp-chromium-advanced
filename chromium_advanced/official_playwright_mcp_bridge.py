@@ -152,11 +152,28 @@ class OfficialPlaywrightMcpBridge:
             return parsed
 
     def _summary_from_state(self) -> Dict[str, Any]:
+        active_tab_id = str(self._state.get("active_tab_id", "") or "")
+        state_url = str(self._state.get("url", "") or "")
+        state_title = str(self._state.get("title", "") or "")
+        tabs = self._state.get("tabs", [])
+        if isinstance(tabs, list):
+            for item in tabs:
+                if not isinstance(item, dict):
+                    continue
+                item_tab_id = str(item.get("tab_id", item.get("id", "")) or "")
+                if active_tab_id and item_tab_id != active_tab_id:
+                    continue
+                if not state_url:
+                    state_url = str(item.get("url", "") or "")
+                if not state_title:
+                    state_title = str(item.get("title", "") or "")
+                if state_url and state_title:
+                    break
         return {
-            "url": str(self._state.get("url", "") or ""),
-            "title": str(self._state.get("title", "") or ""),
+            "url": state_url,
+            "title": state_title,
             "alive": bool(self._state.get("alive", True)),
-            "tab_id": str(self._state.get("active_tab_id", "") or ""),
+            "tab_id": active_tab_id,
         }
 
     def get_capabilities(self) -> Dict:
@@ -268,7 +285,22 @@ class OfficialPlaywrightMcpBridge:
         return {"navigated": True, **self._summary_from_state()}
 
     def get_current_url(self, *, tab_id: str = "") -> Dict:
-        return dict(self._summary_from_state())
+        payload = self.run_script(
+            script="""() => ({
+              url: location.href,
+              title: document.title,
+              readyState: document.readyState
+            })""",
+            tab_id=tab_id,
+        )
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        summary = self._summary_from_state()
+        return {
+            **summary,
+            **result,
+            "url": str(result.get("url", "") or summary.get("url", "") or ""),
+            "title": str(result.get("title", "") or summary.get("title", "") or ""),
+        }
 
     def get_page_text(self, *, tab_id: str = "") -> Dict:
         payload = self.run_script(script="() => document.body ? document.body.innerText : ''", tab_id=tab_id)
@@ -460,13 +492,28 @@ class OfficialPlaywrightMcpBridge:
                   title: document.title,
                   readyState: document.readyState,
                   bodyTextLength: document.body ? String(document.body.innerText || '').length : 0,
-                  childCount: document.body ? document.body.querySelectorAll('*').length : 0
+                  childCount: document.body ? document.body.querySelectorAll('*').length : 0,
+                  pendingImages: Array.from(document.images || []).filter((img) => !img.complete).length,
+                  busyHint: !!document.querySelector('dialog,[role="dialog"],[aria-busy="true"],[data-loading="true"],[data-testid*="loading"]')
                 })""",
                 tab_id=tab_id,
             )
             current_state = payload.get("result") if isinstance(payload.get("result"), dict) else {}
             last_state = dict(current_state or {})
-            if current_state == previous_state and str(current_state.get("readyState", "")) == "complete":
+            ready_state = str(current_state.get("readyState", "") or "").strip().lower()
+            busy_hint = bool(current_state.get("busyHint", False))
+            pending_images = int(current_state.get("pendingImages", 0) or 0)
+            is_stable_match = (
+                isinstance(previous_state, dict)
+                and ready_state == "complete"
+                and not busy_hint
+                and pending_images <= 1
+                and str(current_state.get("href", "") or "") == str(previous_state.get("href", "") or "")
+                and str(current_state.get("title", "") or "") == str(previous_state.get("title", "") or "")
+                and abs(int(current_state.get("bodyTextLength", 0) or 0) - int(previous_state.get("bodyTextLength", 0) or 0)) <= 32
+                and abs(int(current_state.get("childCount", 0) or 0) - int(previous_state.get("childCount", 0) or 0)) <= 8
+            )
+            if is_stable_match:
                 stable_count += 1
                 if stable_count >= stable_needed:
                     return {
@@ -476,7 +523,7 @@ class OfficialPlaywrightMcpBridge:
                         **self._summary_from_state(),
                     }
             else:
-                stable_count = 1 if str(current_state.get("readyState", "")) == "complete" else 0
+                stable_count = 1 if ready_state == "complete" and not busy_hint and pending_images <= 1 else 0
             previous_state = current_state
             time.sleep(poll_seconds)
         return {
