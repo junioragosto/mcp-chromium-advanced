@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420">
+  <defs>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .card { fill: #ffffff; stroke: #3c557e; stroke-width: 2; rx: 16; ry: 16; }
+      .title { font: 700 30px 'Segoe UI', Arial, sans-serif; fill: #1f2c40; }
+      .sub { font: 700 20px 'Segoe UI', Arial, sans-serif; fill: #1f2c40; }
+      .text { font: 16px 'Segoe UI', Arial, sans-serif; fill: #31435e; }
+    </style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1200" height="420"/>
+  <text class="title" x="40" y="50">Engine Positioning</text>
+
+  <rect class="card" x="40" y="90" width="260" height="250"/>
+  <text class="sub" x="60" y="125">official_playwright_mcp</text>
+  <text class="text" x="60" y="165">default governed path</text>
+  <text class="text" x="60" y="195">closest official semantics</text>
+  <text class="text" x="60" y="225">best for normal MCP work</text>
+
+  <rect class="card" x="330" y="90" width="260" height="250"/>
+  <text class="sub" x="350" y="125">patchright</text>
+  <text class="text" x="350" y="165">live-root compatibility fallback</text>
+  <text class="text" x="350" y="195">strong structured diagnostics</text>
+  <text class="text" x="350" y="225">site-specific fallback path</text>
+
+  <rect class="card" x="620" y="90" width="260" height="250"/>
+  <text class="sub" x="640" y="125">selenium_uc</text>
+  <text class="text" x="640" y="165">stealth and anti-bot focus</text>
+  <text class="text" x="640" y="195">gesture and coordinate fallback</text>
+  <text class="text" x="640" y="225">challenge-heavy sites</text>
+
+  <rect class="card" x="910" y="90" width="250" height="250"/>
+  <text class="sub" x="930" y="125">playwright_cli</text>
+  <text class="text" x="930" y="165">lightweight compatibility path</text>
+  <text class="text" x="930" y="195">lower native fidelity</text>
+  <text class="text" x="930" y="225">not the default high-capability path</text>
+</svg>

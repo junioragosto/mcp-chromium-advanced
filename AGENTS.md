@@ -30,6 +30,15 @@ This project exposes a GUI-managed MCP service for real Chromium profiles with p
 - Windows-hosted MCP may be reachable from WSL via the Windows-side host IP rather than WSL `127.0.0.1`.
 - Verify the configured host/port before attempting WSL access.
 
+## Plan Document Rule
+
+- New development plan documents must be stored under `docs/06-archive/dev_plan/`.
+- Do not create new top-level `dev_plan/` directories again.
+- File naming rule:
+  `YYYYMMDD_<short_description>.md`
+- If the task is a new implementation or large upgrade plan, write the plan there first before starting major work.
+- Active product behavior, user instructions, and operator guidance must still be documented under `docs/01` to `docs/05`; plan files are implementation-history artifacts, not the current product contract.
+
 ## Reusable Prompt Pattern
 
 Use wording like this in other tasks when you want the agent to use the real-login browser MCP:

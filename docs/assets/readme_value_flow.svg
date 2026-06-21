@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360">
+  <defs>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .card { fill: #ffffff; stroke: #36507a; stroke-width: 2; rx: 18; ry: 18; }
+      .title { font: 700 30px 'Segoe UI', Arial, sans-serif; fill: #1e2b3d; }
+      .text { font: 18px 'Segoe UI', Arial, sans-serif; fill: #2b3b53; }
+      .small { font: 16px 'Segoe UI', Arial, sans-serif; fill: #455a78; }
+      .line { stroke: #47658c; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#47658c"/>
+    </marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1200" height="360"/>
+  <text class="title" x="40" y="52">Managed Real-Browser Identity Flow</text>
+
+  <rect class="card" x="40" y="95" width="240" height="180"/>
+  <text class="text" x="65" y="135">Real Chromium Profiles</text>
+  <text class="small" x="65" y="170">cookies</text>
+  <text class="small" x="65" y="198">local storage</text>
+  <text class="small" x="65" y="226">extensions</text>
+  <text class="small" x="65" y="254">persistent login state</text>
+
+  <rect class="card" x="330" y="95" width="240" height="180"/>
+  <text class="text" x="355" y="135">Governed Runtime</text>
+  <text class="small" x="355" y="170">SessionManager</text>
+  <text class="small" x="355" y="198">profile locks</text>
+  <text class="small" x="355" y="226">engine selection</text>
+  <text class="small" x="355" y="254">safe release and reuse</text>
+
+  <rect class="card" x="620" y="95" width="240" height="180"/>
+  <text class="text" x="645" y="135">Unified Browser Layer</text>
+  <text class="small" x="645" y="170">high-level actions</text>
+  <text class="small" x="645" y="198">structured reads</text>
+  <text class="small" x="645" y="226">diagnostics and traces</text>
+  <text class="small" x="645" y="254">cross-engine normalization</text>
+
+  <rect class="card" x="910" y="95" width="240" height="180"/>
+  <text class="text" x="935" y="135">Consumers</text>
+  <text class="small" x="935" y="170">Desktop GUI</text>
+  <text class="small" x="935" y="198">MCP clients</text>
+  <text class="small" x="935" y="226">daemon automation scripts</text>
+  <text class="small" x="935" y="254">keepalive jobs</text>
+
+  <path class="line" d="M280 185 L330 185"/>
+  <path class="line" d="M570 185 L620 185"/>
+  <path class="line" d="M860 185 L910 185"/>
+</svg>
+

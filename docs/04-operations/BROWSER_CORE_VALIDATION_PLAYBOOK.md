@@ -17,11 +17,13 @@ The intent is to avoid ad hoc validation and keep future comparisons consistent.
 Use these engine assumptions throughout validation:
 
 - `patchright`
-  default primary path for structured extraction, complex frontend interaction, and richer diagnostics
+  live-root fallback and compatibility path when a site behaves better on the older direct Patchright integration
 - `selenium_uc`
   preferred for stealth-sensitive pages, recurring challenge/verification flows, and gesture/XY interaction
 - `playwright_cli`
   lightweight compatibility and lower-overhead path, not the primary high-fidelity structured-read engine
+- `official_playwright_mcp`
+  default governed MCP path for ordinary browsing tasks, upstream-aligned interaction semantics, and primary high-level validation
 
 ## Large Release Validation
 
@@ -34,7 +36,7 @@ Every large release validation pass should cover all of the following:
 
 2. Default engine verification
 - `get_server_status()` confirms the configured default engine
-- expected current baseline: `patchright`
+- expected current baseline: `official_playwright_mcp`
 
 3. Real authenticated scenario
 - use `Profile 1` when available

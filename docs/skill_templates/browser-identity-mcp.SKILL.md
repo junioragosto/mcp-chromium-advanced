@@ -206,8 +206,8 @@ Important engine capability examples:
   prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs coordinate-level mouse actions such as drag, gesture unlock, slider/pattern input, or vision-style XY fallback
 - `playwright_cli`
   prefer this for lightweight compatibility flows, bounded diagnostics, or lower-overhead tasks when the stronger `patchright` path is not required
-- `official_playwright_mcp`
-  use this only when the build explicitly ships the bundled official runtime and the session can run through mirror-backed `isolated_runtime`; do not use it as the normal live-root default path
+- `official_playwright_mcp_runtime`
+  this path requires the build to ship the bundled official runtime and runs through governed `isolated_runtime`; it is the normal default governed path, not a live-root backend
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as a formal capability boundary rather than a generic fallback every engine should support
 - prefer the high-level gesture path first:
@@ -308,16 +308,16 @@ Managed verification surfaces are also more uniform now:
 - `browser_list_candidates(...)` candidates now also expose `match_reason` and `ranking_reason`, which should be used before blind retries on dense dynamic pages
 - `run_script_batch(...)` now also returns `ok_count`, `error_count`, `all_ok`, and `first_error` in addition to per-item results
 
-On the default `patchright` path, successful high-frequency actions also leave behind a richer `post_action_context` more often than before. Treat that as the first continuation surface before jumping to a heavier follow-up call. In normal cases it can already include:
+Managed success paths now keep more continuation state inside the session kernel instead of forcing every normal action to return a heavy `post_action_context`. Do not assume every successful click or type action will include `post_action_context`; the stable continuation surface is:
 
-- a bounded `snapshot`
-- derived `structured_page`
-- lightweight `interaction_hints`
-- recent action/session-health context
+- `action_meta` on the action result
+- the next structured read such as `browser_get_interaction_context(...)`
+- `browser_list_candidates(...)`
+- `browser_diagnose_page(...)` when a heavier diagnostic pass is actually needed
 
-On ordinary successful fast-path actions, that continuation surface is also intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so the caller gets useful continuation context without paying a hidden full-page diagnostics cost after every click or type action.
+On ordinary successful fast-path actions, that continuation model is intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so the caller gets useful continuation signal without paying a hidden full-page diagnostics cost after every click or type action.
 
-On the default `patchright` path, candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries.
+Candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries.
 
 Recent managed context also participates in that ranking now:
 

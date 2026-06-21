@@ -66,7 +66,7 @@ Important engine capability examples from WSL remain the same:
   prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs gesture unlock, drag, slider movement, or coordinate-level mouse fallback
 - `playwright_cli`
   prefer this for lightweight compatibility flows and bounded diagnostics
-- `official_playwright_mcp`
+- `official_playwright_mcp_runtime`
   use this as the preferred governed isolated-runtime backend when the bundled official runtime is present; do not treat it as a live-root backend
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as engine-scoped capabilities, not as guaranteed fallback tools on every runtime
@@ -168,16 +168,16 @@ Managed verification surfaces are also more uniform from WSL:
 - `browser_list_candidates(...)` candidates now also expose `match_reason` and `ranking_reason`, so retry logic from WSL should inspect ranking intent before broadening selectors
 - `run_script_batch(...)` now also returns `ok_count`, `error_count`, `all_ok`, and `first_error` in addition to per-item results
 
-On the default `patchright` path, successful high-frequency actions also leave behind a richer `post_action_context` more often than before. Use that as the first continuation surface before escalating to a heavier extra call. In normal cases it can already include:
+Managed success paths now keep more continuation state inside the session kernel instead of forcing every normal action to return a heavy `post_action_context`. Do not assume every successful click or type action will include `post_action_context`; the stable continuation surface is:
 
-- a bounded `snapshot`
-- derived `structured_page`
-- lightweight `interaction_hints`
-- recent action/session-health context
+- `action_meta` on the action result
+- the next structured read such as `browser_get_interaction_context(...)`
+- `browser_list_candidates(...)`
+- `browser_diagnose_page(...)` when a heavier diagnostic pass is actually needed
 
-On ordinary successful fast-path actions, that continuation surface is also intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so the caller still gets useful continuation context without paying a hidden full-page diagnostics cost after every click or type action.
+On ordinary successful fast-path actions, that continuation model is intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so the caller still gets useful continuation signal without paying a hidden full-page diagnostics cost after every click or type action.
 
-On the default `patchright` path, candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries from WSL as well.
+Candidate ordering is also more semantic now. Popup items, search/filter controls, and likely primary actions receive stronger ranking signals, so complex frontend follow-up steps should need fewer exploratory retries from WSL as well.
 
 That follow-up ranking also now reuses recent managed context:
 

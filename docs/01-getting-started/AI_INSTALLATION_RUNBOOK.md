@@ -197,7 +197,7 @@ Runtime note for callers:
 - `runtime_options.incognito=true` is supported on the managed daemon automation path when the caller wants to validate a flow without inheriting the normal regular-window session state. The current `browserIdentity` MCP tool surface does not yet expose `runtime_options` directly on `start_profile_session(...)`.
 - `runtime_options.resource_only=true` is supported on the managed daemon automation path when the caller only needs exclusive access to the governed profile files, such as `yt-dlp --cookies-from-browser ...`, and does not need a live browser session.
 
-Keepalive plugins can add new site logic without rebuilding the app. The GUI exposes a dedicated Keepalive Plugins tab for inspecting built-in plugin source and editing trusted local plugins. See `docs/KEEPALIVE_PLUGIN_GUIDE.md`.
+Keepalive plugins can add new site logic without rebuilding the app. The GUI exposes a dedicated Keepalive Plugins tab for inspecting built-in plugin source and editing trusted local plugins. See `docs/03-integrations/KEEPALIVE_PLUGIN_GUIDE.md`.
 
 Do not treat `chromium_profiles.example.json` as a real config. It is a sanitized template.
 
@@ -340,7 +340,8 @@ close_profile_session(session_id)
 
 Use this policy unless the user gives a different explicit instruction:
 
-- Use `patchright` for ordinary browsing, forms, navigation, multi-tab work, screenshots, structured extraction, and most production MCP flows.
+- Use `official_playwright_mcp` for ordinary browsing, forms, navigation, multi-tab work, screenshots, structured extraction, and most production MCP flows.
+- Use `patchright` when the task specifically benefits from the older live-root behavior or a site proves more stable there.
 - Use `selenium_uc` for stealth-sensitive sites, or when the user reports automation banners/detection problems and accepts lower throughput.
 - Use `playwright_cli` for lightweight compatibility paths, bounded diagnostics, or explicitly lower-overhead flows.
 - If the task specifically needs isolated validation without normal session carry-over, keep the selected profile the same and use the managed daemon automation path with `runtime_options.incognito=true`.

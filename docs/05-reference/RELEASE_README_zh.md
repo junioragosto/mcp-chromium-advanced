@@ -13,8 +13,8 @@
 - 示例配置：
   - `chromium_profiles.example.json`
 - 发布说明：
-  - `release_readme.md`
-  - `release_zh.md`
+  - `docs/05-reference/RELEASE_README.md`
+  - `docs/05-reference/RELEASE_README_zh.md`
 
 ## 安装包不包含的内容
 
@@ -92,14 +92,14 @@
 
 ## 引擎说明
 
+- `official_playwright_mcp`
+  默认受治理高层 MCP 引擎，优先用于普通生产任务和主流浏览器自动化流程
 - `patchright`
-  默认高能力 MCP 引擎
+  live-root 兼容回退路径；当目标站点在旧直连路径下更稳定时优先使用
 - `selenium_uc`
   更适合反自动化识别、challenge、拖动、手势等场景
 - `playwright_cli`
   轻量集成兼容引擎，不再是默认高能力路径
-- `official_playwright_mcp`
-  基于内置 Node.js 和内置 `@playwright/mcp` runtime 的默认受治理引擎。当前版本已经通过 `isolated_runtime` 物化运行时正式可用，但它不是 live-root 持久 Profile 直接持有者。
 
 ## 内置 Runtime 约定
 

@@ -1,909 +1,196 @@
 # MCP Chromium Advanced
 
-MCP Chromium Advanced is a desktop GUI and MCP service for managing real Chromium browser profiles. It is intended for workflows that need an existing logged-in browser identity rather than a fresh automation-only browser.
+Managed real-browser identities for AI automation.
+
+MCP Chromium Advanced is a desktop GUI plus MCP service for workflows that must
+reuse a real Chromium profile with persistent login state instead of starting a
+fresh disposable automation browser every time.
 
 Current release baseline: `0.1.0`
 
-[中文文档](./README_zh.md)
+- [中文说明](./README_zh.md)
+- [Documentation Index](./docs/README.md)
 
-## Overview
+![Managed Real-Browser Identity Flow](./docs/assets/readme_value_flow.svg)
 
-This project is best understood as a real Chromium identity manager plus an MCP browser service. Instead of creating a fresh disposable automation browser for every task, it is designed to let AI workflows safely reuse existing logged-in browser profiles.
+## What It Is
 
-From a first-contact perspective, there are seven key ideas:
+This project combines:
 
-1. It solves the "real login state" problem.
-   The project lets GUI-managed Chromium profiles be exposed to MCP clients so automation can reuse cookies, local storage, extensions, bookmarks, and site permissions.
-2. It is organized into layered runtime control.
-   The GUI manages configuration and profiles, the daemon provides a stable MCP endpoint, the worker starts on demand, and a managed browser session kernel normalizes runtime behavior before MCP tools use it.
-3. It supports multiple browser execution engines.
-   Shared profile and session ownership stay the same, while the execution backend can use Selenium plus `undetected_chromedriver`, Patchright, `playwright_cli`, or the governed `official_playwright_mcp` isolated-runtime backend.
-4. It exposes a more stable runtime contract than the raw engines alone.
-   The managed session kernel adds structured capability metadata, normalized action errors, and generic DOM-script fallbacks so callers are less exposed to engine-specific gaps.
-5. It is designed around safe profile ownership.
-   Session checks prevent live-root tasks, threads, or keepalive jobs from silently fighting over the same logged-in browser identity, while mirror-isolated runtime clones provide a controlled parallel path when enabled.
-6. It attaches automation to real Chromium profiles.
-   The browser is launched with the actual `user-data-dir` and `profile-directory`, then the selected execution engine connects to that persistent profile.
-7. It includes keepalive workflows in addition to MCP control.
-   The GUI can run scheduled or manual keepalive tasks against real logged-in profiles for sites such as ChatGPT, Gmail, and Google.
+- a desktop GUI for managing real Chromium profiles
+- a stable daemon and worker runtime
+- an MCP browser service for agents
+- a governed daemon automation API for fixed local scripts
 
-Important account boundary: a Chromium `Profile N` is a browser data container, not a universal website account. The GUI `Account` field is an operator-maintained label or note and should be treated as a hint only. Each website still has its own login state inside that browser profile, so account-sensitive automation must verify the actual logged-in account on the target site before continuing.
+The core idea is simple:
 
-Important extraction boundary: this project deliberately stays generic and open. It does not ship site-specific DOM adapters for Gmail, YouTube Studio, GitHub, or other targets. The managed runtime now does safer script serialization plus generic DOM/text fallbacks, but complex dynamic applications can still vary by engine. The default `official_playwright_mcp` path is now the primary governed high-level path, while `patchright` remains the strongest live-root fallback when a specific site behaves better there.
+- one `Profile N` is one browser identity container
+- all consumers must acquire that identity through one governance layer
+- browser work can then reuse real cookies, local storage, extensions, and site login state
 
-The public user entry point is:
+## Why It Exists
+
+Most browser automation tools are optimized for disposable sessions.
+
+This project is optimized for:
+
+- persistent site login state
+- explicit profile ownership
+- real local browser data
+- safe reuse across GUI, MCP, keepalive, and script automation
+
+Important account boundary:
+
+- a Chromium `Profile N` is not a universal website account
+- the GUI `Account` field is only an operator note
+- account-sensitive automation must verify the logged-in account on the target site before continuing
+
+## Main Value
+
+- Reuse real logged-in Chromium profiles
+- Expose those identities to MCP clients safely
+- Keep profile ownership explicit and conflict-free
+- Support multiple browser engines behind one managed interface
+- Provide structured diagnostics, traces, and normalized action results
+- Support fixed-script automation through daemon APIs, not only MCP
+- Run keepalive jobs against selected logged-in profiles
+
+## Engine Positioning
+
+![Engine Positioning](./docs/assets/readme_engine_stack.svg)
+
+Supported engines:
+
+- `official_playwright_mcp`
+  default governed high-level path and the preferred engine for ordinary MCP work
+- `patchright`
+  live-root compatibility fallback when a site behaves better on the older direct integration
+- `selenium_uc`
+  preferred for stealth, challenge-heavy, gesture, drag, or coordinate-sensitive work
+- `playwright_cli`
+  lightweight compatibility path, not the default high-capability path
+
+## User Entry Points
+
+Source entry:
 
 ```bash
 python run_gui.py
 ```
 
-## Screenshot
-
-![Application Screenshot](docs/imgs/ScreenShot.png)
-
-## How it works
-
-The browser automation layer supports:
-
-- Selenium: [https://www.selenium.dev/](https://www.selenium.dev/)
-- undetected-chromedriver: [https://github.com/ultrafunkamsterdam/undetected-chromedriver](https://github.com/ultrafunkamsterdam/undetected-chromedriver)
-- Patchright: [https://github.com/Kaliiiiiiiiii-Vinyzu/patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
-- Playwright CLI: [https://github.com/microsoft/playwright-cli](https://github.com/microsoft/playwright-cli)
-- Official Playwright MCP: [https://github.com/microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp)
-
-The project starts Chromium with a real `user-data-dir` and `profile-directory`, then attaches the selected browser engine to that profile. This allows the worker to reuse real cookies, sessions, local storage, extensions, and other persistent browser state.
-
-If you use a fingerprint plugin, the project can also load `my-fingerprint`:
-
-- my-fingerprint releases: [https://github.com/omegaee/my-fingerprint/releases](https://github.com/omegaee/my-fingerprint/releases)
-
-On top of that browser layer, the MCP service adds:
-
-- profile/session occupancy checks
-- shared profile occupancy registry and event stream
-- session start and release APIs
-- profile reclaim and recovery primitives for stale locks or expired script leases
-- a stable daemon endpoint with a policy-controlled worker (`lazy`, `sticky`, or `always_on`)
-- GUI-based lifecycle control and logs
-
-## Runtime control and security
-
-The daemon now separates business access from management access.
-
-- `api_token`
-  Used by normal MCP clients and daemon automation callers for browser work.
-- `control.api_token`
-  Required for GUI/control endpoints such as dashboard, logs, keepalive state, plugin CRUD, and worker lifecycle control.
-
-Security boundary:
-
-- `control.api_token` is intentionally independent from `mcp.api_token`.
-- If `control.api_token` is absent, control endpoints stay disabled instead of silently accepting the MCP token.
-- GUI and daemon bootstrap now generate distinct values for both tokens when persistence needs to seed them.
-
-Current endpoint boundary:
-
-- MCP/business surface:
-  - `/mcp`
-  - `/_daemon/status`
-  - `/_daemon/profiles`
-  - `/_daemon/profiles/{profile_name}`
-- `/_daemon/automation/*`
-- GUI/control surface:
-  - `/_control/ping`
-  - `/_control/status`
-  - `/_control/dashboard`
-  - `/_control/profiles`
-  - `/_control/profiles/{profile_name}`
-  - `/_control/sessions`
-  - `/_control/events`
-  - `/_control/keepalive`
-  - `/_control/logs`
-  - `/_control/log-settings`
-  - `/_control/plugins`
-  - `/_control/profiles/{profile_name}/plugins`
-  - `/_control/service/worker/start`
-  - `/_control/service/worker/stop`
-
-The worker runtime policy is configurable:
-
-- `lazy`
-  Reclaims the worker soon after idle timeout.
-- `sticky`
-  Default. Keeps the worker alive longer for real business traffic and reduces frequent restart churn.
-- `always_on`
-  Never reclaims the worker due to idle timeout.
-
-## Main capabilities
-
-- Manage multiple Chromium profiles from one GUI
-- Expose real browser identities to MCP clients
-- Prevent conflicting sessions across threads or tasks
-- Switch the default browser engine in the GUI configuration
-- Expose structured runtime capabilities instead of only raw engine names
-- Normalize action failures into stable error codes for callers
-- Start the browser worker only when needed
-- Release resources automatically after idle timeout
-- Run keepalive jobs against real logged-in profiles
-- Coordinate multi-tab browser work with explicit tab listing, opening, activation, and closing tools
-- Support formal coordinate and gesture interactions on capable engines via `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path`
-- Collect structured console, page error, and network diagnostics instead of relying on screenshots alone
-- Fall back to generic DOM-based snapshot, candidate enumeration, wait, and target diagnostics when a runtime lacks native support
-
-## Engine selection
-
-The project now treats browser engines as execution strategies under one shared profile/session governance model.
-
-There are two ways to choose an engine:
-
-- GUI default engine
-  Stored in `app.browser_engine`. This is the fallback engine used when MCP callers do not pass an explicit engine.
-- Per-request explicit engine
-  MCP callers may pass `engine` to `can_start_profile_session(...)` and `start_profile_session(...)`.
-
-Recommended practical policy:
-
-- `official_playwright_mcp`
-  Default choice for normal MCP work. Best official semantics, strongest alignment with the upstream Playwright MCP interaction model, native snapshot-ref style targeting, and the best path toward first-class high-level browser control in this project.
-- `patchright`
-  Strong live-root and compatibility fallback. Keep using it when a task explicitly needs the existing live persistent-profile path, or when a site behaves better under the older Patchright integration.
-- `selenium_uc`
-  Preferred for stealth-sensitive sites or workflows where avoiding automation detection, challenge handling, or coordinate/gesture fallback matters more than raw throughput.
-- `playwright_cli`
-  Lightweight integrated engine for lower-overhead flows and compatibility scenarios, but no longer the default high-capability path.
-
-## Profile login-state discovery
-
-Business callers can now use profile status endpoints not only to check whether a
-profile is idle, but also to see which keepalive-managed sites were last
-confirmed online for that profile.
-
-Relevant endpoints:
-
-- `list_profiles()`
-- `get_profile_status(profile_name)`
-- `GET /_daemon/profiles`
-- `GET /_daemon/profiles/{profile_name}`
-
-Returned profile payloads now include these derived arrays:
-
-- `online_sites`
-  Sites whose last keepalive result confirmed `signed_in=true`
-- `signed_out_sites`
-  Sites whose last keepalive result confirmed signed-out state
-- `attention_sites`
-  Sites that loaded but could not be confidently confirmed
-- `failed_sites`
-  Sites whose keepalive attempt failed
-- `skipped_sites`
-  Sites skipped during the last keepalive pass
-- `unknown_sites`
-  Fallback bucket for legacy or ambiguous results
-
-Example:
-
-```json
-{
-  "profile_name": "Profile 8",
-  "busy_state": "idle",
-  "active_session": false,
-  "online_sites": ["google", "youtube", "gmail"],
-  "signed_out_sites": ["github"],
-  "attention_sites": [],
-  "failed_sites": [],
-  "skipped_sites": [],
-  "unknown_sites": [],
-  "last_keepalive_status": "success"
-}
-```
-
-Recommended business-side selection rule:
-
-1. Query idle/available profiles.
-2. Filter by required site presence in `online_sites`.
-3. Acquire the chosen profile only after that filter passes.
-
-Important switching rule:
-
-- Changing the GUI default engine affects only future sessions.
-- Existing sessions keep the engine they were started with.
-- `reuse_existing=true` only reuses a compatible session for the same profile and the same engine.
-- Starting a new session with a different engine never hot-switches an existing session in place. Existing sessions keep their original engine.
-
-Current practical capability direction:
-
-- the project is intentionally moving toward a more official `playwright-mcp`-style interaction model
-- `official_playwright_mcp` is now the primary default governed path for richer high-level browsing semantics, snapshot-ref targeting, and upstream-aligned interaction behavior
-- `patchright` remains the strongest live-root fallback when a site or workflow performs better on the older direct integration
-- the managed session kernel increasingly exposes high-level actions through one stable contract instead of forcing callers to drop into arbitrary `run_script`
-
-Examples of newer high-level action coverage exposed through the managed layer:
-
-- selector wait:
-  `wait_for(...)`
-- text wait:
-  `wait_for_text(...)`
-- text disappearance wait:
-  `wait_for_text_gone(...)`
-- text change wait:
-  `wait_for_text_change(...)`
-- page stability wait:
-  `wait_for_page_stable(...)`
-- task-style state watch:
-  `watch_page_state(...)`
-- target-local state watch:
-  `watch_target_state(...)`
-- bounded pause:
-  `wait_for_timeout(...)`
-- hover:
-  `hover(...)`
-- select element option choice:
-  `select_option(...)`
-- browser history navigation:
-  `navigate_back(...)`, `navigate_forward(...)`
-- target-to-target drag:
-  `drag_target(...)`
-- dialog handling:
-  `handle_dialog(...)`
-- file input upload:
-  `file_upload(...)`
-
-These additions are meant to reduce exploratory retries and make complex-page flows feel closer to official Playwright-style browser control.
-
-Official-style compatibility aliases are also now exposed for lower-friction agent/tool routing:
-
-- `browser_tabs`
-  official-style tab manager with `action=list|new|select|close`
-- `browser_take_screenshot`
-  alias of `screenshot`
-- `browser_close`
-  alias of `close_profile_session`
-- `browser_handle_dialog`
-  official-style wrapper over managed dialog handling
-- `browser_file_upload`
-  official-style wrapper over managed file upload
-- `browser_resize`
-  official-style browser window resize
-- `browser_network_request`
-  official-style single network request detail lookup by 1-based index
-
-For dynamic pages, prefer the newer wait primitives before dropping to ad-hoc polling:
-
-- use `wait_for_page_stable(...)` when the page is still re-rendering or when text/html keep changing
-- use `wait_for_text_change(...)` when a task is waiting for a region or run-status text to change rather than merely appear once
-- use `watch_page_state(...)` when you want one call that captures the initial text, waits for change, waits for stabilization, and returns a final diff-oriented summary
-- use `watch_target_state(...)` when the task is about one dynamic control, status chip, popup item, or target-local region rather than the whole page
-- if `run_script(...)` returns `result=null`, the managed runtime now marks `script_result_state="null"` and adds a diagnostic hint instead of leaving that state ambiguous
-
-Recent managed-result normalization on top of that action surface now also guarantees more consistent payload semantics across engines for:
-
-- tab lifecycle:
-  `open_tab(...)`, `activate_tab(...)`, `close_tab(...)` now normalize fields such as `opened`, `activated`, `closed`, `active_tab_id`, `closed_tab_id`, and `tab_count`
-- wait semantics:
-  `wait_for(...)` and `wait_for_timeout(...)` now consistently expose `condition`, `by`, `waited`, and `timeout_ms`
-- verified typing:
-  `type_target_and_verify(...)` now keeps `target`, `requested_target`, `by`, `value`, and `verified` aligned for easier upstream reasoning
-
-The managed diagnostics path was also widened beyond comment/text extraction. `browser_diagnose_page(...)` now produces a more generic `structured_page` model that can summarize:
-
-- interactive controls
-- form controls
-- custom element previews
-- dialog/menu/listbox/tab density
-- current interaction region hints such as `overlay` or `dialog`
-
-The structured diagnostics model is now broader than that initial baseline. In current builds, `structured_page` can also expose:
-
-- likely primary actions such as save/apply/open/run style controls
-- search and filter style controls
-- navigation-oriented controls such as links and tabs
-- collection signals for list/table/thread-heavy pages
-- collection summaries such as comment threads, message lists, repository lists, and generic result lists
-- toolbar controls and status surfaces that can be reused by the next follow-up action
-- lightweight role density and interactive label previews
-
-For target-local diagnostics, `browser_diagnose_target(...)` now also returns a richer `structured_region` block with:
-
-- `region_kind`
-- `interactive_controls`
-- `visible_controls`
-- `overlay_controls`
-- `dialog_controls`
-- `interactive_density`
-- `primary_actions`
-- `search_like_controls`
-- `status_controls`
-- `role_counts`
-
-That target-local shape is the preferred generic debugging surface when the task is about one dynamic control, popup, filter menu, status chip, or local panel rather than the whole page.
-
-Managed verification results are also more uniform now:
-
-- `browser_verify_text(...)`, `browser_verify_dialog(...)`, and `browser_verify_element(...)` normalize `verified` and `matched`
-- `browser_verify_target_value(...)` and `browser_verify_target_visible(...)` also normalize `verified`, `matched`, `target`, and `by`
-- `browser_describe_target(...)` and `browser_list_candidates(...)` now expose a lightweight `target_summary` for easier upstream reasoning
-- candidate entries from `browser_list_candidates(...)` also carry `match_reason` and `ranking_reason` so the caller can see why a candidate was ranked first
-- `run_script_batch(...)` now reports `ok_count`, `error_count`, `all_ok`, and `first_error` in addition to item-level results
-
-On the default `patchright` path, successful high-frequency actions now also try to leave behind a richer post-action reasoning surface instead of only a minimal page pointer. In practice this means the returned `post_action_context` is more likely to already contain:
-
-- a bounded `snapshot`
-- derived `structured_page`
-- lightweight `interaction_hints`
-- recent action/session-health context
-
-The goal is to reduce how often callers need to immediately chain an extra `browser_snapshot(...)` or `browser_diagnose_page(...)` just to continue a normal multi-step flow.
-
-On ordinary successful fast-path actions, that continuation surface is also intentionally lighter than a full diagnosis pass. Heavy anti-bot probing is deferred on normal success paths, so callers keep useful continuation context without paying a hidden full-page diagnostics cost after every click or type action.
-
-On the default `patchright` path, candidate ordering is also now more intentionally semantic instead of only DOM-order-ish. Popup items, filter/search controls, and likely primary actions receive stronger ranking signals so complex frontend follow-up steps are more likely to hit on the first pass.
-
-Current follow-up ranking also reuses recent managed context instead of treating each action as stateless. In practice this means:
-
-- recent `structured_page` and `interaction_hints` are cached inside the managed session
-- follow-up candidate ranking can now prefer the active interaction region such as `overlay` or `dialog`
-- collection-oriented pages can bias later reads toward the current collection kind such as `comment_threads`, `message_list`, `repository_list`, or `result_list`
-- toolbar/filter/search/status labels extracted from the previous step can boost the next candidate search before falling back to broad full-page probing
-
-The intended result is fewer blind retries and fewer cases where a normal multi-step flow immediately degrades into full-page scanning after every successful click.
-
-## Managed automation scripts
-
-The project now has a second formal consumer path besides MCP: managed local scripts.
-
-The intended model is:
+Typical packaged Windows entry:
 
 ```text
-fixed script -> AutomationRunner -> SessionManager -> BrowserEngine -> real Chromium profile
+<install_root>\ChromiumProfileManager.exe
 ```
 
-This matters because fixed Python automation should not bypass profile governance by launching its own browser directly against a real `user-data-dir`.
-
-Use `AutomationRunner` when you want a reusable local script that:
-
-- claims a profile through the same central lock and occupancy rules as MCP
-- records `automation` occupancy in the shared registry
-- is blocked if the same profile is already occupied by MCP, GUI manual launch, or keepalive
-- releases the profile through the same centralized close path
-
-Reference example:
-
-- `demo/managed_uc_gmail_titles_demo.py`
-
-That demo proves a fixed `selenium_uc` script can:
-
-- acquire `Profile 1` through the manager
-- open Gmail with real login state
-- extract the first three visible mail titles
-- block a second same-profile process while the run is still active
-
-Production direction now implemented in the codebase:
-
-- shared occupancy entries can carry `owner_pid`, lease expiry, heartbeat metadata, and reclaimability
-- stale non-MCP occupancies can be reaped automatically when the owning process disappears or a lease expires
-- the daemon exposes profile status, recent occupancy events, and explicit reclaim endpoints
-- the GUI shows profile occupancy state and provides manual reclaim for recovery workflows
-- managed automation session acquisition can override runtime launch behavior such as `headless`, `incognito`, `start_minimized`, `mute_audio`, `window_size`, and `extra_args` through a temporary runtime config layer 
-- managed automation session acquisition also supports `runtime_options.resource_only=true` for callers that only need exclusive access to a governed profile's UserData files and do not need a live browser session
-
-The daemon now also exposes a managed automation HTTP flow for fixed scripts that should use the same governance model without speaking MCP directly:
-
-```text
-fixed script -> daemon HTTP API -> SessionManager -> BrowserEngine -> real Chromium profile
-```
-
-Current daemon automation endpoints:
-
-- `POST /_daemon/automation/acquire`
-- `POST /_daemon/automation/action`
-- `POST /_daemon/automation/heartbeat`
-- `POST /_daemon/automation/release`
-
-Daemon automation supports two acquisition styles:
-
-- normal browser session
-  starts a governed browser session and allows `/_daemon/automation/action`
-- resource lease
-  uses `runtime_options.resource_only=true`, does not start a browser window,
-  still acquires the same profile lock, and returns `user_data_dir` /
-  `profile_dir` for external tools such as `yt-dlp`
-
-Intended usage:
-
-1. Acquire one profile session with runtime options.
-2. Execute bounded actions through `automation/action`.
-3. Refresh the lease if the script is long-running.
-4. Release the session explicitly on normal completion.
-
-Reference scripts:
-
-- `demo/managed_daemon_smoke.py`
-  Minimal daemon-side lifecycle smoke using `navigate`, `get_current_url`, and `get_page_text`.
-- `demo/managed_daemon_gmail_titles_demo.py`
-  Example of a site-task script driven through the daemon HTTP automation API.
-- `demo/validate_daemon_automation.py`
-  Full isolated validation harness that starts a temporary daemon, runs the smoke flow, and shuts it down again.
-- `demo/validate_daemon_automation_failures.py`
-  Isolated failure-semantics validation for token auth, bad payloads, conflict acquisition, stale session actions, and missing-profile reclaim.
-- `docs/DAEMON_AUTOMATION_INTEGRATION.md`
-  Dedicated integration guide for fixed scripts that use the daemon automation API directly.
-
-Latest verified result:
-
-- `demo/output/managed_daemon_smoke_20260611_224625.json`
-- `demo/output/managed_daemon_smoke_20260611_225059.json`
-- `demo/output/managed_daemon_smoke_20260611_230345.json`
-- `demo/output/managed_daemon_failures_20260611_230315.json`
-
-Validation note:
-
-- `validate_daemon_automation.py` and `validate_daemon_automation_failures.py` both use the same isolated validation profile by default: `Profile 101`.
-- Do not run those two validation scripts in parallel unless you override one of them to use a different validation profile and split user-data root.
-
-Current boundary:
-
-- the managed automation HTTP surface is now functional and validated for acquisition, action execution, heartbeat, and release
-- this surface is intended for fixed-script execution, not arbitrary remote code upload
-- profile busy-state is now evaluated per profile rather than copying one global daemon state onto every profile row
-- orphan Chromium subprocess cleanup is better than earlier mirror-era behavior, but long-running real desktop environments still need continued hardening around residual utility processes
-
-## Requirements
-
-- Python 3.10+
-- A local Chromium-compatible browser
-- A matching ChromeDriver build
-- A desktop environment
-
-For AI-assisted setup after cloning, use the dedicated runbook:
-
-- [AI Installation Runbook](./docs/AI_INSTALLATION_RUNBOOK.md)
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-## Browser and driver setup
-
-You need three local resources before using the tool:
-
-1. A Chromium or Chrome binary
-2. A matching `chromedriver`
-3. A persistent user data directory
-
-Common choices:
-
-- ungoogled-chromium
-- Chromium
-- Google Chrome
-
-The ChromeDriver version should match the browser major version as closely as possible.
-
-### Strong recommendation
-
-This project strongly recommends `ungoogled-chromium`.
-
-- It is more stable for long-lived local automation setups
-- It does not auto-update aggressively, which helps avoid unexpected ChromeDriver breakage
-- Versions below `136` are recommended because newer releases may have compatibility issues with `ungoogled-chromium` in some environments
-
-Official download pages:
-
-- ungoogled-chromium binaries: [https://ungoogled-software.github.io/ungoogled-chromium-binaries/](https://ungoogled-software.github.io/ungoogled-chromium-binaries/)
-- Chrome for Testing / ChromeDriver: [https://googlechromelabs.github.io/chrome-for-testing/](https://googlechromelabs.github.io/chrome-for-testing/)
-
-Driver matching rule:
-
-- Always match the Chromium major version with the ChromeDriver major version
-- If the default download page does not show the exact build you need, adjust the version number in the driver download URL until it matches your installed Chromium version
-- Before wiring paths into the GUI, verify the browser version and driver version are aligned
-
-## Configuration
-
-At first launch, the app creates a config file in the platform config directory:
-
-- Windows: `%APPDATA%/ChromiumProfileManager/workstates/chromium_profiles.json`
-- macOS: `~/Library/Application Support/ChromiumProfileManager/workstates/chromium_profiles.json`
-- Linux: `${XDG_CONFIG_HOME:-~/.config}/ChromiumProfileManager/workstates/chromium_profiles.json`
-
-A sanitized template is included in the repository:
-
-- `chromium_profiles.example.json`
-- `resources/bookmarks_template.html`
-
-On first run, the app copies the bundled bookmark template into the local workspace default path if no template exists yet.
-
-Important fields:
-
-- `paths.chromium_dir`
-  Path to the browser executable, or a directory containing it
-- `paths.chromedriver_path`
-  Path to `chromedriver`, or a directory containing it
-- `paths.user_data_root`
-  Legacy shared-root path kept for migration compatibility
-- `paths.user_data_profiles_root`
-  Split root that stores one dedicated UserData root per profile, for example `UserDataProfile1/Profile 1`
-- `paths.mirror_user_data_root`
-  Backup snapshot path. Runtime no longer depends on extracted mirror clones for normal MCP startup
-- `paths.bookmarks_template_path`
-  Optional bookmark template used when initializing profiles
-- `paths.fingerprint_zip_path`
-  Optional path related to `my-fingerprint`
-- `app.language`
-  UI language code such as `en`, `ja`, or `zh`
-- `app.browser_engine`
-  Default browser execution backend, currently `selenium_uc`, `patchright`, or `playwright_cli`
-- `app.concurrency_mode`
-  Session governance mode. `per_profile_live` is the current default and allows different profiles to run concurrently while keeping the same profile exclusive
-- `launch.*`
-  Browser launch defaults used by the built-in Python launcher, such as `new_window`, `start_maximized`, `load_fingerprint_extension`, `check_url`, and `extra_args`
-- `mcp.host`, `mcp.port`, `mcp.worker_port`, `mcp.path`
-  Network settings for the daemon and worker
-
-### Per-profile live concurrency
-
-The runtime now uses one dedicated UserData root per logical profile.
-
-- `per_profile_live`
-  Current default. Different profiles can run concurrently, but the same profile remains exclusive across GUI launch, keepalive, and MCP.
-- `block`
-  Optional conservative mode if you want historical single-session gating.
-
-Important rules:
-
-- Keepalive and mirror refresh are no longer global live-root operations; keepalive locks one profile at a time.
-- Mirror snapshots are now backup artifacts, not the primary normal-session startup path.
-- Same-profile parallelism is intentionally blocked.
-
-### Manual launch and close behavior
-
-The GUI `Launch` button is now a runtime toggle for the selected profile:
-
-- If that profile is not currently running, the button launches a visible Chromium window for that profile.
-- If Chromium for that profile is already running, the same button changes to `Close` and terminates only that profile's matching Chromium processes.
-- If the user closes the Chromium window manually, the GUI re-detects the real process state and automatically changes the button back to `Launch` once the profile has fully exited.
-- If the window is gone but a background Chromium process still remains, the GUI continues to show `Close` so operators can reclaim the leftover process explicitly.
-
-This behavior is profile-scoped. It does not terminate other profiles.
-
-## MCP service
-
-When enabled in the GUI, the daemon exposes a stable HTTP endpoint such as:
+Default local MCP endpoint:
 
 ```text
 http://127.0.0.1:28888/mcp
 ```
 
-The daemon stays available between tasks. The browser worker is started only when a request needs it, and it is reclaimed after the configured idle timeout.
+## Typical Flows
 
-Operational notes:
-
-- If `mcp.api_token` is configured, every MCP/business daemon request must send `Authorization: Bearer <token>`. There is no localhost bypass.
-- If `control.api_token` is configured, every GUI/control request to `/_control/*` must send `Authorization: Bearer <token>`. There is no localhost bypass there either.
-- `mcp.api_token` cannot call `/_control/*`, and `control.api_token` cannot call MCP/business routes.
-- The daemon is intended to stay stable while the worker is short-lived and lazily started.
-- A worker reclaimed because of `idle_timeout` is a normal managed lifecycle event, not a crash.
-- If the configured Chromium binary root already has live browser processes, session startup is intentionally blocked with states such as `external_chromium_running`.
-- That busy-state rule is now enforced per profile root, including `playwright_cli`.
-- MCP tools publish standard tool annotations so clients can distinguish trusted local/browser operations from arbitrary script execution.
-- These annotations reduce unnecessary approval prompts in clients that honor MCP hints, but they do not bypass the client approval policy or this project's profile/busy-state governance.
-- Normal profile/session operations, navigation, tab operations, clicking, typing, key presses, mouse actions, screenshots, diagnostics, and cleanup are treated as trusted low-risk MCP operations for local real-profile workflows.
-- `run_script` and `run_script_batch` are intentionally high-trust, non-read-only actions because they execute arbitrary JavaScript inside a real logged-in browser context.
-
-Typical MCP flow:
-
-1. `list_profiles`
-2. `get_server_status`
-3. `get_profile_status(profile_name)`
-4. `can_start_profile_session(profile_name)`
-5. `start_profile_session(profile_name)`
-6. perform browser actions
-7. `close_profile_session(session_id)`
-
-For one multi-step task, keep a single session alive across the whole task.
-Do not repeatedly `start_profile_session -> do one action -> close_profile_session`
-for every small step unless the task explicitly needs isolation between steps.
-
-Engine-aware callers may also pass an explicit engine when starting a session. If omitted, the configured GUI default engine is used.
-
-For example:
-
-```powershell
-$token = "<your-api-token>"
-Invoke-RestMethod -Uri 'http://127.0.0.1:28888/_daemon/status' -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 5 | ConvertTo-Json -Depth 8
-```
-
-If you configure an MCP client manually, the same token must be attached on every
-request. Example Codex config shape:
-
-```toml
-[mcp_servers.browserIdentity]
-url = "http://127.0.0.1:28888/mcp"
-
-[mcp_servers.browserIdentity.http_headers]
-Authorization = "Bearer <token>"
-```
+### 1. GUI + MCP
 
 ```text
-can_start_profile_session(profile_name="Profile 4", engine="selenium_uc")
-start_profile_session(profile_name="Profile 4", engine="playwright_cli")
+GUI / Agent
+-> daemon / worker
+-> SessionManager
+-> selected engine
+-> real Chromium profile
 ```
 
-### Multi-tab tools
+### 2. Fixed Script + daemon automation
 
-The worker now exposes formal multi-tab operations so agents do not have to rely on hidden browser focus changes:
+```text
+Local script
+-> /_daemon/automation/*
+-> SessionManager
+-> selected engine
+-> real Chromium profile
+```
 
-- `browser_list_tabs`
-- `browser_open_tab`
-- `browser_activate_tab`
-- `browser_close_tab`
-- Do not mix these session-bound tools with another MCP browser server such as generic `mcp:playwright/*`. A `browserIdentity` `session_id` belongs only to this service.
-
-The practical workflow is:
-
-1. open or discover the tab
-2. activate the target tab explicitly
-3. perform page actions on that active tab
-4. switch again when needed
-
-For tab-aware read and debug calls, tools such as `navigate`, `get_current_url`, `get_page_text`, `get_page_html`, `browser_snapshot`, `browser_list_candidates`, `inspect_elements`, `run_script`, and `screenshot` also accept an optional `tab_id`.
-
-Official-style alias entry points are also available when the caller expects a more Playwright-MCP-like naming surface:
-
-- `browser_tabs`
-- `browser_take_screenshot`
-- `browser_close`
-- `browser_resize`
-- `browser_network_request`
-
-For mainstream browser tasks that involve page prompts or file inputs, the managed layer now also exposes:
-
-- `browser_handle_dialog`
-- `browser_file_upload`
-
-`browser_tabs` is no longer only a list alias. It now supports:
-
-- `action="list"`
-- `action="new"` with optional `url`
-- `action="select"` with `index`
-- `action="close"` with `index`
+### 3. Keepalive
 
-For network diagnostics, the managed layer now supports both:
+```text
+GUI / scheduler
+-> keepalive runtime
+-> profile-scoped lock
+-> site check / refresh
+-> status writeback
+```
 
-- `browser_get_network_requests`
-  list-style debug output
-- `browser_network_request`
-  official-style single-request detail lookup by 1-based index
-
-### Debug and observability tools
-
-The worker also exposes structured debugging helpers that are meant to replace manual F12 screenshots in many cases:
-
-- `browser_get_console_messages`
-- `browser_get_page_errors`
-- `browser_get_network_requests`
-- `browser_clear_debug_buffers`
-- `browser_diagnose_page`
-- `browser_get_action_trace`
-- `get_mcp_tool_trace`
-
-`browser_diagnose_page` is the highest-signal first stop when an agent gets blocked. It bundles the current interaction context together with recent console errors, page exceptions, failed requests, and recent bad HTTP responses. Heavy `playwright_cli` diagnostics are bounded by short CLI timeouts and truncated raw output so a noisy site should return a partial diagnosis instead of blocking the MCP worker for minutes.
-
-`browser_get_action_trace` reports recent managed browser actions for one session, including slow actions, failures, fallback usage, and average duration. `get_mcp_tool_trace` reports MCP worker-level tool timings so real production calls can be inspected without digging through Codex internal logs. The MCP trace is also written to a JSONL file shown in the GUI MCP status panel and is rotated automatically to avoid unbounded log growth.
-
-## Engine Notes
+## Security Model
 
-### Shared behavior
-
-- Profile creation, deletion, syncing, bookmarks, and session ownership are shared across all engines
-- GUI and MCP session flow stay the same regardless of engine
-- Real `user-data-dir` plus `profile-directory` remain the source of truth
-
-### Selenium plus undetected-chromedriver
+The project separates control access from browser-work access.
 
-- Currently the most mature path in the project
-- Also powers the existing keepalive workflows
-- Uses the shared `launch.*` defaults for direct profile launch
-- Best current stealth-oriented option in the project
-- Best current option when a page needs gesture unlock, slider drag, pattern input, or coordinate-level fallback
-- Supports the full low-level gesture family, including multi-point `browser_mouse_gesture_path`
-- Still the code-level fallback default if no configured engine is present
-
-### Patchright
-
-- Already supports real persistent profile sessions through the MCP/session layer
-- Uses a smaller validated startup argument set than Selenium for compatibility
-- Intended for sites where a Playwright-compatible execution model is more reliable
-- Provides the strongest tab model and the richest structured debug telemetry in the current project
-- Collects DevTools-style diagnostics through per-tab CDP sessions, so agents can read console output, uncaught exceptions, and network failures without opening browser DevTools manually
-- Supports the formal coordinate and gesture tool family, including multi-point `browser_mouse_gesture_path`
-- Keepalive is not routed through Patchright yet in this stage
-
-### Playwright CLI
-
-- Lightweight integrated compatibility engine, not the default high-capability path
-- Once a session is started here, all follow-up tab/click/type/snapshot/diagnostic actions should stay on this MCP service. Cross-routing the same task into another browser MCP is an agent integration bug, not a supported pattern.
-- Best fit for lower-overhead task execution in the new per-profile live runtime
-- Native stealth is weaker than `selenium_uc`
-- Native inspection fidelity is weaker than `patchright`, but the managed runtime lifts it with fallbacks, diagnostics, and structured recovery metadata
-- Added as a third parallel engine under the same `SessionManager -> BrowserEngine factory` path
-- Uses `playwright-cli open --persistent` only for startup, then reuses the named session for later commands
-- Reuses the real `user-data-dir` together with Chromium `--profile-directory=Profile N`, so logged-in state can be preserved
-- Supports the validated first-stage surface: session start, navigation, multi-tab basics, script execution, type/click/key actions, screenshot, console, requests, and coarse page diagnostics
-- Managed runtime fallbacks lift the raw CLI session with generic `snapshot`, candidate enumeration, waiting, target verification, and snapshot-ref style targeting where possible
-- Does not currently implement the formal gesture/XY tool family, including `browser_mouse_gesture_path`. If the task depends on drag, slider movement, pattern unlock, or coordinate-level fallback, switch to `selenium_uc` or `patchright`.
-- Uses a fast DOM eval path for simple selector `click` and `fill` operations, then falls back to native `playwright-cli` commands if the DOM path is not safe or fails
-- `run_script` now prefers a safer serialization wrapper, and generic page text reads can fall back to bounded DOM chunking or page-text extraction when direct structured extraction comes back empty
-- Even with that generic fallback, complex dynamic frontends can still produce noisy or low-fidelity structured output. If the task depends on precise structured extraction rather than resilient fallback, prefer `patchright`
-- Classifies console and network noise into categories such as third-party, asset, media, security policy, CORS, and auth, so diagnostics can separate useful signal from common site noise
-- Sanitizes the upstream `playwright-cli` Chromium launch args so `AutomationControlled` is not injected through `--disable-blink-features`
-- Honors `mcp.start_minimized=true` by default, so visible MCP browser sessions start minimized in the taskbar instead of stealing desktop focus while still allowing the user to click in and take over when needed
-- Keeps `mcp.headless=false` by default; headless mode is only for explicit user-requested regression or background validation, not the normal MCP browsing path
-- Supports isolated validation with `runtime_options.incognito=true` on the managed daemon automation path. The current `browserIdentity` MCP session tools do not yet expose `runtime_options` as a direct session-start parameter.
-- On session close, the runtime attempts to terminate owned `playwright-cli` daemon and Chromium processes and then cleans isolated runtime directories; startup also prunes stale empty or old `chromium-advanced-playwright-cli-*` temp directories that are not referenced by live processes
-- Shared-root runtime is now treated as a migration-only legacy layout. Normal operation should use `paths.user_data_profiles_root`
-- Keepalive is not routed through `playwright_cli` in this stage
-- Windows packaged GUI, daemon, and worker executables have been validated against the managed runtime path
-
-### Selenium plus undetected-chromedriver debug notes
-
-- Selenium sessions now expose the same high-level tab and debug tools where Chromium logging supports them
-- Console and network diagnostics are gathered from browser and performance logs, so they are best-effort compared with Patchright
-- Structured accessibility snapshots and snapshot-ref targeting still remain Patchright-only
-- Use `selenium_uc` when stealth, anti-detection tolerance, or challenge-heavy browsing matters more than throughput
-- Current challenge validation against `skrbtso.top` confirmed that `selenium_uc` can pass recurring recaptcha/browser-verification gates and still reach both result pages and detail pages
-- Managed post-action context and `browser_diagnose_page` now expose an `anti_bot` block so callers can distinguish likely real challenge pages from normal pages that merely mention providers such as Cloudflare
+- `mcp.api_token`
+  for MCP clients and normal daemon automation calls
+- `control.api_token`
+  for GUI/control routes such as dashboard, logs, keepalive, plugin management, and worker control
 
-## Cross-platform notes
+Rules:
 
-This is a Python project and the source code is being kept platform-aware.
+- no localhost bypass
+- MCP token cannot call `/_control/*`
+- control token cannot call `/mcp`
+- profile governance is not bypassed to reduce approvals or friction
 
-- Windows is the primary tested platform
-- macOS and Linux are supported at source level when valid browser and driver paths are provided
-- Windows packaging is currently the most complete desktop packaging path
+## What The Managed Layer Adds
 
-## Release packaging
+Callers do not talk to raw engines directly. The managed layer adds:
 
-Version `0.1.0` is the first formal release baseline for cross-platform build automation.
+- normalized action results
+- unified high-level browser tools
+- structured reads and candidate ranking
+- diagnostics and traces
+- session health and recovery hints
+- cross-engine fallback behavior where appropriate
 
-For this release line:
+This is what lets engines stay independent while callers still see one coherent browser tool surface.
 
-- GitHub Actions now builds Windows, macOS x64, macOS arm64, and Linux artifacts
-- browser binaries and ChromeDriver are intentionally not bundled yet
-- a bundled Node.js runtime plus bundled `@playwright/mcp` runtime are not enabled yet; `resources/runtime/` currently defines the packaging contract and placeholder layout only
-- each target machine is expected to configure its own Chromium binary and ChromeDriver paths after launch
-- release artifacts bundle the GUI app, daemon, worker runtime, `resources/`, skill templates, example config, and release docs
-- release artifacts also bundle the latest fingerprint plugin zip from `omegaee/my-fingerprint` together with release metadata
-- app icons are now generated as platform-specific assets from one transparent rounded master:
-  - Windows: `resources/chromium_profile_manager.ico`
-  - macOS: `resources/chromium_profile_manager.icns`
-  - Linux: `resources/linux_icons/`
-  - master PNG: `resources/chromium_profile_manager.png`
+## Current Boundaries
 
-This keeps release engineering simple while browser/runtime asset management is still being standardized and still gives operators a usable install bundle.
+- The project intentionally stays generic and open. It does not ship site-specific DOM adapters for Gmail, YouTube Studio, GitHub, or other individual targets.
+- On difficult dynamic frontends, the strongest validation surface is still the higher-level structured path such as `structured_page`, `browser_list_candidates(...)`, `browser_get_interaction_context(...)`, screenshots, and traces.
+- `run_script(...)` can still legitimately return `result=null` on healthy pages. Treat that as a runtime readback boundary, not automatic proof that the page is broken.
+- If a task depends on very high-fidelity structured extraction, prefer the default `official_playwright_mcp` path or explicit `patchright`.
 
-Current official-runtime boundary:
+## Documentation
 
-- `official_playwright_mcp` is now a bundled supported engine name and the default governed MCP path
-- packaged/runtime path resolution uses bundled assets under `resources/runtime/node/` and `resources/runtime/official_playwright_mcp/`
-- if those bundled assets are absent, the engine fails fast with an explicit runtime error
-- this backend intentionally runs only through governed `isolated_runtime` materialization and does not own the live persistent-profile root directly
+Start here:
 
-The release build entrypoints are now:
+- [Documentation Index](./docs/README.md)
+- [AI Installation Runbook](./docs/01-getting-started/AI_INSTALLATION_RUNBOOK.md)
+- [Architecture Guide](./docs/02-architecture/ARCHITECTURE_GUIDE.md)
+- [System Architecture Overview](./docs/02-architecture/SYSTEM_ARCHITECTURE_OVERVIEW.md)
+- [Daemon Automation Integration](./docs/03-integrations/DAEMON_AUTOMATION_INTEGRATION.md)
+- [Keepalive Plugin Guide](./docs/03-integrations/KEEPALIVE_PLUGIN_GUIDE.md)
+- [Browser Core Validation Playbook](./docs/04-operations/BROWSER_CORE_VALIDATION_PLAYBOOK.md)
+- [Skill Templates](./docs/skill_templates/)
 
-- local cross-platform packager:
-  `python scripts/build_release.py --artifact-name <name>`
-- icon asset generator:
-  `python scripts/generate_app_icons.py --source <image-path>`
-- GitHub Actions workflow:
-  `.github/workflows/build-release.yml`
+## Screenshot
 
-Current packaging behavior by platform:
+![Application Screenshot](./docs/imgs/ScreenShot.png)
 
-- Windows:
-  reuses the existing PyInstaller-based desktop build and packages a root launcher `ChromiumProfileManager.exe`, the nested real GUI runtime, the daemon, the worker, and bundled docs/resources into a zip artifact
-- macOS:
-  builds native PyInstaller binaries on both Intel and Apple Silicon runners and packages the runnable app plus bundled docs/resources into zip artifacts
-- Linux:
-  builds native PyInstaller binaries and packages the runnable app plus bundled docs/resources as `tar.gz`
-
-This `0.1.0` release line is therefore a real cross-platform runnable release baseline, but not yet a browser-bundled release.
-
-Windows packaged runtime notes:
-
-- the install root entrypoint is `ChromiumProfileManager.exe`
-- that root executable is a launcher which resolves and starts the nested real GUI runtime
-- Windows autostart should target the root launcher with `--start-minimized`
-- `ChromiumProfileManager.exe --exit-existing-instance` now requests the running GUI instance to exit and waits for the GUI/daemon lifecycle to shut down cleanly
-- explicit exit validation has confirmed that the installed GUI process, daemon process, and `28888` listener are all reclaimed together
-- latest packaged release validation on `2026-06-19` succeeded against `D:\softs\chromium\ChromiumProfileManager`
-- packaged startup validation confirmed that the GUI stayed alive and correctly launched the packaged daemon/worker runtime
-- packaged runtime validation confirmed the governed default engine path resolves to `official_playwright_mcp` on fresh/defaulted configs
-- packaged authenticated validation succeeded on `Profile 1` with Gmail inbox access
-- packaged parallel validation succeeded with independent MCP sessions on `Profile 1` and `Profile 4`
-- packaged isolated validation succeeded through the managed daemon automation path with `runtime_options.incognito=true`
-- packaged cleanup validation succeeded: all sessions released cleanly and the service returned to `idle`
-
-Current packaged-runtime boundary:
-
-- the strongest validation surface on complex pages is the higher-level structured path: `structured_page`, `browser_list_candidates(...)`, `browser_get_interaction_context(...)`, action traces, and screenshots
-- `run_script(...)` can still legitimately complete with `result=null` on some healthy live pages; treat that as a diagnostic boundary, not an automatic script failure
-- when a flow depends on high-fidelity structured extraction from difficult dynamic frontends, prefer the default `official_playwright_mcp` or explicit `patchright` path and use the higher-level structured tools before assuming raw script execution is the right readback surface
-
-## Skill templates
-
-The repository includes reusable agent skill templates in:
-
-- `docs/skill_templates/`
-
-These files are examples for Codex or other AI workflows that need to consume this MCP service consistently. They are templates, not an auto-loaded runtime directory.
-
-The skill guidance should explicitly tell agents that:
-
-- `official_playwright_mcp` is the default engine for ordinary MCP work when the task wants the most upstream-aligned high-level behavior
-- `patchright` should be selected when a specific site needs the older live-root behavior or behaves better under the direct Patchright integration
-- `selenium_uc` should be selected when stealth, anti-bot tolerance, recurring challenge pages, gesture flows, or coordinate fallback matter more than speed
-- If a flow must be validated without inheriting the current regular-window session state, use the managed daemon automation path with `runtime_options.incognito=true`. Do not assume the current `browserIdentity` MCP tool surface can pass that parameter directly at session start.
-
-Standard browser-core validation is now documented in:
-
-- `docs/BROWSER_CORE_VALIDATION_PLAYBOOK.md`
-
-That playbook defines both:
-
-- a large-release validation pass
-- a smaller iteration smoke pass
-
-For local idle-runtime measurement, use:
-
-- `python scripts/measure_idle_runtime.py`
-
-The current product goal for idle measurement is not “zero CPU forever”, but a clearly bounded and explainable idle footprint that can be compared across iterations before release.
-
-## Keepalive Plugins
-
-Keepalive sites use a plugin-style runtime. Built-in site logic exists for `chatgpt`, `google`, `gmail`, and `github`; custom Python plugins can add new site IDs such as `youtube` or `youtube_studio` without rebuilding the app. The desktop GUI now includes a dedicated Keepalive Plugins tab for browsing built-in plugin source, creating external plugins, and editing trusted local plugin code. Additional trusted plugin directories can still be configured in the GUI keepalive settings or in `keepalive.plugin_dirs`.
-
-- [Keepalive Plugin Guide](./docs/KEEPALIVE_PLUGIN_GUIDE.md)
-
-## Operational notes
-
-- The GUI `Account` column is only an operator label. It is not a guaranteed website account identity.
-- Keepalive cleans cache-like data for the finished profile automatically after each profile run. It removes re-creatable cache, lock, and log artifacts rather than wiping the whole profile.
-- A keepalive batch is still one global keepalive task, but runtime locking is profile-scoped. In normal `per_profile_live` mode, other profiles can still be used by MCP as long as they are not the same locked profile.
-
-Typical usage:
-
-1. Copy the appropriate `.SKILL.md` file into your global or project-specific skill directory
-2. Adjust host, port, and profile naming rules if your environment differs
-3. In other AI tasks, instruct the agent to use that skill when interacting with this MCP service
-
-## Privacy and security
-
-- Do not commit your real `chromium_profiles.json`
-- Do not commit real profile data, cookies, session state, or personal account labels
-- Do not expose the MCP endpoint to untrusted networks
-- Agents should never guess a real profile identity; they should ask or use an explicit `profile_name`
-
-Bookmark templates themselves are not treated as sensitive by default and can be kept in the repository if they are generic.
-
-## Repository structure
+## Repository Structure
 
 - `run_gui.py`
-  Public entry point
+  source entrypoint
 - `chromium_advanced/chromium_manage_gui.py`
-  Desktop GUI
+  desktop GUI
 - `chromium_advanced/mcp_daemon.py`
-  Stable daemon service
+  stable daemon service
 - `chromium_advanced/mcp_server.py`
-  Browser worker implementation
-- `docs/ARCHITECTURE_GUIDE.md`
-  Additional implementation notes
-- `docs/skill_templates/`
-  Reusable agent skill templates for Codex or other AI workflows, including Windows and WSL examples
-- `resources/bookmarks_template.html`
-  Bookmark template bundled with the project
+  browser worker implementation
+- `chromium_advanced/session_manager.py`
+  profile/session governance
+- `chromium_advanced/browser_session_kernel.py`
+  managed capability unification
+- `docs/`
+  user, integration, operations, architecture, and reference documentation
 
 ## License
 

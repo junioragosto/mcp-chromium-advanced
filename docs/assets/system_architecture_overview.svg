@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1280" viewBox="0 0 1800 1280">
+  <defs>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .panel { fill: #ffffff; stroke: #2f3b52; stroke-width: 2; rx: 18; ry: 18; }
+      .box { fill: #eef3ff; stroke: #375a9e; stroke-width: 2; rx: 12; ry: 12; }
+      .box2 { fill: #eefaf4; stroke: #2f7d57; stroke-width: 2; rx: 12; ry: 12; }
+      .box3 { fill: #fff5e8; stroke: #b06a14; stroke-width: 2; rx: 12; ry: 12; }
+      .box4 { fill: #f5efff; stroke: #7650b8; stroke-width: 2; rx: 12; ry: 12; }
+      .title { font: 700 34px 'Segoe UI', Arial, sans-serif; fill: #1f2a3d; }
+      .subtitle { font: 700 22px 'Segoe UI', Arial, sans-serif; fill: #1f2a3d; }
+      .text { font: 18px 'Segoe UI', Arial, sans-serif; fill: #24324a; }
+      .small { font: 16px 'Segoe UI', Arial, sans-serif; fill: #31425f; }
+      .line { stroke: #4b607f; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .line2 { stroke: #4b607f; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4b607f"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1800" height="1280"/>
+  <text class="title" x="50" y="58">Chromium Advanced System Architecture</text>
+  <text class="small" x="50" y="88">GUI / control API / MCP / daemon automation / SessionManager / engines / keepalive / storage</text>
+
+  <rect class="panel" x="40" y="120" width="330" height="250"/>
+  <text class="subtitle" x="60" y="155">Clients</text>
+  <rect class="box" x="60" y="180" width="290" height="46"/>
+  <text class="text" x="80" y="210">Desktop GUI</text>
+  <rect class="box" x="60" y="242" width="290" height="46"/>
+  <text class="text" x="80" y="272">MCP Client / Agent</text>
+  <rect class="box" x="60" y="304" width="290" height="46"/>
+  <text class="text" x="80" y="334">Local Script / Service</text>
+
+  <rect class="panel" x="430" y="120" width="390" height="250"/>
+  <text class="subtitle" x="450" y="155">Daemon HTTP Surfaces</text>
+  <rect class="box2" x="450" y="180" width="350" height="52"/>
+  <text class="text" x="470" y="212">/_control/*  (control.api_token)</text>
+  <rect class="box2" x="450" y="248" width="350" height="52"/>
+  <text class="text" x="470" y="280">/mcp  (mcp.api_token)</text>
+  <rect class="box2" x="450" y="316" width="350" height="52"/>
+  <text class="text" x="470" y="348">/_daemon/*  (business/admin token)</text>
+
+  <rect class="panel" x="880" y="120" width="430" height="470"/>
+  <text class="subtitle" x="900" y="155">Core Runtime</text>
+  <rect class="box3" x="900" y="180" width="390" height="58"/>
+  <text class="text" x="920" y="216">mcp_daemon.py</text>
+  <rect class="box3" x="900" y="255" width="390" height="58"/>
+  <text class="text" x="920" y="291">mcp_server.py worker</text>
+  <rect class="box3" x="900" y="330" width="390" height="72"/>
+  <text class="text" x="920" y="366">SessionManager</text>
+  <text class="small" x="920" y="390">occupancy, session registry, engine selection</text>
+  <rect class="box3" x="900" y="420" width="390" height="72"/>
+  <text class="text" x="920" y="456">browser_session_kernel.py</text>
+  <text class="small" x="920" y="480">action normalization, structured reads, fallback</text>
+  <rect class="box3" x="900" y="510" width="390" height="58"/>
+  <text class="text" x="920" y="546">BrowserEngine Factory</text>
+
+  <rect class="panel" x="1360" y="120" width="390" height="470"/>
+  <text class="subtitle" x="1380" y="155">Browser Engines</text>
+  <rect class="box4" x="1380" y="180" width="350" height="60"/>
+  <text class="text" x="1400" y="216">official_playwright_mcp</text>
+  <rect class="box4" x="1380" y="255" width="350" height="60"/>
+  <text class="text" x="1400" y="291">patchright</text>
+  <rect class="box4" x="1380" y="330" width="350" height="60"/>
+  <text class="text" x="1400" y="366">selenium_uc</text>
+  <rect class="box4" x="1380" y="405" width="350" height="60"/>
+  <text class="text" x="1400" y="441">playwright_cli</text>
+  <rect class="box4" x="1380" y="485" width="350" height="82"/>
+  <text class="text" x="1400" y="521">real Chromium processes</text>
+  <text class="small" x="1400" y="545">Profile N / split UserData / tabs / windows</text>
+
+  <rect class="panel" x="40" y="450" width="780" height="300"/>
+  <text class="subtitle" x="60" y="485">Execution Paths</text>
+  <rect class="box" x="60" y="515" width="220" height="58"/>
+  <text class="text" x="80" y="551">GUI control path</text>
+  <rect class="box" x="300" y="515" width="220" height="58"/>
+  <text class="text" x="320" y="551">MCP session path</text>
+  <rect class="box" x="540" y="515" width="240" height="58"/>
+  <text class="text" x="560" y="551">daemon automation path</text>
+  <text class="small" x="60" y="620">GUI  -&gt; /_control/*  -&gt; daemon  -&gt; SessionManager</text>
+  <text class="small" x="60" y="655">MCP client  -&gt; /mcp  -&gt; worker  -&gt; SessionManager  -&gt; kernel  -&gt; engine</text>
+  <text class="small" x="60" y="690">Script  -&gt; /_daemon/automation/*  -&gt; daemon  -&gt; SessionManager  -&gt; engine</text>
+  <text class="small" x="60" y="725">All entrypoints share the same profile-scoped governance.</text>
+
+  <rect class="panel" x="880" y="650" width="430" height="250"/>
+  <text class="subtitle" x="900" y="685">Ops Runtime</text>
+  <rect class="box2" x="900" y="715" width="390" height="56"/>
+  <text class="text" x="920" y="750">keepalive runtime</text>
+  <rect class="box2" x="900" y="788" width="390" height="56"/>
+  <text class="text" x="920" y="823">keepalive plugins registry</text>
+  <rect class="box2" x="900" y="861" width="390" height="56"/>
+  <text class="text" x="920" y="896">mirror refresh / backup / status writeback</text>
+
+  <rect class="panel" x="1360" y="650" width="390" height="250"/>
+  <text class="subtitle" x="1380" y="685">Data / Assets</text>
+  <rect class="box" x="1380" y="715" width="350" height="50"/>
+  <text class="text" x="1400" y="748">chromium_profiles.json</text>
+  <rect class="box" x="1380" y="780" width="350" height="50"/>
+  <text class="text" x="1400" y="813">paths.user_data_profiles_root</text>
+  <rect class="box" x="1380" y="845" width="350" height="50"/>
+  <text class="text" x="1400" y="878">resources/runtime/*</text>
+
+  <rect class="panel" x="40" y="790" width="1710" height="420"/>
+  <text class="subtitle" x="60" y="825">Key Rules</text>
+  <text class="text" x="70" y="875">1. All browser ownership must go through SessionManager before touching a real profile.</text>
+  <text class="text" x="70" y="915">2. GUI control token and MCP business token are intentionally separated.</text>
+  <text class="text" x="70" y="955">3. official_playwright_mcp is the default governed high-level engine.</text>
+  <text class="text" x="70" y="995">4. patchright is the live-root compatibility fallback.</text>
+  <text class="text" x="70" y="1035">5. selenium_uc is preferred for stealth, challenge, gesture, and coordinate-heavy flows.</text>
+  <text class="text" x="70" y="1075">6. playwright_cli is the lightweight compatibility path, not the default high-capability path.</text>
+  <text class="text" x="70" y="1115">7. keepalive, MCP, GUI manual launch, and daemon automation all share profile-scoped locks.</text>
+  <text class="text" x="70" y="1155">8. browser_session_kernel.py is the capability-unification layer above all engines.</text>
+
+  <path class="line" d="M370 203 L450 203"/>
+  <path class="line" d="M370 265 L450 274"/>
+  <path class="line" d="M370 327 L450 342"/>
+  <path class="line" d="M820 206 L900 206"/>
+  <path class="line" d="M820 274 L900 284"/>
+  <path class="line" d="M820 342 L900 209"/>
+  <path class="line" d="M1290 539 L1380 539"/>
+  <path class="line2" d="M1095 568 L1095 650"/>
+  <path class="line2" d="M1310 830 L1360 830"/>
+</svg>
