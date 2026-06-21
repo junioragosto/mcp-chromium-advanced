@@ -56,6 +56,14 @@ CHROMIUM_SUPPRESS_RESTORE_PROMPT_ARGS = (
     "--disable-session-crashed-bubble",
     "--hide-crash-restore-bubble",
 )
+BLOCKED_CHROMIUM_EXTRA_ARGS = {
+    "--no-sandbox",
+    "--enable-automation",
+    "--test-type",
+}
+BLOCKED_BLINK_FEATURES = {
+    "AutomationControlled",
+}
 SPLIT_USER_DATA_ROOT_EXCLUDE_DIRS = {
     "BrowserMetrics",
     "Crashpad",
@@ -251,6 +259,30 @@ def get_hidden_subprocess_kwargs() -> Dict:
 
 def get_chromium_restore_prompt_suppression_args() -> List[str]:
     return list(CHROMIUM_SUPPRESS_RESTORE_PROMPT_ARGS)
+
+
+def sanitize_chromium_launch_args(args: Sequence[str]) -> List[str]:
+    normalized: List[str] = []
+    seen = set()
+    for raw_item in args:
+        text = str(raw_item or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in BLOCKED_CHROMIUM_EXTRA_ARGS:
+            continue
+        if lowered.startswith("--disable-blink-features"):
+            name, separator, value = text.partition("=")
+            features = [part.strip() for part in value.split(",") if part.strip()]
+            features = [part for part in features if part not in BLOCKED_BLINK_FEATURES]
+            if not features:
+                continue
+            text = f"{name}{separator}{','.join(features)}"
+        if text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
 
 def get_user_home_dir() -> str:
     return os.path.expanduser("~")
@@ -505,7 +537,7 @@ def build_runtime_config_overrides(
             text = str(item or "").strip()
             if text and text not in merged_extra_args:
                 merged_extra_args.append(text)
-    runtime_config["launch"]["extra_args"] = merged_extra_args
+    runtime_config["launch"]["extra_args"] = sanitize_chromium_launch_args(merged_extra_args)
     if str(engine_name or "").strip():
         runtime_config["app"]["browser_engine"] = normalize_browser_engine_name(str(engine_name).strip())
     return runtime_config
@@ -1447,7 +1479,9 @@ def normalize_config(config: Optional[Dict]) -> Dict:
                 normalized["launch"][key] = str(loaded_launch.get(key)).strip()
         extra_args = loaded_launch.get("extra_args", [])
         if isinstance(extra_args, list):
-            normalized["launch"]["extra_args"] = [str(item).strip() for item in extra_args if str(item).strip()]
+            normalized["launch"]["extra_args"] = sanitize_chromium_launch_args(
+                [str(item).strip() for item in extra_args if str(item).strip()]
+            )
 
     loaded_logging = loaded.get("logging", {})
     if isinstance(loaded_logging, dict):
@@ -3003,7 +3037,7 @@ def build_direct_launch_command(profile_name: str, config: Dict, site: str = "")
             command.append(f"--load-extension={extension_dir}")
 
     if isinstance(launch_settings.get("extra_args", []), list):
-        command.extend([item for item in launch_settings.get("extra_args", []) if item])
+        command.extend(sanitize_chromium_launch_args([item for item in launch_settings.get("extra_args", []) if item]))
 
     if launch_settings.get("open_extensions_page", False):
         command.append("chrome://extensions")

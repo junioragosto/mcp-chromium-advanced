@@ -15,6 +15,7 @@ from chromium_advanced.chromium_profile_lib import (
     get_chromium_restore_prompt_suppression_args,
     get_profile_user_data_root,
     now_text,
+    sanitize_chromium_launch_args,
 )
 from chromium_advanced.mcp_runtime_config import resolve_mcp_headless, resolve_mcp_start_minimized
 
@@ -270,6 +271,7 @@ class PatchrightBrowserSession(BrowserSession):
         self._last_snapshot_refs: set[str] = set()
         self._tab_ids_by_page_key: dict[int, str] = {}
         self._cdp_sessions_by_page_key: dict[int, Any] = {}
+        self._cdp_instrumented_page_keys: set[int] = set()
         self._next_tab_number = 1
         self._console_messages: list[Dict[str, Any]] = []
         self._page_errors: list[Dict[str, Any]] = []
@@ -315,14 +317,22 @@ class PatchrightBrowserSession(BrowserSession):
         page_key = self._get_page_key(page)
         if page_key in self._tab_ids_by_page_key:
             return
+        self._get_tab_id(page)
+
+    def _ensure_debug_instrumentation(self, page) -> None:
+        page_key = self._get_page_key(page)
+        if page_key in self._cdp_instrumented_page_keys:
+            return
         tab_id = self._get_tab_id(page)
 
         try:
-            cdp = self.context.new_cdp_session(page)
+            cdp = self._cdp_sessions_by_page_key.get(page_key)
+            if cdp is None:
+                cdp = self.context.new_cdp_session(page)
+                self._cdp_sessions_by_page_key[page_key] = cdp
             cdp.send("Runtime.enable")
             cdp.send("Log.enable")
             cdp.send("Network.enable")
-            self._cdp_sessions_by_page_key[page_key] = cdp
 
             def handle_runtime_console(params) -> None:
                 args = params.get("args", []) or []
@@ -455,6 +465,7 @@ class PatchrightBrowserSession(BrowserSession):
             cdp.on("Network.requestWillBeSent", handle_request_will_be_sent)
             cdp.on("Network.responseReceived", handle_response_received)
             cdp.on("Network.loadingFailed", handle_loading_failed)
+            self._cdp_instrumented_page_keys.add(page_key)
         except Exception:
             pass
 
@@ -950,7 +961,7 @@ class PatchrightBrowserSession(BrowserSession):
         page = self.context.new_page()
         self._attach_page(page)
         if str(url or "").strip():
-            wait_until = "load" if wait_for_ready else "domcontentloaded"
+            wait_until = "domcontentloaded" if wait_for_ready else "commit"
             page.goto(str(url).strip(), wait_until=wait_until, timeout=int(timeout_seconds) * 1000)
         if activate:
             self.page = page
@@ -1022,11 +1033,10 @@ class PatchrightBrowserSession(BrowserSession):
 
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
         page = self._resolve_page(tab_id=tab_id)
-        wait_until = "load" if wait_for_ready else "domcontentloaded"
+        wait_until = "domcontentloaded" if wait_for_ready else "commit"
         page.goto(url, wait_until=wait_until, timeout=int(timeout_seconds) * 1000)
         return {
             **self.get_current_url(tab_id=self._get_tab_id(page)),
-            "post_action_context": self._post_action_context("navigate", page=page),
         }
 
     def get_current_url(self, tab_id: str = "") -> Dict:
@@ -1267,11 +1277,10 @@ class PatchrightBrowserSession(BrowserSession):
             page = self._resolve_page()
             locator = _selector_to_locator(page, selector, by).first
             locator.scroll_into_view_if_needed(timeout=int(timeout_seconds) * 1000)
-            locator.click(timeout=int(timeout_seconds) * 1000)
+            locator.click(timeout=int(timeout_seconds) * 1000, no_wait_after=True)
             return {
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "clicked": True,
-                "post_action_context": self._post_action_context("click", page=page),
             }
         except Exception as exc:
             return self._action_error_payload("click", exc, selector=selector, by=by, text_filter=selector)
@@ -1288,7 +1297,6 @@ class PatchrightBrowserSession(BrowserSession):
                 "hovered": True,
                 "selector": str(selector or "").strip(),
                 "by": str(by or "css"),
-                "post_action_context": self._post_action_context("hover", page=page),
             }
         except Exception as exc:
             return self._action_error_payload("hover", exc, selector=selector, by=by, text_filter=selector)
@@ -1306,15 +1314,14 @@ class PatchrightBrowserSession(BrowserSession):
             locator = self._resolve_target_locator(target, by=by, element=element, page=page)
             locator.scroll_into_view_if_needed(timeout=int(timeout_seconds) * 1000)
             if double_click:
-                locator.dblclick(timeout=int(timeout_seconds) * 1000)
+                locator.dblclick(timeout=int(timeout_seconds) * 1000, no_wait_after=True)
             else:
-                locator.click(timeout=int(timeout_seconds) * 1000)
+                locator.click(timeout=int(timeout_seconds) * 1000, no_wait_after=True)
             return {
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "clicked": True,
                 "double_click": bool(double_click),
                 "target": str(target or "").strip(),
-                "post_action_context": self._post_action_context("click_target", page=page),
             }
         except Exception as exc:
             return self._action_error_payload(
@@ -1348,7 +1355,6 @@ class PatchrightBrowserSession(BrowserSession):
                 **self.get_current_url(tab_id=self._get_tab_id(page)),
                 "typed": True,
                 "submitted": bool(submit),
-                "post_action_context": self._post_action_context("type_text", page=page),
             }
         except Exception as exc:
             return self._action_error_payload("type_text", exc, selector=selector, by=by, text_filter=selector)
@@ -1377,7 +1383,6 @@ class PatchrightBrowserSession(BrowserSession):
                 "typed": True,
                 "submitted": bool(submit),
                 "target": str(target or "").strip(),
-                "post_action_context": self._post_action_context("type_target", page=page),
             }
         except Exception as exc:
             return self._action_error_payload(
@@ -1419,7 +1424,6 @@ class PatchrightBrowserSession(BrowserSession):
             "target": str(target or "").strip(),
             "type_result": typed,
             "verify_result": verified,
-            "post_action_context": self._post_action_context("type_target_and_verify"),
         }
 
     def press_key(
@@ -1444,7 +1448,6 @@ class PatchrightBrowserSession(BrowserSession):
                 "pressed": True,
                 "key": key,
                 "count": repeat,
-                "post_action_context": self._post_action_context("press_key", page=page),
             }
         except Exception as exc:
             return self._action_error_payload("press_key", exc, selector=selector, by=by, text_filter=selector or key)
@@ -1468,7 +1471,6 @@ class PatchrightBrowserSession(BrowserSession):
                 "selector": str(selector or "").strip(),
                 "by": str(by or "css"),
                 "values": list(result or normalized_values),
-                "post_action_context": self._post_action_context("select_option", page=page),
             }
         except Exception as exc:
             return self._action_error_payload("select_option", exc, selector=selector, by=by, text_filter=selector)
@@ -1503,7 +1505,6 @@ class PatchrightBrowserSession(BrowserSession):
                     "message": str(holder.get("message", "") or ""),
                     "default_value": str(holder.get("default_value", "") or ""),
                 },
-                "post_action_context": self._post_action_context("handle_dialog", page=page),
             }
         except Exception as exc:
             return self._action_error_payload("handle_dialog", exc, text_filter="dialog", tab_id=tab_id)
@@ -1530,7 +1531,6 @@ class PatchrightBrowserSession(BrowserSession):
                 "target": str(target or "").strip(),
                 "by": str(by or "css"),
                 "files": list(normalized_files),
-                "post_action_context": self._post_action_context("file_upload", page=page),
             }
         except Exception as exc:
             return self._action_error_payload("file_upload", exc, target=target, by=by, text_filter=target, element=element)
@@ -1545,7 +1545,6 @@ class PatchrightBrowserSession(BrowserSession):
             current = self.get_current_url(tab_id=self._get_tab_id(page))
             current["navigated"] = "back"
             current["history_changed"] = response is not None
-            current["post_action_context"] = self._post_action_context("navigate_back", page=page)
             return current
         except Exception as exc:
             return self._action_error_payload("navigate_back", exc)
@@ -1560,7 +1559,6 @@ class PatchrightBrowserSession(BrowserSession):
             current = self.get_current_url(tab_id=self._get_tab_id(page))
             current["navigated"] = "forward"
             current["history_changed"] = response is not None
-            current["post_action_context"] = self._post_action_context("navigate_forward", page=page)
             return current
         except Exception as exc:
             return self._action_error_payload("navigate_forward", exc)
@@ -1587,7 +1585,6 @@ class PatchrightBrowserSession(BrowserSession):
                 "source_target": str(source_target or "").strip(),
                 "dest_target": str(dest_target or "").strip(),
                 "by": str(by or "css"),
-                "post_action_context": self._post_action_context("drag_target", page=page),
             }
         except Exception as exc:
             return self._action_error_payload(
@@ -1600,7 +1597,16 @@ class PatchrightBrowserSession(BrowserSession):
 
     def run_script(self, script: str, tab_id: str = "") -> Dict:
         page = self._resolve_page(tab_id=tab_id)
-        result = page.evaluate(f"() => {{ {script} }}")
+        source = str(script or "").strip()
+        if not source:
+            source = "() => null"
+        try:
+            if source.startswith("() =>") or source.startswith("async () =>") or source.startswith("("):
+                result = page.evaluate(source)
+            else:
+                result = page.evaluate(f"() => ({source})")
+        except Exception:
+            result = page.evaluate(f"() => {{ {source} }}")
         serialization_error = ""
         try:
             serialized = json.loads(json.dumps(result))
@@ -1624,6 +1630,10 @@ class PatchrightBrowserSession(BrowserSession):
 
     def get_console_messages(self, tab_id: str = "", limit: int = 100, level: str = "") -> Dict:
         normalized_tab_id = str(tab_id or "").strip()
+        try:
+            self._ensure_debug_instrumentation(self._resolve_page(tab_id=normalized_tab_id) if normalized_tab_id else self._resolve_page())
+        except Exception:
+            pass
         normalized_level = str(level or "").strip().lower()
         messages = list(self._console_messages)
         if normalized_tab_id:
@@ -1641,6 +1651,10 @@ class PatchrightBrowserSession(BrowserSession):
 
     def get_page_errors(self, tab_id: str = "", limit: int = 100) -> Dict:
         normalized_tab_id = str(tab_id or "").strip()
+        try:
+            self._ensure_debug_instrumentation(self._resolve_page(tab_id=normalized_tab_id) if normalized_tab_id else self._resolve_page())
+        except Exception:
+            pass
         errors = list(self._page_errors)
         if normalized_tab_id:
             errors = [item for item in errors if str(item.get("tab_id", "") or "") == normalized_tab_id]
@@ -1654,6 +1668,10 @@ class PatchrightBrowserSession(BrowserSession):
 
     def get_network_requests(self, tab_id: str = "", limit: int = 100, failed_only: bool = False) -> Dict:
         normalized_tab_id = str(tab_id or "").strip()
+        try:
+            self._ensure_debug_instrumentation(self._resolve_page(tab_id=normalized_tab_id) if normalized_tab_id else self._resolve_page())
+        except Exception:
+            pass
         requests = list(self._network_requests)
         if normalized_tab_id:
             requests = [item for item in requests if str(item.get("tab_id", "") or "") == normalized_tab_id]
@@ -1687,6 +1705,7 @@ class PatchrightBrowserSession(BrowserSession):
 
     def diagnose_page(self, tab_id: str = "") -> Dict:
         page = self._resolve_page(tab_id=tab_id)
+        self._ensure_debug_instrumentation(page)
         resolved_tab_id = self._get_tab_id(page)
         console_messages = self.get_console_messages(tab_id=resolved_tab_id, limit=20).get("messages", [])
         page_errors = self.get_page_errors(tab_id=resolved_tab_id, limit=20).get("errors", [])
@@ -2042,7 +2061,6 @@ class PatchrightBrowserSession(BrowserSession):
             "y": float(y),
             "button": str(button or "left"),
             "click_count": max(1, int(click_count)),
-            "post_action_context": self._post_action_context("mouse_click_xy", page=page),
         }
 
     def mouse_drag_xy(self, start_x: float, start_y: float, end_x: float, end_y: float) -> Dict:
@@ -2058,7 +2076,6 @@ class PatchrightBrowserSession(BrowserSession):
             "start_y": float(start_y),
             "end_x": float(end_x),
             "end_y": float(end_y),
-            "post_action_context": self._post_action_context("mouse_drag_xy", page=page),
         }
 
     def mouse_gesture_path(
@@ -2099,7 +2116,6 @@ class PatchrightBrowserSession(BrowserSession):
             "steps_per_segment": max(1, int(steps_per_segment)),
             "hold_before_ms": max(0, int(hold_before_ms)),
             "segment_delay_ms": max(0, int(segment_delay_ms)),
-            "post_action_context": self._post_action_context("mouse_gesture_path", page=page),
         }
 
     def screenshot(self, filename: str = "", tab_id: str = "") -> Dict:
@@ -2207,6 +2223,11 @@ class PatchrightEngine(BrowserEngine):
         # Its Chromium startup behavior differs from Selenium/uc, so not every
         # shared launch flag should be forwarded blindly.
         args = [f"--profile-directory={profile_name}"]
+        ignore_default_args = [
+            "--enable-automation",
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+        ]
         if start_minimized:
             args.append("--start-minimized")
         elif launch_settings.get("start_maximized", True):
@@ -2221,7 +2242,7 @@ class PatchrightEngine(BrowserEngine):
         args.extend(get_chromium_restore_prompt_suppression_args())
         extra_args = launch_settings.get("extra_args", [])
         if isinstance(extra_args, list):
-            args.extend([item for item in extra_args if item])
+            args.extend(sanitize_chromium_launch_args([item for item in extra_args if item]))
 
         def _create_raw_session() -> PatchrightBrowserSession:
             last_error = None
@@ -2238,6 +2259,7 @@ class PatchrightEngine(BrowserEngine):
                         executable_path=chromium_binary,
                         headless=bool(headless),
                         args=args,
+                        ignore_default_args=ignore_default_args,
                         no_viewport=True,
                     )
                     _safe_log(

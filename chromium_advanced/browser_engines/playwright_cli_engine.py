@@ -25,6 +25,7 @@ from chromium_advanced.chromium_profile_lib import (
     get_hidden_subprocess_kwargs,
     now_text,
     resolve_chromium_binary,
+    sanitize_chromium_launch_args,
 )
 from chromium_advanced.mcp_runtime_config import resolve_mcp_headless, resolve_mcp_start_minimized
 
@@ -1994,7 +1995,7 @@ class PlaywrightCliEngine(BrowserEngine):
                 launch_args.append(f"--load-extension={extension_dir}")
         extra_args = launch_settings.get("extra_args", [])
         if isinstance(extra_args, list):
-            launch_args.extend([str(item).strip() for item in extra_args if str(item).strip()])
+            launch_args.extend(sanitize_chromium_launch_args([str(item).strip() for item in extra_args if str(item).strip()]))
         launch_args = _normalize_playwright_cli_launch_args(launch_args)
         cli_config = {
             "browser": {

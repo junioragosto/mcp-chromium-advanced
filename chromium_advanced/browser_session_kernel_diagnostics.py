@@ -1237,23 +1237,10 @@ class ManagedSessionDiagnosticsMixin:
 
     def _should_attach_post_action_context(self, action_name: str) -> bool:
         return action_name in {
-            "navigate",
-            "open_tab",
-            "activate_tab",
-            "close_tab",
             "wait_for_text_change",
             "wait_for_page_stable",
             "watch_page_state",
             "watch_target_state",
-            "click",
-            "click_target",
-            "type_text",
-            "type_target",
-            "type_target_and_verify",
-            "press_key",
-            "mouse_move_xy",
-            "mouse_click_xy",
-            "mouse_drag_xy",
         }
 
     def _minimal_post_action_context(
@@ -1262,7 +1249,7 @@ class ManagedSessionDiagnosticsMixin:
         tab_id: str = "",
         *,
         include_anti_bot: bool = False,
-        include_session_health: bool = True,
+        include_session_health: bool = False,
     ) -> Dict[str, Any]:
         normalized_tab_id = str(tab_id or "").strip()
         try:
@@ -1280,36 +1267,31 @@ class ManagedSessionDiagnosticsMixin:
         except Exception:
             tabs = []
         active_tab_id = str(page.get("tab_id", "") or normalized_tab_id or "")
-        page_text = ""
-        snapshot_text = ""
-        try:
-            text_payload = (
-                self._raw.get_page_text(tab_id=normalized_tab_id)
-                if normalized_tab_id
-                else self._raw.get_page_text()
-            )
-            if isinstance(text_payload, dict):
-                page_text = str(text_payload.get("text", "") or "")
-        except Exception:
-            page_text = ""
         snapshot_payload = {"unsupported": True, "message": "post-action context minimized for fast path."}
-        if self._capabilities.engine_name == "patchright" and callable(getattr(self._raw, "get_interaction_context", None)):
-            try:
-                raw_context_payload = (
-                    self._raw.get_interaction_context(tab_id=normalized_tab_id)
-                    if normalized_tab_id
-                    else self._raw.get_interaction_context()
-                )
-                raw_context = raw_context_payload.get("interaction_context", raw_context_payload) if isinstance(raw_context_payload, dict) else {}
-                snapshot_candidate = raw_context.get("snapshot", {}) if isinstance(raw_context, dict) else {}
-                if isinstance(snapshot_candidate, dict):
-                    snapshot_payload = snapshot_candidate
-                    snapshot_text = str(snapshot_candidate.get("snapshot", "") or "")
-            except Exception:
-                snapshot_payload = {"unsupported": True, "message": "post-action context minimized for fast path."}
-        structured_page = self._extract_structured_page_data(page_text, snapshot_text=snapshot_text)
+        structured_page = {
+            "available": False,
+            "deferred": True,
+            "message": "structured page analysis deferred on fast path",
+            "primary_action_count": 0,
+            "form_count": 0,
+            "dialog_count": 0,
+            "control_count": 0,
+            "headings": [],
+            "forms": [],
+            "dialogs": [],
+            "primary_actions": [],
+        }
         modal_state = {"visible": False, "count": 0, "primary_dialog": {}, "dialogs": []}
-        interaction_hints = self._build_interaction_hints(structured_page, {}, modal_state)
+        interaction_hints = {
+            "primary_actions": [],
+            "secondary_actions": [],
+            "overlay_actions": [],
+            "form_actions": [],
+            "navigation_actions": [],
+            "warnings": [],
+            "available": False,
+            "deferred": True,
+        }
         session_health = (
             self._build_session_health_snapshot(page_payload=page)
             if include_session_health
@@ -1339,13 +1321,7 @@ class ManagedSessionDiagnosticsMixin:
             "snapshot": snapshot_payload,
             "structured_page": structured_page,
             "interaction_hints": interaction_hints,
-            "next_steps": self._next_step_suggestions_for_context(
-                action_name=str(action_name or "inspect"),
-                session_health=session_health,
-                structured_page=structured_page,
-                interaction_hints=interaction_hints,
-                resolution_trace={},
-            ),
+            "next_steps": [],
             "recent_actions": self._recent_actions_payload(limit=4),
             "session_health": session_health,
         }
@@ -1360,18 +1336,20 @@ class ManagedSessionDiagnosticsMixin:
                 tab_id=str(payload.get("tab_id", "") or ""),
             )
             return payload
-        if not self._should_attach_post_action_context(action_name):
-            return payload
-        context_action = f"{action_name}_failed" if payload.get("ok") is False or failure else action_name
-        payload["post_action_context"] = (
-            self._build_post_action_context(context_action, tab_id=str(payload.get("tab_id", "") or ""))
-            if payload.get("ok") is False or failure
-            else self._minimal_post_action_context(
+        if payload.get("ok") is False or failure:
+            context_action = f"{action_name}_failed"
+            payload["post_action_context"] = self._build_post_action_context(
                 context_action,
                 tab_id=str(payload.get("tab_id", "") or ""),
-                include_anti_bot=False,
-                include_session_health=True,
             )
+            return payload
+        if not self._should_attach_post_action_context(action_name):
+            return payload
+        payload["post_action_context"] = self._minimal_post_action_context(
+            action_name,
+            tab_id=str(payload.get("tab_id", "") or ""),
+            include_anti_bot=False,
+            include_session_health=False,
         )
         return payload
 

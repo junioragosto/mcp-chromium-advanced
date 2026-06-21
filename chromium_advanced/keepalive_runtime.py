@@ -1020,6 +1020,53 @@ def run_keepalive_site_action(
     return run_external_keepalive_plugin(normalized, metadata, driver, settings, profile_entry, logger, stop_controller)
 
 
+class _UcSanitizedArgumentList(list):
+    def _sanitize(self, items):
+        return _lib().sanitize_chromium_launch_args(list(items or []))
+
+    def append(self, item):
+        sanitized = self._sanitize([item])
+        if sanitized:
+            super().append(sanitized[0])
+
+    def extend(self, items):
+        sanitized = self._sanitize(items)
+        if sanitized:
+            super().extend(sanitized)
+
+    def insert(self, index, item):
+        sanitized = self._sanitize([item])
+        if sanitized:
+            super().insert(index, sanitized[0])
+
+    def __iadd__(self, items):
+        self.extend(items)
+        return self
+
+
+def _install_uc_argument_sanitizer(options) -> None:
+    try:
+        current_arguments = list(getattr(options, "arguments", []) or [])
+    except Exception:
+        current_arguments = []
+
+    sanitized_arguments = _UcSanitizedArgumentList()
+    sanitized_arguments.extend(current_arguments)
+    try:
+        options.arguments = sanitized_arguments
+    except Exception:
+        pass
+
+    original_add_argument = getattr(options, "add_argument", None)
+    if callable(original_add_argument):
+        def _sanitized_add_argument(arg):
+            sanitized = _lib().sanitize_chromium_launch_args([arg])
+            if not sanitized:
+                return None
+            return original_add_argument(sanitized[0])
+        options.add_argument = _sanitized_add_argument
+
+
 def create_driver_for_profile(config: Dict, profile_name: str):
     paths = config["paths"]
     chromium_binary = _lib().resolve_chromium_binary(paths.get("chromium_dir", ""))
@@ -1034,6 +1081,7 @@ def create_driver_for_profile(config: Dict, profile_name: str):
         raise FileNotFoundError(f"Profile UserData root not found: {user_data_root}")
 
     options = uc.ChromeOptions()
+    _install_uc_argument_sanitizer(options)
     options.binary_location = chromium_binary
     options.add_argument(f"--user-data-dir={user_data_root}")
     options.add_argument(f"--profile-directory={profile_name}")
@@ -1064,6 +1112,7 @@ def create_driver_for_profile(config: Dict, profile_name: str):
         "driver_executable_path": chromedriver_binary,
         "options": options,
         "use_subprocess": True,
+        "no_sandbox": False,
     }
     version_main = _lib().detect_chromium_major_version(paths.get("chromium_dir", ""))
     if version_main:

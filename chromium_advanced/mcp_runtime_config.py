@@ -20,7 +20,7 @@ def resolve_mcp_start_minimized(config: Dict) -> bool:
     env_value = str(os.environ.get("CHROMIUM_ADVANCED_MCP_START_MINIMIZED", "") or "").strip().lower()
     if env_value:
         return env_value in {"1", "true", "yes", "on"}
-    return True
+    return False
 
 
 def resolve_mcp_api_token(config: Dict) -> str:

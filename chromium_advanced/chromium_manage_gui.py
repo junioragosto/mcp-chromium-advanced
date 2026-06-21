@@ -2577,7 +2577,7 @@ class ChromiumManagerWindow(QMainWindow):
         if worker_policy not in MCP_WORKER_POLICY_OPTIONS:
             worker_policy = "sticky"
         self.mcp_worker_policy_combo.setCurrentText(worker_policy)
-        self.mcp_start_minimized_checkbox.setChecked(bool(settings.get("start_minimized", True)))
+        self.mcp_start_minimized_checkbox.setChecked(bool(settings.get("start_minimized", False)))
         log_level = str(settings.get("log_level", "info"))
         if log_level not in MCP_LOG_LEVEL_OPTIONS:
             log_level = "info"
