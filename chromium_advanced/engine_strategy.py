@@ -32,6 +32,8 @@ def _runtime_profile_for_engine(engine_name: str) -> str:
         return "stealth"
     if normalized == "playwright_cli":
         return "lightweight"
+    if normalized == "official_playwright_mcp":
+        return "official"
     return "balanced"
 
 

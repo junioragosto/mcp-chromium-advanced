@@ -17,7 +17,7 @@ From a first-contact perspective, there are seven key ideas:
 2. It is organized into layered runtime control.
    The GUI manages configuration and profiles, the daemon provides a stable MCP endpoint, the worker starts on demand, and a managed browser session kernel normalizes runtime behavior before MCP tools use it.
 3. It supports multiple browser execution engines.
-   Shared profile and session ownership stay the same, while the execution backend can use Selenium plus `undetected_chromedriver`, Patchright, or `playwright_cli`.
+   Shared profile and session ownership stay the same, while the execution backend can use Selenium plus `undetected_chromedriver`, Patchright, `playwright_cli`, or the currently fail-fast `official_playwright_mcp` experimental backend.
 4. It exposes a more stable runtime contract than the raw engines alone.
    The managed session kernel adds structured capability metadata, normalized action errors, and generic DOM-script fallbacks so callers are less exposed to engine-specific gaps.
 5. It is designed around safe profile ownership.
@@ -49,6 +49,7 @@ The browser automation layer supports:
 - undetected-chromedriver: [https://github.com/ultrafunkamsterdam/undetected-chromedriver](https://github.com/ultrafunkamsterdam/undetected-chromedriver)
 - Patchright: [https://github.com/Kaliiiiiiiiii-Vinyzu/patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
 - Playwright CLI: [https://github.com/microsoft/playwright-cli](https://github.com/microsoft/playwright-cli)
+- Official Playwright MCP: [https://github.com/microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp)
 
 The project starts Chromium with a real `user-data-dir` and `profile-directory`, then attaches the selected browser engine to that profile. This allows the worker to reuse real cookies, sessions, local storage, extensions, and other persistent browser state.
 
@@ -148,6 +149,8 @@ Recommended practical policy:
   Preferred for stealth-sensitive sites or workflows where avoiding automation detection, challenge handling, or coordinate/gesture fallback matters more than raw throughput.
 - `playwright_cli`
   Lightweight integrated engine for lower-overhead flows and compatibility scenarios, but no longer the default high-capability path.
+- `official_playwright_mcp`
+  Experimental fourth backend slot. It is recognized by config, GUI, and factory selection, but intentionally fails fast today because the current official runtime ownership model conflicts with this project's live persistent-profile governance path.
 
 ## Profile login-state discovery
 
@@ -767,6 +770,7 @@ For this release line:
 
 - GitHub Actions now builds Windows, macOS x64, macOS arm64, and Linux artifacts
 - browser binaries and ChromeDriver are intentionally not bundled yet
+- a bundled Node.js runtime plus bundled `@playwright/mcp` runtime are not enabled yet; `resources/runtime/` currently defines the packaging contract and placeholder layout only
 - each target machine is expected to configure its own Chromium binary and ChromeDriver paths after launch
 - release artifacts bundle the GUI app, daemon, worker runtime, `resources/`, skill templates, example config, and release docs
 - release artifacts also bundle the latest fingerprint plugin zip from `omegaee/my-fingerprint` together with release metadata
@@ -777,6 +781,13 @@ For this release line:
   - master PNG: `resources/chromium_profile_manager.png`
 
 This keeps release engineering simple while browser/runtime asset management is still being standardized and still gives operators a usable install bundle.
+
+Current official-runtime boundary:
+
+- `official_playwright_mcp` is already visible as a supported engine name
+- packaged/runtime path resolution already expects future assets under `resources/runtime/node/` and `resources/runtime/official_playwright_mcp/`
+- if those bundled assets are absent, the engine fails fast with an explicit runtime error
+- even if the bundled runtime exists, it is still intentionally blocked for the normal live persistent-profile path until a compatible ownership model is implemented
 
 The release build entrypoints are now:
 

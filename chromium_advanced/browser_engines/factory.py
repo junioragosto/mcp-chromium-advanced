@@ -13,6 +13,8 @@ def normalize_browser_engine_name(value: str) -> str:
         return "selenium_uc"
     if text in {"playwright_cli", "playwright-cli", "playwrightcli"}:
         return "playwright_cli"
+    if text in {"official_playwright_mcp", "official-playwright-mcp", "playwright_mcp", "playwright-mcp"}:
+        return "official_playwright_mcp"
     return DEFAULT_BROWSER_ENGINE
 
 
@@ -26,6 +28,10 @@ def create_browser_engine(engine_name: str) -> object:
         from chromium_advanced.browser_engines.playwright_cli_engine import PlaywrightCliEngine
 
         return PlaywrightCliEngine()
+    if normalized == "official_playwright_mcp":
+        from chromium_advanced.browser_engines.official_playwright_mcp_engine import OfficialPlaywrightMcpEngine
+
+        return OfficialPlaywrightMcpEngine()
     from chromium_advanced.browser_engines.selenium_uc_engine import SeleniumUCEngine
 
     return SeleniumUCEngine()
@@ -36,4 +42,3 @@ def resolve_browser_engine_name(config: Dict, explicit_engine_name: str = "") ->
         return normalize_browser_engine_name(explicit_engine_name)
     app = config.get("app", {}) if isinstance(config, dict) else {}
     return normalize_browser_engine_name(app.get("browser_engine", DEFAULT_BROWSER_ENGINE))
-

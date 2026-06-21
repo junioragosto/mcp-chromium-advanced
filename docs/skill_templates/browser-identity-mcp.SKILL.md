@@ -186,12 +186,14 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 - `selenium_uc`
 - `patchright`
 - `playwright_cli`
+- `official_playwright_mcp`
 
 Recommended engine-selection policy for this project:
 
 - default to `patchright` for ordinary MCP browsing tasks and most real production flows
 - switch to `selenium_uc` when stealth, anti-detection tolerance, recurring challenge pages, or gesture/coordinate fallback matter more than raw speed
 - use `playwright_cli` as a lightweight compatibility or diagnostic path, not as the default high-capability path
+- treat `official_playwright_mcp` as an experimental backend name only; do not choose it for normal live-profile work unless the runtime explicitly documents that the bundled official backend was enabled for this build
 
 Important engine capability examples:
 
@@ -201,6 +203,8 @@ Important engine capability examples:
   prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs coordinate-level mouse actions such as drag, gesture unlock, slider/pattern input, or vision-style XY fallback
 - `playwright_cli`
   prefer this for lightweight compatibility flows, bounded diagnostics, or lower-overhead tasks when the stronger `patchright` path is not required
+- `official_playwright_mcp`
+  currently a reserved backend slot for future bundled official-runtime integration; at this stage it should be expected to fail fast rather than start a live persistent-profile session
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as a formal capability boundary rather than a generic fallback every engine should support
 - prefer the high-level gesture path first:
@@ -333,6 +337,7 @@ How to switch engines explicitly:
 - set `engine="selenium_uc"` when a page needs gesture/drag/XY mouse actions
 - set `engine="patchright"` explicitly when the caller wants to pin the strongest structured path
 - set `engine="playwright_cli"` only when a lightweight compatibility path is intentionally desired
+- do not set `engine="official_playwright_mcp"` for routine tasks in current builds unless release notes explicitly say that backend was enabled
 - for difficult dynamic pages, prefer `browser_get_interaction_context(...)`, `browser_list_candidates(...)`, and other structured surfaces before depending on raw `run_script(...)` readback
 - if `run_script(...)` returns `script_result_state="stringified"`, treat that as a serialization boundary rather than a normal structured success
 

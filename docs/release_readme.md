@@ -95,6 +95,18 @@ the app can create fresh profiles without any preexisting mirror data.
   Best for stealth / anti-bot tolerance / gesture-heavy pages
 - `playwright_cli`
   Lightweight integrated compatibility engine
+- `official_playwright_mcp`
+  Experimental fourth backend slot. It is visible in engine selection, but currently fail-fast by design until a bundled Node.js plus bundled `@playwright/mcp` runtime is shipped and the ownership model is made compatible with live persistent-profile sessions.
+
+## Bundled Runtime Contract
+
+This release line already reserves these internal paths:
+
+- `resources/runtime/node/`
+- `resources/runtime/official_playwright_mcp/`
+
+They currently define the packaging contract only. They do not yet mean the
+official Playwright MCP backend is usable in production.
 
 ## Skills
 

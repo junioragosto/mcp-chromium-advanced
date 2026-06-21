@@ -15,7 +15,7 @@ MCP Chromium Advanced 是一个用于管理真实 Chromium 浏览器 Profile 的
 2. 它采用分层运行结构。
    GUI 负责配置和 Profile 管理，daemon 提供稳定的 MCP 入口，worker 按需启动，而受管浏览器会话内核会在 MCP tools 调用前统一运行时行为。
 3. 它支持多种浏览器执行引擎。
-   共享的 Profile 管理与会话占用逻辑保持不变，浏览器执行后端当前支持 `selenium_uc`、`patchright` 和 `playwright_cli`。
+   共享的 Profile 管理与会话占用逻辑保持不变，浏览器执行后端当前支持 `selenium_uc`、`patchright`、`playwright_cli`，以及当前仍处于 fail-fast 状态的实验性 `official_playwright_mcp`。
 4. 它对上层暴露的是更稳定的运行时契约，而不是原始引擎差异。
    受管会话内核会补充结构化能力描述、统一错误码和通用 fallback，减少调用方直接面对引擎差异的概率。
 5. 它的核心设计是“安全占用真实身份”。
@@ -147,6 +147,8 @@ worker 运行策略现在也是显式可配的：
   更适合风控敏感站点、登录站点、challenge/伪装优先场景。目前项目里它仍然是 stealth 最强的一条路径。
 - `playwright_cli`
   适合作为低开销、轻量级、兼容性导向的集成引擎，但不再是默认的高能力路径。
+- `official_playwright_mcp`
+  第四个实验性引擎槽位。现在已经能在配置、GUI 和工厂选择层被识别，但当前仍会刻意 fail-fast，因为官方 runtime 的 ownership 模型与本项目的 live 持久 Profile 治理路径还不兼容。
 
 当前这轮对齐官方 MCP 的收口重点，已经不只是“多几个动作”，而是把动作结果语义也统一下来：
 
@@ -383,7 +385,7 @@ pip install -r requirements.txt
 - `paths.fingerprint_zip_path`
   与 `my-fingerprint` 相关的可选路径
 - `app.browser_engine`
-  默认浏览器执行后端，目前支持 `selenium_uc`、`patchright`、`playwright_cli`
+  默认浏览器执行后端，目前支持 `selenium_uc`、`patchright`、`playwright_cli`、`official_playwright_mcp`
 - `app.concurrency_mode`
   会话并发治理模式。当前默认 `per_profile_live`，允许不同 Profile 并发，但同一个 Profile 保持互斥
 - `mcp.host` / `mcp.port` / `mcp.worker_port` / `mcp.path`
@@ -611,6 +613,7 @@ skill 模板里应明确告诉 agent：
 - `patchright` 是普通 MCP 任务的默认引擎，尤其适合结构化提取和复杂前端诊断。
 - `selenium_uc` 适合 stealth、反自动化压力较高、反复 challenge、手势/拖拽/坐标 fallback 等场景。
 - `playwright_cli` 是轻量级集成引擎，适合低开销流程，但不应被描述成默认的高能力路径。
+- `official_playwright_mcp` 目前只是实验性后端名，除非发布说明明确写明已正式启用，否则不应用于正常 live Profile 任务。
 - 如果需要在同一个 Profile 治理路径下做隔离验证，可以使用 `runtime_options.incognito=true`。
 
 ## 隐私与安全

@@ -101,6 +101,7 @@ Invoke-ExternalChecked -StepName "Build ChromiumProfileManager" -Command {
       --add-data "docs;docs" `
       --add-data "README.md;." `
       --add-data "README_zh.md;." `
+      --add-data "chromium_profiles.example.json;." `
       $guiScriptPath
 }
 

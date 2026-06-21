@@ -98,6 +98,17 @@
   更适合反自动化识别、challenge、拖动、手势等场景
 - `playwright_cli`
   轻量集成兼容引擎，不再是默认高能力路径
+- `official_playwright_mcp`
+  第四个实验性引擎槽位。现在已经能在配置和 GUI 里被识别，但当前是刻意 fail-fast 的状态；只有未来把内置 Node.js 和内置 `@playwright/mcp` runtime 正式打进发布包，并解决 live 持久 Profile 治理冲突后，才会进入可用状态。
+
+## 内置 Runtime 约定
+
+当前发布线已经预留了这两个内部目录：
+
+- `resources/runtime/node/`
+- `resources/runtime/official_playwright_mcp/`
+
+它们现在只代表打包布局约定，并不表示官方 Playwright MCP 后端已经可以投入生产使用。
 
 ## Skill 安装
 

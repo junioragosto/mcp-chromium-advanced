@@ -369,6 +369,8 @@ def get_default_path_config() -> Dict[str, str]:
         "mirror_user_data_root": get_default_mirror_user_data_root(os.path.join(workspace_root, "user-data")),
         "bookmarks_template_path": bookmarks_template_path,
         "fingerprint_zip_path": os.path.join(workspace_root, "extensions", "fingerprint-extension.zip"),
+        "bundled_node_dir": os.path.join(get_runtime_resource_root(), "node"),
+        "bundled_playwright_mcp_dir": os.path.join(get_runtime_resource_root(), "official_playwright_mcp"),
     }
 
 
@@ -564,6 +566,69 @@ def get_script_dir() -> str:
 
 def get_project_root() -> str:
     return os.path.abspath(os.path.join(get_script_dir(), ".."))
+
+
+def get_runtime_resource_root() -> str:
+    project_root = get_project_root()
+    bundled_root = os.path.join(project_root, "resources", "runtime")
+    return bundled_root
+
+
+def get_bundled_node_dir(config: Optional[Dict] = None) -> str:
+    if isinstance(config, dict):
+        normalized = normalize_config(config)
+        configured = str(normalized.get("paths", {}).get("bundled_node_dir", "") or "").strip()
+        if configured:
+            return os.path.abspath(os.path.expanduser(configured))
+    return os.path.join(get_runtime_resource_root(), "node")
+
+
+def get_bundled_playwright_mcp_dir(config: Optional[Dict] = None) -> str:
+    if isinstance(config, dict):
+        normalized = normalize_config(config)
+        configured = str(normalized.get("paths", {}).get("bundled_playwright_mcp_dir", "") or "").strip()
+        if configured:
+            return os.path.abspath(os.path.expanduser(configured))
+    return os.path.join(get_runtime_resource_root(), "official_playwright_mcp")
+
+
+def resolve_bundled_node_executable(config: Optional[Dict] = None) -> str:
+    node_dir = get_bundled_node_dir(config)
+    candidates = []
+    if SYSTEM_NAME == "Windows":
+        candidates.append(os.path.join(node_dir, "node.exe"))
+    else:
+        candidates.append(os.path.join(node_dir, "bin", "node"))
+        candidates.append(os.path.join(node_dir, "node"))
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return ""
+
+
+def resolve_official_playwright_mcp_entrypoint(config: Optional[Dict] = None) -> str:
+    runtime_dir = get_bundled_playwright_mcp_dir(config)
+    candidates = [
+        os.path.join(runtime_dir, "node_modules", "@playwright", "mcp", "cli.js"),
+        os.path.join(runtime_dir, "node_modules", "@playwright", "mcp", "index.js"),
+        os.path.join(runtime_dir, "dist", "cli.js"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return ""
+
+
+def resolve_official_playwright_mcp_runtime(config: Optional[Dict] = None) -> Dict[str, str]:
+    node_executable = resolve_bundled_node_executable(config)
+    entrypoint = resolve_official_playwright_mcp_entrypoint(config)
+    runtime_dir = get_bundled_playwright_mcp_dir(config)
+    return {
+        "node_executable": node_executable,
+        "entrypoint": entrypoint,
+        "runtime_dir": os.path.abspath(runtime_dir),
+        "ready": bool(node_executable and entrypoint),
+    }
 
 
 def get_runtime_launch_cwd(executable_path: Optional[str] = None) -> str:

@@ -58,6 +58,7 @@ class RuntimeCapabilities:
             "patchright": "primary",
             "selenium_uc": "stealth",
             "playwright_cli": "lightweight",
+            "official_playwright_mcp": "official",
         }.get(engine_name, "balanced")
         return cls(
             engine_name=engine_name,

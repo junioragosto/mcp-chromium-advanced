@@ -46,12 +46,14 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 - `selenium_uc`
 - `patchright`
 - `playwright_cli`
+- `official_playwright_mcp`
 
 Recommended engine-selection policy remains the same from WSL:
 
 - default to `patchright` for ordinary MCP task execution and most real workflows
 - use `selenium_uc` for stealth-sensitive pages, recurring challenge/verification pages, or when gesture/coordinate fallback matters more than raw speed
 - use `playwright_cli` as a lightweight compatibility or diagnostic path, not as the normal default
+- treat `official_playwright_mcp` as an experimental backend name only; do not choose it for routine live-profile work from WSL unless the runtime explicitly documents that the bundled official backend was enabled for that build
 
 Important engine capability examples from WSL remain the same:
 
@@ -61,6 +63,8 @@ Important engine capability examples from WSL remain the same:
   prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs gesture unlock, drag, slider movement, or coordinate-level mouse fallback
 - `playwright_cli`
   prefer this for lightweight compatibility flows and bounded diagnostics
+- `official_playwright_mcp`
+  currently a reserved backend slot for future bundled official-runtime integration; at this stage it should be expected to fail fast rather than open a normal live persistent-profile session
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as engine-scoped capabilities, not as guaranteed fallback tools on every runtime
 - prefer the high-level gesture path first:
