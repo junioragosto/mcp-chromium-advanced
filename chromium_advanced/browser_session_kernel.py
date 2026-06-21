@@ -2499,16 +2499,21 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         poll_interval_ms: int = 500,
         tab_id: str = "",
     ) -> Dict:
-        result = self._dispatch(
-            "watch_page_state",
-            lambda: self._raw.watch_page_state(
+        def _raw_watch_page_state():
+            if not callable(getattr(self._raw, "watch_page_state", None)):
+                raise NotImplementedError("watch_page_state is not supported by raw runtime")
+            return self._raw.watch_page_state(
                 text=text,
                 previous_text=previous_text,
                 timeout_seconds=timeout_seconds,
                 stable_cycles=stable_cycles,
                 poll_interval_ms=poll_interval_ms,
                 tab_id=tab_id,
-            ),
+            )
+
+        result = self._dispatch(
+            "watch_page_state",
+            _raw_watch_page_state,
             fallback=lambda: self._fallback_watch_page_state(
                 text=text,
                 previous_text=previous_text,
@@ -2539,38 +2544,66 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         try:
             initial_page = self._raw.get_page_text(tab_id=tab_id) if tab_id else self._raw.get_page_text()
             initial_text = str(initial_page.get("text", "") or "")
-            if not previous_text:
-                previous_text = initial_text
-            change_result = self._fallback_wait_for_text_change(
-                text=text,
-                previous_text=previous_text,
-                timeout_seconds=timeout_seconds,
-                tab_id=tab_id,
-            )
-            stable_result = self._fallback_wait_for_page_stable(
-                timeout_seconds=max(1, int(timeout_seconds)),
-                stable_cycles=stable_cycles,
-                poll_interval_ms=poll_interval_ms,
-                tab_id=tab_id,
-            )
-            final_text = str(change_result.get("text", "") or stable_result.get("text", "") or "")
+            baseline_text = str(previous_text or initial_text or "")
+            interval = max(50, int(poll_interval_ms)) / 1000.0
+            required_cycles = max(1, int(stable_cycles))
+            deadline = time.time() + max(1, int(timeout_seconds))
+            expected_text = str(text or "")
+            stable_count = 0
+            last_signature = ""
+            final_payload: Dict[str, Any] = {}
+            final_text = baseline_text
+            matched = False
+            text_changed = False
+            while time.time() < deadline:
+                page = self._raw.get_page_text(tab_id=tab_id) if tab_id else self._raw.get_page_text()
+                html = self._raw.get_page_html(tab_id=tab_id) if tab_id else self._raw.get_page_html()
+                current_text = str(page.get("text", "") or "")
+                html_value = str(html.get("html", "") or "")
+                signature_source = f"{str(page.get('url', '') or '')}\n{str(page.get('title', '') or '')}\n{current_text[:4000]}\n{len(html_value)}"
+                signature = hashlib.sha1(signature_source.encode("utf-8", errors="ignore")).hexdigest()
+                if signature == last_signature:
+                    stable_count += 1
+                else:
+                    stable_count = 1
+                    last_signature = signature
+                final_text = current_text
+                contains_target = bool(expected_text and expected_text in current_text)
+                changed_from_previous = current_text != baseline_text if baseline_text else bool(current_text.strip())
+                matched = contains_target if expected_text else changed_from_previous
+                text_changed = changed_from_previous
+                final_payload = {
+                    **(page if isinstance(page, dict) else {}),
+                    "stable": stable_count >= required_cycles,
+                    "stable_cycles": stable_count,
+                    "required_stable_cycles": required_cycles,
+                    "poll_interval_ms": max(50, int(poll_interval_ms)),
+                    "text_length": len(current_text),
+                    "html_length": len(html_value),
+                    "page_signature": signature,
+                }
+                if stable_count >= required_cycles and (contains_target if expected_text else changed_from_previous):
+                    break
+                time.sleep(interval)
+            else:
+                raise TimeoutError(
+                    f"Timed out waiting for combined page change/stability. expected_text={expected_text!r} previous_text_len={len(baseline_text)}"
+                )
             result = {
-                **(stable_result if isinstance(stable_result, dict) else {}),
+                **final_payload,
                 "watch_completed": True,
-                "watch_reason": "text_changed_and_stable" if str(text or "").strip() else "page_stable_after_change",
+                "watch_reason": "text_changed_and_stable" if expected_text else "page_stable_after_change",
                 "initial_text": initial_text,
-                "previous_text": str(previous_text or ""),
+                "previous_text": baseline_text,
                 "final_text": final_text,
-                "text_changed": final_text != str(previous_text or ""),
-                "target_text": str(text or ""),
-                "text_contains_target": bool(str(text or "").strip() and str(text or "") in final_text),
-                "matched": bool(str(text or "").strip() and str(text or "") in final_text) if str(text or "").strip() else True,
-                "verified": bool(str(text or "").strip() and str(text or "") in final_text) if str(text or "").strip() else True,
-                "change_result": change_result,
-                "stable_result": stable_result,
+                "text_changed": text_changed,
+                "target_text": expected_text,
+                "text_contains_target": bool(expected_text and expected_text in final_text),
+                "matched": matched,
+                "verified": matched,
                 "text_diff": {
-                    "changed": final_text != str(previous_text or ""),
-                    "previous_length": len(str(previous_text or "")),
+                    "changed": final_text != baseline_text,
+                    "previous_length": len(baseline_text),
                     "final_length": len(final_text),
                 },
             }

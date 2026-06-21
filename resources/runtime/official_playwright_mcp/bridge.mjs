@@ -106,6 +106,7 @@ class OfficialBridgeRuntime {
         userDataDir: this.config.browser.userDataDir,
         launchOptions: {
           executablePath: this.config.browser.chromiumExecutable,
+          chromiumSandbox: true,
           headless: Boolean(this.config.browser.headless),
           args: [
             `--profile-directory=${String(this.config.browser.profileName || "Profile 1")}`,
@@ -114,6 +115,7 @@ class OfficialBridgeRuntime {
             "--disable-session-crashed-bubble",
             "--hide-crash-restore-bubble",
           ],
+          ignoreDefaultArgs: ["--enable-automation"],
         },
       },
     });

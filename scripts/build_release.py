@@ -308,6 +308,8 @@ def build_posix_binaries():
             "rich",
             "--collect-submodules",
             "rich._unicode_data",
+            "--add-data",
+            f"resources{data_sep}resources",
         ]
         if sys.platform == "darwin" and macos_icon_path.exists():
             command.extend(["--icon", str(macos_icon_path)])

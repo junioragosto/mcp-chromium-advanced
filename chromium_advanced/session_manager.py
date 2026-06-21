@@ -677,6 +677,64 @@ class SessionManager:
             "external_running_processes_truncated": len(items) > len(sample),
         }
 
+    @staticmethod
+    def _session_record_from_occupancy_entry(profile_name: str, entry: Dict) -> Optional[SessionRecord]:
+        if not isinstance(entry, dict):
+            return None
+        session_id = str(entry.get("session_id", "") or "").strip()
+        state = str(entry.get("state", "") or "").strip().lower()
+        scene_type = str(entry.get("scene_type", "") or "").strip().lower()
+        if not session_id or state != "active" or scene_type not in {"mcp", "automation"}:
+            return None
+        details = entry.get("details", {})
+        if not isinstance(details, dict):
+            details = {}
+        runtime_mode = str(details.get("runtime_mode", "") or "").strip() or "live_root"
+        now_ts = time.time()
+        return SessionRecord(
+            session_id=session_id,
+            profile_name=str(profile_name or "").strip(),
+            engine_name=str(entry.get("engine_name", "") or "").strip(),
+            created_at=0.0,
+            last_used_at=float(entry.get("last_heartbeat_at", 0.0) or 0.0) or now_ts,
+            browser_session=ResourceLeaseSession(profile_name),
+            runtime_mode=runtime_mode,
+            runtime_root=str(details.get("runtime_root", "") or "").strip(),
+            mirror_generated_at=str(details.get("mirror_generated_at", "") or "").strip(),
+            cleanup_runtime_on_close=False,
+            scene_type=scene_type,
+            owner_label=str(entry.get("owner_label", "") or "").strip(),
+            task_scope=str(details.get("task_scope", "") or "").strip(),
+            reuse_scope=str(details.get("reuse_scope", "") or "").strip() or "session",
+            launch_pid=int(entry.get("owner_pid", 0) or 0),
+            cached_alive=True,
+        )
+
+    def _build_active_session_view_locked(self, occupancy_map: Optional[Dict[str, Dict]] = None) -> List[SessionRecord]:
+        view: List[SessionRecord] = list(self._sessions_by_id.values())
+        existing_ids = {session.session_id for session in view if str(session.session_id or "").strip()}
+        if not isinstance(occupancy_map, dict):
+            occupancy_map = self.list_profile_occupancy(reconcile=False, tolerate_lock_timeout=True)
+        for profile_name, entry in occupancy_map.items():
+            derived = self._session_record_from_occupancy_entry(profile_name, entry)
+            if derived is None or derived.session_id in existing_ids:
+                continue
+            view.append(derived)
+            existing_ids.add(derived.session_id)
+        return view
+
+    def _sessions_for_profile_view_locked(
+        self,
+        profile_name: str,
+        occupancy_map: Optional[Dict[str, Dict]] = None,
+    ) -> List[SessionRecord]:
+        profile_name = str(profile_name or "").strip()
+        return [
+            session
+            for session in self._build_active_session_view_locked(occupancy_map)
+            if str(session.profile_name or "").strip() == profile_name
+        ]
+
     @classmethod
     def _build_runtime_state_payload(
         cls,
@@ -700,7 +758,7 @@ class SessionManager:
             "active_session": bool(sessions),
             "active_session_count": len(sessions),
             "live_session_count": sum(1 for session in sessions if session.runtime_mode == "live_root"),
-            "isolated_session_count": 0,
+            "isolated_session_count": sum(1 for session in sessions if session.runtime_mode == "isolated_runtime"),
             "session_id": active_summary.get("session_id", ""),
             "current_url": active_summary.get("current_url", ""),
             "title": active_summary.get("title", ""),
@@ -837,8 +895,13 @@ class SessionManager:
             running_by_profile = self._group_running_processes_by_profile(external_busy.get("running_processes", []))
         with self._lock:
             self._purge_dead_sessions_locked(probe_browser=False)
+            active_session_view = self._build_active_session_view_locked(occupancy_map)
             profile_sessions = {
-                item.get("profile_name", ""): self._sessions_for_profile_locked(item.get("profile_name", ""))
+                item.get("profile_name", ""): [
+                    session
+                    for session in active_session_view
+                    if str(session.profile_name or "").strip() == str(item.get("profile_name", "") or "").strip()
+                ]
                 for item in config.get("profiles", [])
                 if item.get("profile_name")
             }
@@ -919,7 +982,8 @@ class SessionManager:
             self.reconcile_stale_profile_occupancy()
         with self._lock:
             self._purge_dead_sessions_locked(probe_browser=False)
-            return [session.to_summary(refresh=False) for session in self._sessions_by_id.values()]
+            occupancy_map = self.list_profile_occupancy(reconcile=False, tolerate_lock_timeout=True)
+            return [session.to_summary(refresh=False) for session in self._build_active_session_view_locked(occupancy_map)]
 
     def get_runtime_status_snapshot(
         self,
@@ -933,6 +997,8 @@ class SessionManager:
         with self._lock:
             self._purge_dead_sessions_locked(probe_browser=False)
             visible_starting_profiles = self._visible_starting_profiles_locked()
+            occupancy_map = self.list_profile_occupancy(reconcile=False, tolerate_lock_timeout=True)
+            active_session_view = self._build_active_session_view_locked(occupancy_map)
             active_sessions = [
                 {
                     "session_id": session.session_id,
@@ -944,10 +1010,11 @@ class SessionManager:
                     "runtime_root": session.runtime_root,
                     "mirror_generated_at": session.mirror_generated_at,
                 }
-                for session in self._sessions_by_id.values()
+                for session in active_session_view
             ]
-            live_session_count = sum(1 for session in self._sessions_by_id.values() if session.runtime_mode == "live_root")
-            active_profile_names = {str(session.profile_name).strip() for session in self._sessions_by_id.values() if str(session.profile_name).strip()}
+            live_session_count = sum(1 for session in active_session_view if session.runtime_mode == "live_root")
+            isolated_session_count = sum(1 for session in active_session_view if session.runtime_mode == "isolated_runtime")
+            active_profile_names = {str(session.profile_name).strip() for session in active_session_view if str(session.profile_name).strip()}
         if include_external_processes:
             external_busy = self._get_external_busy_details(config)
             running_processes = external_busy.get("running_processes", [])
@@ -998,7 +1065,7 @@ class SessionManager:
             "active_session_count": len(active_sessions),
             "active_sessions": active_sessions,
             "live_session_count": live_session_count,
-            "isolated_session_count": 0,
+            "isolated_session_count": isolated_session_count,
             **running_process_payload,
             "external_scan_ms": external_scan_ms,
             "keepalive_lock_active": keepalive_lock_active,
@@ -1025,10 +1092,12 @@ class SessionManager:
         with self._lock:
             self._purge_dead_sessions_locked(probe_browser=False)
             visible_starting_profiles = self._visible_starting_profiles_locked()
-            active_sessions = [session.to_summary(refresh=False) for session in self._sessions_by_id.values()]
-            live_sessions = [session.to_summary(refresh=False) for session in self._live_sessions_locked()]
-            isolated_sessions = [session.to_summary(refresh=False) for session in self._isolated_sessions_locked()]
-            active_profile_names = {str(session.profile_name).strip() for session in self._sessions_by_id.values() if str(session.profile_name).strip()}
+            occupancy_map = self.list_profile_occupancy(reconcile=False, tolerate_lock_timeout=True)
+            active_session_view = self._build_active_session_view_locked(occupancy_map)
+            active_sessions = [session.to_summary(refresh=False) for session in active_session_view]
+            live_sessions = [session.to_summary(refresh=False) for session in active_session_view if session.runtime_mode == "live_root"]
+            isolated_sessions = [session.to_summary(refresh=False) for session in active_session_view if session.runtime_mode == "isolated_runtime"]
+            active_profile_names = {str(session.profile_name).strip() for session in active_session_view if str(session.profile_name).strip()}
 
         external_busy = self._get_external_busy_details(config)
         running_processes = external_busy.get("running_processes", [])
@@ -1376,7 +1445,13 @@ class SessionManager:
                 owner_label=effective_owner_label or f"{effective_scene_type} {session_id}",
                 engine_name=resolved_engine_name,
                 session_id=session_id,
-                details={"runtime_mode": runtime_mode},
+                details={
+                    "runtime_mode": runtime_mode,
+                    "runtime_root": runtime_root,
+                    "mirror_generated_at": mirror_generated_at,
+                    "task_scope": task_scope,
+                    "reuse_scope": reuse_scope,
+                },
                 owner_pid=os.getpid(),
                 reclaimable=False,
                 heartbeat_timeout_seconds=int((runtime_options or {}).get("heartbeat_timeout_seconds", 0) or 0),
@@ -1456,7 +1531,14 @@ class SessionManager:
                     engine_name=session.engine_name,
                     session_id=session.session_id,
                     owner_pid=os.getpid(),
-                    details={"runtime_mode": session.runtime_mode, "last_used_at": session.last_used_at},
+                    details={
+                        "runtime_mode": session.runtime_mode,
+                        "runtime_root": session.runtime_root,
+                        "mirror_generated_at": session.mirror_generated_at,
+                        "task_scope": session.task_scope,
+                        "reuse_scope": session.reuse_scope,
+                        "last_used_at": session.last_used_at,
+                    },
                     reclaimable=(effective_scene_type != "mcp"),
                 )
             except Exception:
@@ -1540,7 +1622,7 @@ class SessionManager:
                 pass
         if session.cleanup_runtime_on_close and str(session.runtime_root or "").strip():
             try:
-                self._terminate_runtime_processes(session.runtime_root)
+                self._terminate_runtime_processes(session.runtime_root, launch_pid=int(session.launch_pid or 0))
             except Exception:
                 pass
             try:
@@ -1561,17 +1643,26 @@ class SessionManager:
             except Exception:
                 pass
 
-    def _terminate_runtime_processes(self, runtime_root: str) -> None:
+    def _terminate_runtime_processes(self, runtime_root: str, launch_pid: int = 0) -> None:
         runtime_root = str(runtime_root or "").strip()
-        if not runtime_root:
+        launch_pid = int(launch_pid or 0)
+        if not runtime_root and launch_pid <= 0:
             return
         try:
             runtime_norm = normalize_fs_path(runtime_root)
         except Exception:
-            return
+            runtime_norm = ""
 
         current_pid = os.getpid()
         targets: Dict[int, psutil.Process] = {}
+        if launch_pid > 0:
+            try:
+                root_proc = psutil.Process(launch_pid)
+                targets[root_proc.pid] = root_proc
+                for child in root_proc.children(recursive=True):
+                    targets[child.pid] = child
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                pass
         for proc in psutil.process_iter(["pid", "cmdline"]):
             try:
                 if proc.pid == current_pid:
@@ -1580,7 +1671,7 @@ class SessionManager:
                 command_line = " ".join(str(item) for item in cmdline)
                 if not command_line:
                     continue
-                if runtime_norm not in os.path.normcase(command_line):
+                if runtime_norm and runtime_norm not in os.path.normcase(command_line):
                     continue
                 targets[proc.pid] = proc
                 for child in proc.children(recursive=True):
@@ -1590,20 +1681,26 @@ class SessionManager:
 
         if not targets:
             return
-        processes = list(targets.values())
-        for proc in processes:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        _, alive = psutil.wait_procs(processes, timeout=3)
+        alive = list(targets.values())
+        for _ in range(2):
+            processes = [proc for proc in alive if proc.is_running()]
+            if not processes:
+                return
+            for proc in processes:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            _, alive = psutil.wait_procs(processes, timeout=3)
+            if not alive:
+                return
         for proc in alive:
             try:
                 proc.kill()
             except Exception:
                 pass
         if alive:
-            psutil.wait_procs(alive, timeout=3)
+            psutil.wait_procs(alive, timeout=5)
 
     def _is_session_alive(self, session_or_browser_session, *, probe_browser: bool = True) -> bool:
         browser_session = session_or_browser_session

@@ -122,6 +122,7 @@ Invoke-ExternalChecked -StepName "Build ChromiumMcpDaemon" -Command {
       --hidden-import "selenium.webdriver.common.actions.mouse_button" `
       --collect-data "rich" `
       --collect-submodules "rich._unicode_data" `
+      --add-data "resources;resources" `
       $daemonScriptPath
 }
 
@@ -142,6 +143,7 @@ Invoke-ExternalChecked -StepName "Build ChromiumMcpWorker" -Command {
       --hidden-import "selenium.webdriver.common.actions.mouse_button" `
       --collect-data "rich" `
       --collect-submodules "rich._unicode_data" `
+      --add-data "resources;resources" `
       $workerScriptPath
 }
 

@@ -850,12 +850,26 @@ def create_daemon_app(
         ):
             cached_payload = runtime_status_cache.get("payload", {})
             return dict(cached_payload) if isinstance(cached_payload, dict) else {}
-        payload = _call_with_optional_runtime_flags(
-            session_manager,
-            "get_runtime_status_snapshot",
-            include_external_processes=include_external_processes,
-            include_mirror_status=include_mirror_status,
-        )
+        if hasattr(session_manager, "get_server_status"):
+            payload = _call_with_optional_runtime_flags(
+                session_manager,
+                "get_server_status",
+            )
+        else:
+            payload = _call_with_optional_runtime_flags(
+                session_manager,
+                "get_runtime_status_snapshot",
+                include_external_processes=include_external_processes,
+                include_mirror_status=include_mirror_status,
+            )
+        if not include_external_processes and isinstance(payload, dict):
+            payload = dict(payload)
+            payload["external_running_process_count"] = 0
+            payload["external_running_processes"] = []
+            payload["external_running_processes_truncated"] = False
+        if not include_mirror_status and isinstance(payload, dict):
+            payload = dict(payload)
+            payload["mirror_status"] = {}
         runtime_status_cache = {"cache_key": cache_key, "payload": dict(payload)}
         runtime_status_cache_at = now_ts
         return payload

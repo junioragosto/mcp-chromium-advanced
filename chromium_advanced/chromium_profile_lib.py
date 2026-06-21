@@ -52,6 +52,7 @@ PROFILE_MARKER_URL = "https://www.google.com/generate_204"
 LEGACY_CHATGPT_PROMPT = "Reply with one word: alive"
 SYSTEM_NAME = platform.system()
 KEEPALIVE_SITE_ORDER = ("chatgpt", "gmail", "google", "github")
+RUNTIME_METADATA_FILENAME = "runtime_snapshot.json"
 CHROMIUM_SUPPRESS_RESTORE_PROMPT_ARGS = (
     "--disable-session-crashed-bubble",
     "--hide-crash-restore-bubble",
@@ -2777,6 +2778,37 @@ def get_chromium_processes_for_profile(config: Dict, profile_name: str) -> List[
     return get_chromium_process_map_by_profile(config).get(str(profile_name or "").strip(), [])
 
 
+def _discover_runtime_user_data_roots_by_profile(config: Dict) -> Dict[str, set]:
+    normalized = normalize_config(config)
+    mirror_settings = normalized.get("mirror", {})
+    split_root = get_user_data_profiles_root(normalized)
+    runtime_dir_name = str(mirror_settings.get("runtime_dir_name", "runtime") or "runtime").strip() or "runtime"
+    runtime_base = os.path.join(split_root, runtime_dir_name)
+    results: Dict[str, set] = {}
+    if not os.path.isdir(runtime_base):
+        return results
+
+    for entry_name in os.listdir(runtime_base):
+        runtime_root = os.path.join(runtime_base, entry_name)
+        if not os.path.isdir(runtime_root):
+            continue
+        metadata_path = os.path.join(runtime_root, RUNTIME_METADATA_FILENAME)
+        if not os.path.isfile(metadata_path):
+            continue
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+        except Exception:
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        profile_name = str(metadata.get("profile_name", "") or "").strip()
+        if not profile_name:
+            continue
+        results.setdefault(profile_name, set()).add(normalize_fs_path(runtime_root))
+    return results
+
+
 def get_chromium_process_map_by_profile(config: Dict) -> Dict[str, List[Dict]]:
     normalized = normalize_config(config)
     paths = normalized.get("paths", {})
@@ -2798,6 +2830,7 @@ def get_chromium_process_map_by_profile(config: Dict) -> Dict[str, List[Dict]]:
     binary_norm = normalize_fs_path(chromium_binary)
     root_norm = normalize_fs_path(chromium_root)
     legacy_root = str(paths.get("user_data_root", "") or "").strip()
+    runtime_roots_by_profile = _discover_runtime_user_data_roots_by_profile(normalized)
 
     profile_specs = []
     for item in profiles:
@@ -2808,6 +2841,7 @@ def get_chromium_process_map_by_profile(config: Dict) -> Dict[str, List[Dict]]:
         allowed_user_data_roots = {normalize_fs_path(profile_root)}
         if legacy_root:
             allowed_user_data_roots.add(normalize_fs_path(legacy_root))
+        allowed_user_data_roots.update(runtime_roots_by_profile.get(profile_name, set()))
         profile_specs.append(
             {
                 "profile_name": profile_name,
