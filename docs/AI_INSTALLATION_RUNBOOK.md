@@ -51,15 +51,16 @@ MCP endpoint: http://127.0.0.1:28888/mcp
 
 Supported browser engines:
 
-- `patchright`: recommended default for normal MCP work when capability quality matters most, especially for structured extraction and complex frontends.
+- `official_playwright_mcp`: recommended default for normal MCP work and the main governed high-level path.
+- `patchright`: strongest live-root fallback when a site behaves better under the older direct integration.
 - `selenium_uc`: best stealth-oriented option, useful when avoiding automation detection matters more than throughput.
 - `playwright_cli`: lightweight integrated option for lower-overhead compatibility flows, but no longer the default high-capability path.
 
 Practical engine-selection rule for AI operators:
 
-- choose `patchright` for ordinary browsing, forms, navigation, screenshots, multi-tab work, and most production calls
+- choose `official_playwright_mcp` for ordinary browsing, forms, navigation, screenshots, multi-tab work, and most production MCP calls
+- choose `patchright` when the task specifically benefits from the older live-root behavior or a site proves more stable there
 - choose `selenium_uc` when stealth or anti-detection tolerance is the first concern
-- choose `patchright` when the task depends on high-quality structured extraction or difficult complex-frontend diagnostics
 
 Changing the GUI default engine affects only future sessions. Existing sessions keep the engine used at startup.
 
@@ -86,7 +87,7 @@ playwright-cli --help
 
 Python requirement: `3.10+`.
 
-Node/npm are still needed when `playwright_cli` is used as a compatibility engine, but `patchright` is now the preferred default execution path.
+Node/npm are still needed when `playwright_cli` is used as a compatibility engine, but the bundled `official_playwright_mcp` runtime is now the preferred default execution path.
 
 ## 3. Python Dependency Setup
 
@@ -180,7 +181,7 @@ Configure these fields in the GUI or config file:
 - `paths.user_data_root`: legacy shared-root path kept for migration compatibility.
 - `paths.user_data_profiles_root`: split-profile root used at runtime.
 - `paths.mirror_user_data_root`: backup snapshot directory, normally `<user_data_profiles_root>\mirror_disk`.
-- `app.browser_engine`: recommended `patchright` for normal MCP work.
+- `app.browser_engine`: recommended `official_playwright_mcp` for normal MCP work.
 - `app.concurrency_mode`: use `per_profile_live` as the normal mode. Use `block` only if you intentionally want conservative single-session gating.
 - `mcp.enabled`: `true`.
 - `mcp.host`: normally `127.0.0.1`.

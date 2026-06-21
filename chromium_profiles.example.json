@@ -12,7 +12,7 @@
   "app": {
     "minimize_to_tray_on_close": true,
     "language": "en",
-    "browser_engine": "selenium_uc",
+    "browser_engine": "official_playwright_mcp",
     "concurrency_mode": "per_profile_live",
     "window_bounds": {
       "x": -1,

@@ -441,8 +441,8 @@ This integration surface is now suitable for fixed-script automation that needs:
 
 Additional practical boundary:
 
-- `patchright` is now the default engine for ordinary daemon automation when stronger extraction fidelity and diagnostics are preferred.
-- If the script depends on high-fidelity structured extraction from a complex dynamic frontend, `patchright` is still the better engine.
+- `official_playwright_mcp` is now the default engine for ordinary daemon automation when upstream-aligned high-level browser control is preferred.
+- If the script depends on a live-root path or a specific site behaves better there, `patchright` remains the better fallback engine.
 - If the script needs to validate a no-login or isolated-session flow while still staying inside the same profile governance path, use `runtime_options.incognito=true`.
 
 It is still not intended for:

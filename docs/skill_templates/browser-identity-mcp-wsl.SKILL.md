@@ -50,21 +50,24 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 
 Recommended engine-selection policy remains the same from WSL:
 
-- default to `patchright` for ordinary MCP task execution and most real workflows
+- default to `official_playwright_mcp` for ordinary MCP task execution and most real workflows
 - use `selenium_uc` for stealth-sensitive pages, recurring challenge/verification pages, or when gesture/coordinate fallback matters more than raw speed
 - use `playwright_cli` as a lightweight compatibility or diagnostic path, not as the normal default
-- treat `official_playwright_mcp` as an experimental backend name only; do not choose it for routine live-profile work from WSL unless the runtime explicitly documents that the bundled official backend was enabled for that build
+- use `patchright` from WSL when a workflow explicitly needs the older live-root integration path or site-specific compatibility
+- treat `official_playwright_mcp` as the preferred governed isolated-runtime backend from WSL, not as a live-root backend
 
 Important engine capability examples from WSL remain the same:
 
+- `official_playwright_mcp`
+  best default for mainstream MCP work from WSL, upstream Playwright-MCP semantics, snapshot-ref targeting, and continued convergence toward official browser tooling behavior
 - `patchright`
-  best default for structured extraction, complex frontend interaction, richer diagnostics, and the most complete mainstream action surface
+  strong live-root fallback and compatibility path when the workflow explicitly benefits from the existing Patchright integration
 - `selenium_uc`
   prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs gesture unlock, drag, slider movement, or coordinate-level mouse fallback
 - `playwright_cli`
   prefer this for lightweight compatibility flows and bounded diagnostics
 - `official_playwright_mcp`
-  currently a reserved backend slot for future bundled official-runtime integration; at this stage it should be expected to fail fast rather than open a normal live persistent-profile session
+  use this as the preferred governed isolated-runtime backend when the bundled official runtime is present; do not treat it as a live-root backend
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as engine-scoped capabilities, not as guaranteed fallback tools on every runtime
 - prefer the high-level gesture path first:
@@ -275,7 +278,7 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - Do not treat every page that merely mentions Cloudflare as a challenge automatically. Normal search/detail pages can mention Cloudflare while still being valid result pages.
 - `runtime_options.incognito=true` on the managed daemon automation path remains subject to the same profile occupancy and session-governance rules; it is an isolation mode, not a concurrency bypass.
 - `runtime_options.resource_only=true` on the managed daemon automation path remains subject to the same profile occupancy and session-governance rules; it is a resource lease for external tools, not a way to bypass profile locking.
-- If the target page needs gesture/pattern unlock, drag, slider movement, continuous path input, or coordinate-level mouse fallback, do not assume the default engine is enough. Start the session with `engine="selenium_uc"` or `engine="patchright"` explicitly.
+- If the target page needs gesture/pattern unlock, drag, slider movement, continuous path input, or coordinate-level mouse fallback, do not assume every engine behaves identically. Start the session with `engine="official_playwright_mcp"`, `engine="selenium_uc"`, or `engine="patchright"` explicitly based on the task.
 - `browser_mouse_gesture_path(session_id, points=[...])` is the preferred gesture interface from WSL as well. Prefer `patchright` first for frontend-heavy pages and `selenium_uc` when stealth pressure is higher.
 - Use `get_session_capabilities(session_id)` when the task may need gesture actions. The capability surface distinguishes generic coordinate support from formal `gesture_actions` support.
 - If the Windows side reports `external_chromium_running`, do not assume the entire service is blocked. Check whether the target profile itself is the one that is occupied.

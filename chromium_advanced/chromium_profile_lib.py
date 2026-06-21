@@ -406,6 +406,8 @@ def build_default_config() -> Dict:
             "minimize_to_tray_on_close": True,
             "language": detect_default_language(),
             "browser_engine": DEFAULT_BROWSER_ENGINE,
+            "browser_engine_pinned": False,
+            "browser_engine_migrated_to_official": False,
             "concurrency_mode": "per_profile_live",
             "window_bounds": {
                 "x": -1,
@@ -1479,6 +1481,10 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             normalized["app"]["language"] = str(loaded_app.get("language")).strip()
         if "browser_engine" in loaded_app and loaded_app.get("browser_engine") is not None:
             normalized["app"]["browser_engine"] = normalize_browser_engine_name(str(loaded_app.get("browser_engine")).strip())
+        if "browser_engine_pinned" in loaded_app:
+            normalized["app"]["browser_engine_pinned"] = bool(loaded_app.get("browser_engine_pinned"))
+        if "browser_engine_migrated_to_official" in loaded_app:
+            normalized["app"]["browser_engine_migrated_to_official"] = bool(loaded_app.get("browser_engine_migrated_to_official"))
         if "concurrency_mode" in loaded_app and loaded_app.get("concurrency_mode") is not None:
             normalized["app"]["concurrency_mode"] = str(loaded_app.get("concurrency_mode")).strip()
         window_bounds = loaded_app.get("window_bounds", {})
@@ -1637,6 +1643,20 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     normalized["app"]["browser_engine"] = normalize_browser_engine_name(
         normalized["app"].get("browser_engine", DEFAULT_BROWSER_ENGINE)
     )
+    normalized["app"]["browser_engine_pinned"] = bool(normalized["app"].get("browser_engine_pinned", False))
+    normalized["app"]["browser_engine_migrated_to_official"] = bool(
+        normalized["app"].get("browser_engine_migrated_to_official", False)
+    )
+    if isinstance(loaded_app, dict):
+        loaded_browser_engine = normalize_browser_engine_name(str(loaded_app.get("browser_engine", "")).strip())
+        explicit_engine_present = "browser_engine" in loaded_app and str(loaded_app.get("browser_engine", "")).strip() != ""
+        if explicit_engine_present and loaded_browser_engine == DEFAULT_BROWSER_ENGINE:
+            normalized["app"]["browser_engine_pinned"] = True
+        if explicit_engine_present and not normalized["app"]["browser_engine_pinned"]:
+            legacy_defaults = {"patchright", "selenium_uc"}
+            if loaded_browser_engine in legacy_defaults and not normalized["app"]["browser_engine_migrated_to_official"]:
+                normalized["app"]["browser_engine"] = DEFAULT_BROWSER_ENGINE
+                normalized["app"]["browser_engine_migrated_to_official"] = True
     concurrency_mode = str(normalized["app"].get("concurrency_mode", "per_profile_live")).strip().lower()
     if concurrency_mode == "mirror_isolated":
         concurrency_mode = "per_profile_live"

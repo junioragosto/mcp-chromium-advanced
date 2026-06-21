@@ -628,7 +628,7 @@ class SessionManager:
         return [session for session in self._sessions_by_id.values() if session.runtime_mode == "live_root"]
 
     def _isolated_sessions_locked(self) -> List[SessionRecord]:
-        return []
+        return [session for session in self._sessions_by_id.values() if session.runtime_mode == "isolated_runtime"]
 
     def _get_external_busy_details(self, config: Optional[Dict] = None) -> Dict:
         config = normalize_config(config or self._load_config())
@@ -1156,6 +1156,8 @@ class SessionManager:
         start_mode = "live_root"
         allowed = False
         reason = ""
+        manager = self._mirror_manager(config)
+        mirror_validation = manager.validate_profile_snapshot(profile_name) if manager.is_enabled() else {}
 
         status = self.get_server_status()
         starting_profiles = status.get("starting_profiles", [])
@@ -1184,8 +1186,18 @@ class SessionManager:
         elif str(runtime_state.get("busy_state", "") or "") not in {"", "idle"}:
             reason = f"profile is busy: {runtime_state.get('busy_state', 'unknown')}"
         else:
-            allowed = True
-            reason = "profile is available"
+            if resolved_engine_name == "official_playwright_mcp":
+                start_mode = "isolated_runtime"
+                if not manager.is_enabled():
+                    reason = "official_playwright_mcp requires mirror runtime support to be enabled"
+                elif not bool(mirror_validation.get("available")):
+                    reason = "official_playwright_mcp requires a ready profile mirror snapshot"
+                else:
+                    allowed = True
+                    reason = "profile is available through isolated official runtime"
+            else:
+                allowed = True
+                reason = "profile is available"
 
         return {
             "allowed": bool(allowed),
@@ -1200,8 +1212,8 @@ class SessionManager:
             "active_profile_session_count": len(profile_sessions),
             "profile_lock_active": profile_lock_active,
             "external_profile_process_count": len(profile_processes),
-            "mirror_available": False,
-            "mirror_generated_at": "",
+            "mirror_available": bool(mirror_validation.get("available", False)),
+            "mirror_generated_at": str(mirror_validation.get("generated_at", "") or ""),
         }
 
     def start_session(
@@ -1277,9 +1289,9 @@ class SessionManager:
             )
 
         runtime_root = ""
-        mirror_generated_at = ""
+        mirror_generated_at = str(preflight.get("mirror_generated_at", "") or "")
         runtime_mode = "resource_only" if resource_only else str(preflight.get("start_mode", "live_root") or "live_root")
-        cleanup_runtime_on_close = False
+        cleanup_runtime_on_close = runtime_mode == "isolated_runtime"
         profile_lock = SingleRunLock(get_profile_runtime_lock_path(config, profile_name))
         session: Optional[SessionRecord] = None
         user_data_dir = get_profile_user_data_root(config, profile_name)
@@ -1302,6 +1314,19 @@ class SessionManager:
                     extra_args=runtime_options.get("extra_args") if isinstance(runtime_options.get("extra_args"), list) else [],
                     engine_name=resolved_engine_name,
                 )
+            if runtime_mode == "isolated_runtime" and not resource_only:
+                manager = self._mirror_manager(config_for_launch)
+                runtime_info = manager.materialize_runtime(profile_name)
+                runtime_root = runtime_info.runtime_root
+                mirror_generated_at = runtime_info.profile_snapshot_generated_at or runtime_info.generated_at
+                user_data_dir = runtime_info.runtime_root
+                profile_dir = runtime_info.runtime_profile_dir
+                config_for_launch.setdefault("paths", {})
+                config_for_launch["paths"]["__runtime_root__"] = runtime_info.runtime_root
+                config_for_launch["paths"]["__runtime_mode__"] = "isolated_runtime"
+                config_for_launch["paths"]["__mirror_generated_at__"] = mirror_generated_at
+                config_for_launch["paths"]["__runtime_user_data_dir__"] = runtime_info.runtime_root
+                config_for_launch["paths"]["__runtime_profile_dir__"] = runtime_info.runtime_profile_dir
             if not resource_only:
                 ensure_profile_bookmarks_initialized(config_for_launch, profile_name)
                 _safe_log(f"[{now_text()}] [SESSION] bookmarks ready: profile={profile_name}")
@@ -1511,6 +1536,16 @@ class SessionManager:
         if close_session:
             try:
                 session.browser_session.close()
+            except Exception:
+                pass
+        if session.cleanup_runtime_on_close and str(session.runtime_root or "").strip():
+            try:
+                self._terminate_runtime_processes(session.runtime_root)
+            except Exception:
+                pass
+            try:
+                manager = self._mirror_manager(normalize_config(self._load_config()))
+                manager.cleanup_runtime(session.runtime_root)
             except Exception:
                 pass
         try:

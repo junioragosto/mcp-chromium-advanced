@@ -89,14 +89,14 @@ the app can create fresh profiles without any preexisting mirror data.
 
 ## Engine Notes
 
-- `patchright`
-  Default high-capability MCP engine
+- `official_playwright_mcp`
+  Default governed MCP engine built on the bundled official `@playwright/mcp` runtime
 - `selenium_uc`
   Best for stealth / anti-bot tolerance / gesture-heavy pages
+- `patchright`
+  Strong live-root fallback when a site behaves better under the older direct integration
 - `playwright_cli`
   Lightweight integrated compatibility engine
-- `official_playwright_mcp`
-  Experimental fourth backend slot. It is visible in engine selection, but currently fail-fast by design until a bundled Node.js plus bundled `@playwright/mcp` runtime is shipped and the ownership model is made compatible with live persistent-profile sessions.
 
 ## Bundled Runtime Contract
 
@@ -105,8 +105,10 @@ This release line already reserves these internal paths:
 - `resources/runtime/node/`
 - `resources/runtime/official_playwright_mcp/`
 
-They currently define the packaging contract only. They do not yet mean the
-official Playwright MCP backend is usable in production.
+They now contain the bundled official runtime used by
+`official_playwright_mcp` isolated sessions. This backend is production-usable
+through governed isolated runtime materialization and is the default governed
+MCP path. It is not a live-root persistent-profile owner.
 
 ## Skills
 

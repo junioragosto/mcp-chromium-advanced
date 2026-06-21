@@ -56,4 +56,5 @@ tmp_*.out.log
 tmp_*.err.log
 tests/
 .playwright-cli/
+resources/runtime/official_playwright_mcp/.playwright-mcp/
 .vscode/

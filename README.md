@@ -17,7 +17,7 @@ From a first-contact perspective, there are seven key ideas:
 2. It is organized into layered runtime control.
    The GUI manages configuration and profiles, the daemon provides a stable MCP endpoint, the worker starts on demand, and a managed browser session kernel normalizes runtime behavior before MCP tools use it.
 3. It supports multiple browser execution engines.
-   Shared profile and session ownership stay the same, while the execution backend can use Selenium plus `undetected_chromedriver`, Patchright, `playwright_cli`, or the currently fail-fast `official_playwright_mcp` experimental backend.
+   Shared profile and session ownership stay the same, while the execution backend can use Selenium plus `undetected_chromedriver`, Patchright, `playwright_cli`, or the governed `official_playwright_mcp` isolated-runtime backend.
 4. It exposes a more stable runtime contract than the raw engines alone.
    The managed session kernel adds structured capability metadata, normalized action errors, and generic DOM-script fallbacks so callers are less exposed to engine-specific gaps.
 5. It is designed around safe profile ownership.
@@ -29,7 +29,7 @@ From a first-contact perspective, there are seven key ideas:
 
 Important account boundary: a Chromium `Profile N` is a browser data container, not a universal website account. The GUI `Account` field is an operator-maintained label or note and should be treated as a hint only. Each website still has its own login state inside that browser profile, so account-sensitive automation must verify the actual logged-in account on the target site before continuing.
 
-Important extraction boundary: this project deliberately stays generic and open. It does not ship site-specific DOM adapters for Gmail, YouTube Studio, GitHub, or other targets. The managed runtime now does safer script serialization plus generic DOM/text fallbacks, but complex dynamic applications can still yield weaker structured extraction under `playwright_cli` than under `patchright`. When the task depends on high-fidelity structured reads from a difficult frontend, prefer `patchright`.
+Important extraction boundary: this project deliberately stays generic and open. It does not ship site-specific DOM adapters for Gmail, YouTube Studio, GitHub, or other targets. The managed runtime now does safer script serialization plus generic DOM/text fallbacks, but complex dynamic applications can still vary by engine. The default `official_playwright_mcp` path is now the primary governed high-level path, while `patchright` remains the strongest live-root fallback when a specific site behaves better there.
 
 The public user entry point is:
 
@@ -143,14 +143,14 @@ There are two ways to choose an engine:
 
 Recommended practical policy:
 
+- `official_playwright_mcp`
+  Default choice for normal MCP work. Best official semantics, strongest alignment with the upstream Playwright MCP interaction model, native snapshot-ref style targeting, and the best path toward first-class high-level browser control in this project.
 - `patchright`
-  Default choice for normal MCP work. Best structured extraction, stronger diagnostics, better multi-step interaction semantics, and the closest path to an official Playwright-MCP-style experience.
+  Strong live-root and compatibility fallback. Keep using it when a task explicitly needs the existing live persistent-profile path, or when a site behaves better under the older Patchright integration.
 - `selenium_uc`
   Preferred for stealth-sensitive sites or workflows where avoiding automation detection, challenge handling, or coordinate/gesture fallback matters more than raw throughput.
 - `playwright_cli`
   Lightweight integrated engine for lower-overhead flows and compatibility scenarios, but no longer the default high-capability path.
-- `official_playwright_mcp`
-  Experimental fourth backend slot. It is recognized by config, GUI, and factory selection, but intentionally fails fast today because the current official runtime ownership model conflicts with this project's live persistent-profile governance path.
 
 ## Profile login-state discovery
 
@@ -213,7 +213,8 @@ Important switching rule:
 Current practical capability direction:
 
 - the project is intentionally moving toward a more official `playwright-mcp`-style interaction model
-- `patchright` is now the primary path for richer structured reasoning, stronger diagnostics, and smoother multi-step browsing
+- `official_playwright_mcp` is now the primary default governed path for richer high-level browsing semantics, snapshot-ref targeting, and upstream-aligned interaction behavior
+- `patchright` remains the strongest live-root fallback when a site or workflow performs better on the older direct integration
 - the managed session kernel increasingly exposes high-level actions through one stable contract instead of forcing callers to drop into arbitrary `run_script`
 
 Examples of newer high-level action coverage exposed through the managed layer:
@@ -784,10 +785,10 @@ This keeps release engineering simple while browser/runtime asset management is 
 
 Current official-runtime boundary:
 
-- `official_playwright_mcp` is already visible as a supported engine name
-- packaged/runtime path resolution already expects future assets under `resources/runtime/node/` and `resources/runtime/official_playwright_mcp/`
+- `official_playwright_mcp` is now a bundled supported engine name and the default governed MCP path
+- packaged/runtime path resolution uses bundled assets under `resources/runtime/node/` and `resources/runtime/official_playwright_mcp/`
 - if those bundled assets are absent, the engine fails fast with an explicit runtime error
-- even if the bundled runtime exists, it is still intentionally blocked for the normal live persistent-profile path until a compatible ownership model is implemented
+- this backend intentionally runs only through governed `isolated_runtime` materialization and does not own the live persistent-profile root directly
 
 The release build entrypoints are now:
 
@@ -818,7 +819,7 @@ Windows packaged runtime notes:
 - explicit exit validation has confirmed that the installed GUI process, daemon process, and `28888` listener are all reclaimed together
 - latest packaged release validation on `2026-06-19` succeeded against `D:\softs\chromium\ChromiumProfileManager`
 - packaged startup validation confirmed that the GUI stayed alive and correctly launched the packaged daemon/worker runtime
-- packaged runtime validation confirmed `get_server_status().default_engine_name == "patchright"`
+- packaged runtime validation confirmed the governed default engine path resolves to `official_playwright_mcp` on fresh/defaulted configs
 - packaged authenticated validation succeeded on `Profile 1` with Gmail inbox access
 - packaged parallel validation succeeded with independent MCP sessions on `Profile 1` and `Profile 4`
 - packaged isolated validation succeeded through the managed daemon automation path with `runtime_options.incognito=true`
@@ -826,9 +827,9 @@ Windows packaged runtime notes:
 
 Current packaged-runtime boundary:
 
-- the strongest validation surface on complex pages is still the higher-level structured path: `structured_page`, `browser_list_candidates(...)`, `browser_get_interaction_context(...)`, action traces, and screenshots
+- the strongest validation surface on complex pages is the higher-level structured path: `structured_page`, `browser_list_candidates(...)`, `browser_get_interaction_context(...)`, action traces, and screenshots
 - `run_script(...)` can still legitimately complete with `result=null` on some healthy live pages; treat that as a diagnostic boundary, not an automatic script failure
-- when a flow depends on high-fidelity structured extraction from difficult dynamic frontends, prefer the default `patchright` path and use the higher-level structured tools before assuming raw script execution is the right readback surface
+- when a flow depends on high-fidelity structured extraction from difficult dynamic frontends, prefer the default `official_playwright_mcp` or explicit `patchright` path and use the higher-level structured tools before assuming raw script execution is the right readback surface
 
 ## Skill templates
 
@@ -840,8 +841,8 @@ These files are examples for Codex or other AI workflows that need to consume th
 
 The skill guidance should explicitly tell agents that:
 
-- `patchright` is the default engine for ordinary MCP work when the task values stronger structured extraction and richer diagnostics
-- `patchright` should be selected when structured extraction or deep frontend diagnostics matter more than throughput
+- `official_playwright_mcp` is the default engine for ordinary MCP work when the task wants the most upstream-aligned high-level behavior
+- `patchright` should be selected when a specific site needs the older live-root behavior or behaves better under the direct Patchright integration
 - `selenium_uc` should be selected when stealth, anti-bot tolerance, recurring challenge pages, gesture flows, or coordinate fallback matter more than speed
 - If a flow must be validated without inheriting the current regular-window session state, use the managed daemon automation path with `runtime_options.incognito=true`. Do not assume the current `browserIdentity` MCP tool surface can pass that parameter directly at session start.
 

@@ -1,0 +1,10 @@
+{
+  "name": "chromium-advanced-official-playwright-mcp-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@playwright/mcp": "^0.0.76"
+  }
+}

@@ -2499,6 +2499,42 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         poll_interval_ms: int = 500,
         tab_id: str = "",
     ) -> Dict:
+        result = self._dispatch(
+            "watch_page_state",
+            lambda: self._raw.watch_page_state(
+                text=text,
+                previous_text=previous_text,
+                timeout_seconds=timeout_seconds,
+                stable_cycles=stable_cycles,
+                poll_interval_ms=poll_interval_ms,
+                tab_id=tab_id,
+            ),
+            fallback=lambda: self._fallback_watch_page_state(
+                text=text,
+                previous_text=previous_text,
+                timeout_seconds=timeout_seconds,
+                stable_cycles=stable_cycles,
+                poll_interval_ms=poll_interval_ms,
+                tab_id=tab_id,
+            ),
+        )
+        if isinstance(result, dict):
+            result.setdefault("watch_completed", bool(result.get("matched", result.get("verified", False))))
+            result.setdefault(
+                "watch_reason",
+                "text_changed_and_stable" if str(text or "").strip() else "page_stable_after_change",
+            )
+        return result
+
+    def _fallback_watch_page_state(
+        self,
+        text: str = "",
+        previous_text: str = "",
+        timeout_seconds: int = 20,
+        stable_cycles: int = 2,
+        poll_interval_ms: int = 500,
+        tab_id: str = "",
+    ) -> Dict:
         start = time.time()
         try:
             initial_page = self._raw.get_page_text(tab_id=tab_id) if tab_id else self._raw.get_page_text()
@@ -2528,6 +2564,8 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
                 "text_changed": final_text != str(previous_text or ""),
                 "target_text": str(text or ""),
                 "text_contains_target": bool(str(text or "").strip() and str(text or "") in final_text),
+                "matched": bool(str(text or "").strip() and str(text or "") in final_text) if str(text or "").strip() else True,
+                "verified": bool(str(text or "").strip() and str(text or "") in final_text) if str(text or "").strip() else True,
                 "change_result": change_result,
                 "stable_result": stable_result,
                 "text_diff": {
@@ -2668,6 +2706,18 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             fallback=lambda: self._fallback_diagnose_target(target=target, element=element, by=by, text_filter=text_filter, limit=limit),
         )
         return self._augment_diagnosis_payload("diagnose_target", result, target=target, by=by, text_filter=text_filter)
+
+    def generate_locator(self, target: str, element: str = "") -> Dict:
+        return self._dispatch(
+            "generate_locator",
+            lambda: self._raw.generate_locator(target=target, element=element),
+            fallback=lambda: {
+                "locator": str(target or "").strip(),
+                "target": str(target or "").strip(),
+                "element": str(element or "").strip(),
+                "generated_by": "fallback_passthrough",
+            },
+        )
 
     def verify_element(self, role: str, accessible_name: str) -> Dict:
         result = self._dispatch("verify_element", lambda: self._raw.verify_element(role=role, accessible_name=accessible_name))

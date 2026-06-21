@@ -190,21 +190,24 @@ For the Chromium Profile Manager service on this machine, the supported engine v
 
 Recommended engine-selection policy for this project:
 
-- default to `patchright` for ordinary MCP browsing tasks and most real production flows
+- default to `official_playwright_mcp` for ordinary MCP browsing tasks and most real production flows
 - switch to `selenium_uc` when stealth, anti-detection tolerance, recurring challenge pages, or gesture/coordinate fallback matter more than raw speed
 - use `playwright_cli` as a lightweight compatibility or diagnostic path, not as the default high-capability path
-- treat `official_playwright_mcp` as an experimental backend name only; do not choose it for normal live-profile work unless the runtime explicitly documents that the bundled official backend was enabled for this build
+- use `patchright` when the task explicitly needs the older live-root integration path or when a site behaves better under the existing Patchright stack
+- treat `official_playwright_mcp` as the preferred governed isolated-runtime backend, not as a live-root backend
 
 Important engine capability examples:
 
+- `official_playwright_mcp`
+  best default for mainstream MCP work, upstream Playwright-MCP semantics, snapshot-ref targeting, and continued convergence toward official browser tooling behavior
 - `patchright`
-  best default for structured extraction, complex frontend interaction, richer diagnostics, more complete high-level action coverage, and mainstream MCP work
+  strong live-root fallback and compatibility path when the site or workflow explicitly benefits from the older Patchright integration
 - `selenium_uc`
   prefer this when the target is stealth-sensitive, shows automation friction, repeatedly triggers challenge/verification pages, or needs coordinate-level mouse actions such as drag, gesture unlock, slider/pattern input, or vision-style XY fallback
 - `playwright_cli`
   prefer this for lightweight compatibility flows, bounded diagnostics, or lower-overhead tasks when the stronger `patchright` path is not required
 - `official_playwright_mcp`
-  currently a reserved backend slot for future bundled official-runtime integration; at this stage it should be expected to fail fast rather than start a live persistent-profile session
+  use this only when the build explicitly ships the bundled official runtime and the session can run through mirror-backed `isolated_runtime`; do not use it as the normal live-root default path
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as a formal capability boundary rather than a generic fallback every engine should support
 - prefer the high-level gesture path first:
@@ -333,11 +336,11 @@ Runtime isolation note:
 
 How to switch engines explicitly:
 
-- rely on the GUI-configured default engine for normal work, which should now be `patchright`
+- rely on the GUI-configured default engine for normal work, which should now be `official_playwright_mcp`
 - set `engine="selenium_uc"` when a page needs gesture/drag/XY mouse actions
-- set `engine="patchright"` explicitly when the caller wants to pin the strongest structured path
+- set `engine="patchright"` explicitly when the caller wants to pin the live-root Patchright path
 - set `engine="playwright_cli"` only when a lightweight compatibility path is intentionally desired
-- do not set `engine="official_playwright_mcp"` for routine tasks in current builds unless release notes explicitly say that backend was enabled
+- do not expect `official_playwright_mcp` to own the live root directly; it is the default governed isolated-runtime path
 - for difficult dynamic pages, prefer `browser_get_interaction_context(...)`, `browser_list_candidates(...)`, and other structured surfaces before depending on raw `run_script(...)` readback
 - if `run_script(...)` returns `script_result_state="stringified"`, treat that as a serialization boundary rather than a normal structured success
 
@@ -395,7 +398,7 @@ Important engine-switching boundary:
 - When a `playwright_cli` session closes, the manager should release the named session and clean owned daemon/browser processes; startup also prunes stale temp dirs that are not referenced by live processes. If a browser window remains, treat it as an orphan-process bug and inspect the runtime root/session name.
 - When the work is complete, always call `close_profile_session`.
 - If the MCP server is unreachable, the likely operational cause is that the GUI or daemon is not currently running, not that the profile disappeared.
-- `patchright` is now the default engine for the per-profile live runtime. It still obeys the same profile-occupancy rules as the other engines.
+- `official_playwright_mcp` is now the default governed engine for ordinary MCP sessions. It still obeys the same profile-occupancy rules as the other engines, but it runs through isolated runtime materialization rather than owning the live root directly.
 
 ## Example User Wording
 

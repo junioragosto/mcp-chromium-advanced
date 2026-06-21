@@ -31,6 +31,18 @@ ROOT_METADATA_FILENAME = "template_root.json"
 PROFILE_METADATA_DIRNAME = "profiles"
 RUNTIME_METADATA_FILENAME = "runtime_snapshot.json"
 MIRROR_MANIFEST_FILENAME = "mirror_manifest.json"
+RUNTIME_LOCK_ARTIFACTS = {
+    "lockfile",
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    "LOCK",
+    "LOCKFILE",
+    "DevToolsActivePort",
+    "Last Browser",
+    "Last Version",
+    "BrowserMetrics-spare.pma",
+}
 
 def _slugify(text: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "-", str(text or "").strip()).strip("-").lower()
@@ -65,6 +77,20 @@ def _archive_stats(zip_path: str) -> Dict[str, int]:
         return {"archive_bytes": os.path.getsize(zip_path)}
     except OSError:
         return {"archive_bytes": 0}
+
+
+def _purge_runtime_lock_artifacts(runtime_root: str) -> None:
+    if not runtime_root or not os.path.isdir(runtime_root):
+        return
+    for dirpath, _dirnames, filenames in os.walk(runtime_root):
+        for filename in filenames:
+            if filename not in RUNTIME_LOCK_ARTIFACTS and filename not in SPLIT_USER_DATA_ROOT_EXCLUDE_FILES and filename not in SPLIT_PROFILE_EXCLUDE_FILES:
+                continue
+            file_path = os.path.join(dirpath, filename)
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
 
 
 @dataclass
@@ -370,6 +396,7 @@ class MirrorManager:
             os.makedirs(runtime_profile_dir, exist_ok=True)
             with zipfile.ZipFile(validation["profile_snapshot_path"], "r") as profile_archive:
                 profile_archive.extractall(runtime_profile_dir)
+            _purge_runtime_lock_artifacts(runtime_root)
             runtime_meta = {
                 "runtime_id": runtime_id,
                 "profile_name": profile_name,

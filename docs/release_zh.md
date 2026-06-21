@@ -99,7 +99,7 @@
 - `playwright_cli`
   轻量集成兼容引擎，不再是默认高能力路径
 - `official_playwright_mcp`
-  第四个实验性引擎槽位。现在已经能在配置和 GUI 里被识别，但当前是刻意 fail-fast 的状态；只有未来把内置 Node.js 和内置 `@playwright/mcp` runtime 正式打进发布包，并解决 live 持久 Profile 治理冲突后，才会进入可用状态。
+  基于内置 Node.js 和内置 `@playwright/mcp` runtime 的默认受治理引擎。当前版本已经通过 `isolated_runtime` 物化运行时正式可用，但它不是 live-root 持久 Profile 直接持有者。
 
 ## 内置 Runtime 约定
 

@@ -2403,6 +2403,7 @@ class ChromiumManagerWindow(QMainWindow):
             return
         self.config.setdefault("app", {})
         self.config["app"]["browser_engine"] = engine_name
+        self.config["app"]["browser_engine_pinned"] = True
         self.config = save_app_config(self.config, self.config_path)
         self.refresh_mcp_status_ui()
         self.append_log(f"Browser engine saved: {engine_name}")

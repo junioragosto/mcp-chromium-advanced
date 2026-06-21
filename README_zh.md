@@ -15,7 +15,7 @@ MCP Chromium Advanced 是一个用于管理真实 Chromium 浏览器 Profile 的
 2. 它采用分层运行结构。
    GUI 负责配置和 Profile 管理，daemon 提供稳定的 MCP 入口，worker 按需启动，而受管浏览器会话内核会在 MCP tools 调用前统一运行时行为。
 3. 它支持多种浏览器执行引擎。
-   共享的 Profile 管理与会话占用逻辑保持不变，浏览器执行后端当前支持 `selenium_uc`、`patchright`、`playwright_cli`，以及当前仍处于 fail-fast 状态的实验性 `official_playwright_mcp`。
+   共享的 Profile 管理与会话占用逻辑保持不变，浏览器执行后端当前支持 `selenium_uc`、`patchright`、`playwright_cli`，以及基于官方 `@playwright/mcp` runtime 的 `official_playwright_mcp`。
 4. 它对上层暴露的是更稳定的运行时契约，而不是原始引擎差异。
    受管会话内核会补充结构化能力描述、统一错误码和通用 fallback，减少调用方直接面对引擎差异的概率。
 5. 它的核心设计是“安全占用真实身份”。
@@ -148,7 +148,7 @@ worker 运行策略现在也是显式可配的：
 - `playwright_cli`
   适合作为低开销、轻量级、兼容性导向的集成引擎，但不再是默认的高能力路径。
 - `official_playwright_mcp`
-  第四个实验性引擎槽位。现在已经能在配置、GUI 和工厂选择层被识别，但当前仍会刻意 fail-fast，因为官方 runtime 的 ownership 模型与本项目的 live 持久 Profile 治理路径还不兼容。
+  当前默认的受治理高层引擎。它使用内置 Node.js 与内置 `@playwright/mcp` runtime，通过 `isolated_runtime` 物化运行时接入，不直接持有 live-root 持久 Profile。
 
 当前这轮对齐官方 MCP 的收口重点，已经不只是“多几个动作”，而是把动作结果语义也统一下来：
 
