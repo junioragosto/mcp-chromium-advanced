@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import psutil
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
+from chromium_advanced.browser_engines import playwright_cli_tabs_pages
 from chromium_advanced.chromium_profile_lib import (
     detect_fingerprint_extension_dir,
     get_chromium_restore_prompt_suppression_args,
@@ -858,15 +859,7 @@ class PlaywrightCliBrowserSession(BrowserSession):
         }
 
     def list_tabs(self) -> Dict:
-        tabs = self._refresh_tabs()
-        active_tab = next((tab for tab in tabs if tab.get("active")), {})
-        active_tab_id = str(active_tab.get("tab_id", "") or self._preferred_tab_id())
-        return {
-            **self.get_current_url(tab_id=active_tab_id),
-            "active_tab_id": str(active_tab.get("tab_id", "")),
-            "count": len(tabs),
-            "tabs": tabs,
-        }
+        return playwright_cli_tabs_pages.list_tabs(self)
 
     def open_tab(
         self,
@@ -875,39 +868,13 @@ class PlaywrightCliBrowserSession(BrowserSession):
         wait_for_ready: bool = True,
         timeout_seconds: int = 20,
     ) -> Dict:
-        del wait_for_ready
-        original_tabs = self._refresh_tabs()
-        original_active = next((tab for tab in original_tabs if tab.get("active")), {})
-        original_index = int(original_active.get("index", 0)) if original_active else 0
-        self._run_cli(["tab-new", "--json"])
-        tabs_after_open = self._refresh_tabs()
-        if not tabs_after_open:
-            raise RuntimeError("No tabs found after opening a new tab.")
-        new_tab = max(tabs_after_open, key=lambda item: int(item.get("index", -1)))
-        new_index = int(new_tab.get("index", 0))
-        self._select_index(new_index)
-        self._sticky_tab_id = _tab_id_for_index(new_index)
-        if str(url or "").strip():
-            target_url = str(url).strip()
-            try:
-                self._run_cli(["goto", target_url, "--json"], timeout_seconds=timeout_seconds)
-            except TimeoutError:
-                if not self._recover_navigation_timeout(target_url=target_url, tab_id=self._sticky_tab_id, action_name="open_tab"):
-                    raise
-            tabs_after_open = self._refresh_tabs()
-            new_tab = next((item for item in tabs_after_open if int(item.get("index", -1)) == new_index), new_tab)
-        if not activate:
-            self._select_index(original_index)
-            self._sticky_tab_id = _tab_id_for_index(original_index)
-        tabs_final = self._refresh_tabs()
-        current_tab_id = str(new_tab.get("tab_id", "") or _tab_id_for_index(new_index if activate else original_index))
-        return {
-            **self._current_page_payload(tab_id=current_tab_id, commit_expected=True, action_name="open_tab"),
-            "opened": True,
-            "activated": bool(activate),
-            "tab": new_tab,
-            "tabs": tabs_final,
-        }
+        return playwright_cli_tabs_pages.open_tab(
+            self,
+            url=url,
+            activate=activate,
+            wait_for_ready=wait_for_ready,
+            timeout_seconds=timeout_seconds,
+        )
 
     def activate_tab(
         self,
@@ -916,81 +883,37 @@ class PlaywrightCliBrowserSession(BrowserSession):
         title_contains: str = "",
         url_contains: str = "",
     ) -> Dict:
-        resolved_index = self._ensure_tab_selected(
+        return playwright_cli_tabs_pages.activate_tab(
+            self,
             tab_id=tab_id,
             index=index,
             title_contains=title_contains,
             url_contains=url_contains,
         )
-        tabs = self._refresh_tabs()
-        active_tab = next((tab for tab in tabs if int(tab.get("index", -1)) == resolved_index), {})
-        self._sticky_tab_id = str(active_tab.get("tab_id", "") or _tab_id_for_index(resolved_index))
-        return {
-            **self._current_page_payload(tab_id=str(active_tab.get("tab_id", "")), commit_expected=True, action_name="activate_tab"),
-            "activated": True,
-            "tab": active_tab,
-            "tabs": tabs,
-        }
 
     def close_tab(self, tab_id: str = "", index: int = -1) -> Dict:
-        resolved_index = self._resolve_index(tab_id=tab_id, index=index)
-        tabs_before = self._refresh_tabs()
-        closed_tab = next((tab for tab in tabs_before if int(tab.get("index", -1)) == resolved_index), {})
-        self._select_index(resolved_index)
-        self._run_cli(["tab-close", str(resolved_index), "--json"])
-        tabs_after = self._refresh_tabs()
-        remaining_active = next((tab for tab in tabs_after if tab.get("active")), tabs_after[0] if tabs_after else {})
-        self._sticky_tab_id = str(remaining_active.get("tab_id", "") or "")
-        return {
-            **self._current_page_payload(tab_id=self._sticky_tab_id, commit_expected=True, action_name="close_tab"),
-            "closed": True,
-            "closed_tab": closed_tab,
-            "tabs": tabs_after,
-        }
+        return playwright_cli_tabs_pages.close_tab(self, tab_id=tab_id, index=index)
 
     def resize(self, width: int, height: int) -> Dict:
-        target_width = max(320, int(width))
-        target_height = max(240, int(height))
-        self._run_cli(["resize", str(target_width), str(target_height), "--json"])
-        tabs = self._refresh_tabs()
-        return {
-            **self._current_page_payload(tab_id=self._preferred_tab_id(), commit_expected=True, action_name="resize"),
-            "resized": True,
-            "width": target_width,
-            "height": target_height,
-            "tabs": tabs,
-        }
+        return playwright_cli_tabs_pages.resize(self, width=width, height=height)
 
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
-        del wait_for_ready
-        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
-        if effective_tab_id:
-            self._ensure_tab_selected(tab_id=effective_tab_id)
-        target_url = str(url).strip()
-        try:
-            self._run_cli(["goto", target_url, "--json"], timeout_seconds=timeout_seconds)
-        except TimeoutError:
-            recovered = self._recover_navigation_timeout(target_url=target_url, tab_id=effective_tab_id, action_name="navigate")
-            if recovered:
-                return recovered
-            raise
-        return self._current_page_payload(tab_id=effective_tab_id, commit_expected=True, action_name="navigate")
+        return playwright_cli_tabs_pages.navigate(
+            self,
+            url=url,
+            wait_for_ready=wait_for_ready,
+            timeout_seconds=timeout_seconds,
+            tab_id=tab_id,
+        )
 
     def get_current_url(self, tab_id: str = "") -> Dict:
-        return self._current_page_payload(tab_id=tab_id)
+        return playwright_cli_tabs_pages.get_current_url(self, tab_id=tab_id)
 
     def get_page_text(self, tab_id: str = "") -> Dict:
-        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
-        try:
-            result = self._page_text_via_dom_chunks(tab_id=effective_tab_id)
-        except Exception:
-            result = str(self._eval_json("() => document.body ? document.body.innerText : ''", tab_id=effective_tab_id) or "")
-        return {**self.get_current_url(tab_id=effective_tab_id), "text": str(result or "")}
+        return playwright_cli_tabs_pages.get_page_text(self, tab_id=tab_id)
 
     def get_page_html(self, tab_id: str = "") -> Dict:
-        effective_tab_id = self._preferred_tab_id(tab_id=tab_id)
-        result = self._eval_json("() => document.documentElement ? document.documentElement.outerHTML : ''", tab_id=effective_tab_id)
-        return {**self.get_current_url(tab_id=effective_tab_id), "html": str(result or "")}
+        return playwright_cli_tabs_pages.get_page_html(self, tab_id=tab_id)
 
     def inspect_elements(self, selector: str, by: str = "css", limit: int = 10, tab_id: str = "") -> Dict:
         raise NotImplementedError("inspect_elements is not implemented for playwright_cli in v1.")

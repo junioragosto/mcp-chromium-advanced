@@ -47,3 +47,4 @@ For future plan writing:
 - [20260620 Browser Core Gap Closure Master Plan](./20260620_browser_core_gap_closure_master_plan.md)
 - [20260620 Official MCP Experience Alignment Round 2 Plan](./20260620_official_mcp_experience_alignment_round2_plan.md)
 - [20260621 Official MCP Shared Control Smoothness Plan](./20260621_official_mcp_shared_control_smoothness_plan.md)
+- [20260622 Architecture Layering And Test Restructure Plan](./20260622_architecture_layering_and_test_restructure_plan.md)

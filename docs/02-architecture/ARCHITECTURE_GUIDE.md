@@ -1,218 +1,195 @@
 # MCP Chromium Advanced Architecture Guide
 
-## Goal
+## 目标
 
-MCP Chromium Advanced is designed for browser automation workflows that must reuse a real logged-in Chromium identity instead of creating a fresh disposable browser every time.
+MCP Chromium Advanced 的核心目标不是“再造一个通用浏览器自动化框架”，而是提供一套围绕真实 Chromium 身份、显式占用治理、可切换执行引擎和桌面可控入口的本地浏览器自动化系统。
 
-The key idea is:
+系统设计围绕四件事展开：
 
-- one `Profile N` represents one persistent browser identity
-- the GUI manages those identities and shared configuration
-- the MCP layer claims, uses, and releases those identities safely for AI tasks
+- 一个 `Profile N` 代表一个长期存在的真实身份
+- GUI、daemon、worker 共享同一份配置和 profile 元数据
+- 会话占用治理必须先于浏览器引擎执行
+- 浏览器能力实现可以替换，但对上层暴露统一契约
 
-## Core Principles
+## 分层结构
 
-- Reuse real Chromium profile state: cookies, local storage, extensions, bookmarks, and site permissions
-- Keep identity selection explicit: callers should provide `profile_name` instead of relying on hidden defaults
-- Prevent collisions: only one live-root owner should control a profile session at a time, while snapshot-backed isolated clones may run in parallel when mirror concurrency is enabled
-- Share one source of truth: GUI and MCP services read the same config and profile metadata
-- Start heavy browser automation lazily: keep the daemon stable, start the worker only when needed
+### 1. GUI 入口层
 
-## Runtime Layers
-
-### GUI Layer
-
-Main file:
+主要文件：
 
 - `chromium_advanced/chromium_manage_gui.py`
+- `chromium_advanced/gui/gui_runtime.py`
+- `chromium_advanced/gui/gui_state.py`
+- `chromium_advanced/gui/gui_widgets.py`
+- `chromium_advanced/gui/gui_dialogs.py`
+- `chromium_advanced/gui/gui_mcp_runtime.py`
 
-Responsibilities:
+职责：
 
-- edit browser paths and runtime settings
-- manage profile entries
-- start or close profiles manually based on real per-profile Chromium process state
-- run keepalive jobs
-- show status, logs, and MCP state
+- 组装桌面 UI
+- 绑定事件、刷新表格、展示日志和状态
+- 调用 control API / daemon 状态接口
+- 执行 GUI 侧的轻量状态映射和视图模型组装
 
-### Shared Core Layer
+约束：
 
-Main file:
+- GUI 主文件只应保留页面装配、事件调度和跨模块协调
+- MCP/control 的 URL、鉴权、守护进程启停、状态轮询不应继续内联回 `chromium_manage_gui.py`
+- 新的 GUI 行为优先下沉到 `chromium_advanced/gui/` 子模块
+
+### 2. Shared Core 层
+
+主要文件：
 
 - `chromium_advanced/chromium_profile_lib.py`
+- `chromium_advanced/keepalive_registry.py`
 
-Responsibilities:
+职责：
 
-- default config generation and normalization
-- workspace and path resolution
-- profile directory management
-- bookmark template initialization
-- Chromium launch logic
-- keepalive helpers and shared browser automation utilities
-- mirror snapshot generation and metadata persistence after keepalive
+- 默认配置构建与归一化
+- 路径、资源和运行目录解析
+- profile 根目录管理
+- Chromium 启动辅助
+- 书签模板初始化
+- keepalive 站点注册、插件发现、图标缓存和状态格式化
 
-This module is the shared core used by both the GUI and the MCP side.
+当前边界：
 
-### Browser Engine Layer
+- `chromium_profile_lib.py` 继续作为 shared core 总入口
+- keepalive 插件注册与元数据装载已显式进入 `keepalive_registry.py`
+- 这层应只保留“共享规则”和“共享工具”，不应继续吸收 GUI 或 daemon 专属流程
 
-Main directory:
+### 3. 治理与服务层
 
-- `chromium_advanced/browser_engines/`
-- `chromium_advanced/browser_session_kernel.py`
+主要文件：
 
-Responsibilities:
-
-- define a shared browser session interface for MCP operations
-- provide `selenium_uc`, `patchright`, and `playwright_cli` runtime implementations
-- keep profile/session ownership outside the engine layer
-- allow the GUI and MCP worker to select an execution backend without changing profile creation logic
-- keep keepalive separate for now so engine migration can happen incrementally
-- expose explicit tab lifecycle operations instead of relying on hidden browser focus
-- expose structured debug telemetry such as console messages, page errors, and network request summaries
-- expose runtime capability metadata separately from raw engine names
-- keep a managed action kernel between MCP tools and raw runtime sessions
-- preserve actionable snapshot refs even when the underlying runtime does not have native ref semantics
-- support deep DOM and open shadow-root traversal in the managed fallback path
-
-Engine-specific note:
-
-- `patchright` collects debug telemetry through per-tab CDP sessions, which makes console output, uncaught exceptions, and failed requests much closer to what a human would inspect in DevTools
-- `selenium_uc` collects similar signals from Chromium browser/performance logs when available, so the API surface is shared but the fidelity is lower
-- `playwright_cli` is treated as a fast runtime with lower native inspection fidelity, then lifted by managed fallbacks for generic DOM inspection, waiting, and snapshot-ref style targeting
-
-### MCP Service Layer
-
-Main files:
-
+- `chromium_advanced/session_manager.py`
+- `chromium_advanced/session_runtime_view.py`
+- `chromium_advanced/session_runtime_cleanup.py`
 - `chromium_advanced/mcp_daemon.py`
 - `chromium_advanced/mcp_server.py`
-- `chromium_advanced/session_manager.py`
 
-Responsibilities:
+职责：
 
-- expose profile-aware browser control over MCP
-- report service and profile occupancy
-- claim and release sessions
-- prevent unsafe concurrent use
-- allow per-profile live concurrency when `app.concurrency_mode=per_profile_live`
-- keep the daemon stable while allowing the worker to start on demand
-- route session creation through the selected browser engine
-- wrap raw runtime sessions through a managed session kernel before exposing them to MCP tools
-- keep busy-state governance ahead of engine startup so live-root access cannot be bypassed by switching runtimes
-- distinguish managed worker reclaim from unexpected worker exit in daemon status reporting
-- start visible MCP-owned browser sessions minimized by default when `mcp.start_minimized=true`, avoiding foreground focus theft while preserving a taskbar window for manual observation or user takeover
-- keep `mcp.headless=false` as the normal MCP browsing default; `mcp.headless=true` is reserved for explicit user-requested regression or background validation
-- resolve one dedicated UserData root per profile under `paths.user_data_profiles_root`
+- profile 级占用治理
+- 会话创建、复用、释放和回收
+- daemon 状态暴露
+- worker 生命周期编排
+- control API 和 MCP API 对外服务
 
-## Managed Action Kernel
+当前边界：
 
-Main file:
+- `SessionManager` 负责治理规则和生命周期编排
+- active-session 视图投影转入 `session_runtime_view.py`
+- runtime 进程清理转入 `session_runtime_cleanup.py`
+- daemon 负责服务编排，不直接承担浏览器能力实现
+
+### 4. 浏览器能力层
+
+主要文件：
 
 - `chromium_advanced/browser_session_kernel.py`
+- `chromium_advanced/browser_session_kernel_watchers.py`
+- `chromium_advanced/browser_engines/`
 
-Responsibilities:
+职责：
 
-- normalize runtime capability output into a structured capability contract
-- normalize action failures into stable product-level error codes
-- attach consistent action metadata regardless of runtime
-- provide generic DOM-script fallbacks for runtimes that do not natively implement some higher-level tools
-- preserve the external MCP tool surface while reducing engine-specific `NotImplementedError` leakage
-- cache fallback candidates as executable handles, not only plain CSS selectors, so later target actions can still resolve on complex pages
-- use deep selector replay for open shadow-root targets when plain CSS cannot safely cross runtime boundaries
-- synthesize normalized `post_action_context` for non-diagnostic runtimes so common action results remain structurally consistent across engines
-- rank fallback candidates by relevance instead of scan order so complex-page target selection is less dependent on exploratory retries
-- compress oversized HTML reads into managed previews plus summaries so high-noise pages do not flood downstream tool context
-- maintain a managed recent-action trace so page and target diagnostics can include the causal steps that led to the current state
-- enrich `diagnose_page` and `diagnose_target` with engine-agnostic managed metadata instead of only forwarding raw backend payloads
-- expose a normalized `session_health` snapshot so action contexts and diagnostics can surface liveness, recent failure pressure, and recovery hints without backend-specific interpretation
-- prioritize transient UI controls such as menu items, popup options, combobox/listbox entries, and overlay-backed actions when managed fallback candidate scoring is used on complex frontends
-- run a unified target-resolution pipeline for `list_candidates`, `describe_target`, `wait_for`, and `diagnose_target` so scoring, scope hints, and fallback stage reporting stay consistent across tools
-- expose `resolution_trace` metadata on managed fallback reads so callers can tell whether the hit came from direct selector resolution, ranked DOM fallback, cached snapshot refs, or snapshot-text scanning
-- enrich fallback DOM extraction with `accessible_name`, `text_preview`, `control_type`, placeholder/title fields, ancestry tags, and overlay/dialog signals so complex component trees do not have to be reduced to raw page text
-- keep `playwright_cli` on short target-scoped eval paths for explicit selectors, while using snapshot-backed enumeration for untargeted candidate scans to avoid oversized CLI eval payloads
-- classify failure pressure into recovery-oriented buckets such as `target_resolution`, `page_synchronization`, `capability_gap`, and `session_lost` so diagnostics can recommend the next action instead of only reporting raw errors
-- detect tab/page drift separately from generic runtime failures so diagnostics can recommend `reactivate_expected_tab`, `reopen_expected_url`, or `retry_on_sticky_tab` without site-specific logic
+- 把 raw runtime 适配成统一浏览器能力契约
+- 对高层工具输出统一结果、错误和诊断结构
+- 提供 managed fallback
+- 承接多引擎差异
 
-### Packaging Layer
+当前结构：
 
-Main files:
+- `browser_session_kernel.py`
+  统一高层能力入口
+- `browser_session_kernel_watchers.py`
+  页面稳定/观察类 fallback
+- `browser_engines/*_engine.py`
+  引擎高层入口
+- `browser_engines/*_tabs_pages.py`
+  tab/page 能力域拆分
 
-- `run_gui.py`
-- `build_chromium_manage_gui_exe.ps1`
+当前引擎定位：
 
-Responsibilities:
+- `official_playwright_mcp`
+  默认高层浏览器能力路径，优先对齐官方 Playwright MCP 语义
+- `patchright`
+  兼容/回退路径，保留强交互与历史行为兼容性
+- `selenium_uc`
+  反自动化、challenge、XY/gesture 能力优先
+- `playwright_cli`
+  轻量兼容路径，不作为最高保真结构化读取主路径
 
-- provide the single public entry point for source usage
-- build the GUI executable and internal MCP helper executables for Windows packaging
-- keep desktop-delivered GUI, daemon, and worker artifacts aligned with the same managed runtime contract used in source mode
+## 会话与状态流
 
-Packaging note:
+标准 MCP 生命周期：
 
-- the desktop GUI is built with PyInstaller `--onefile`, so seeing a short-lived parent `ChromiumProfileManager.exe` process plus the real child GUI process is expected bootstrap behavior, not a duplicate second instance of the UI
+1. 查询 daemon/server 状态
+2. 查询目标 profile 是否可启动
+3. 由 `SessionManager` 申请 profile 占用
+4. 通过 engine factory 创建 raw session
+5. 用 `ManagedBrowserSession` 暴露统一能力
+6. 结束后释放 session 与占用
 
-## Session Model
+关键原则：
 
-The intended MCP lifecycle is:
+- 占用治理发生在 engine 启动前
+- 同一 profile 是否可并发由治理层决定，不由引擎自行绕过
+- GUI 手动打开、keepalive、MCP、未来脚本接入都必须落到同一套 profile occupancy 语义
 
-1. list or inspect available profiles
-2. check daemon and profile availability
-3. start a profile session
-4. perform browser work
-5. release the session
+## 为什么要做这轮分层
 
-This keeps real browser identities usable across many tasks without letting multiple tasks silently fight over the same logged-in state.
+此前的主要问题不是“文件长”，而是几个入口文件同时承担：
 
-When `app.concurrency_mode=per_profile_live`, the same lifecycle still applies, but ownership is enforced at the profile-root level:
+- 状态编排
+- 规则判断
+- 底层执行
+- 结果整形
+- fallback 兼容
 
-- one profile root has one owner at a time
-- different profile roots can run concurrently
-- keepalive and mirror refresh no longer imply whole-root runtime cloning
-- a running keepalive task should only block the matching profile root, not every profile globally
+这会带来三类后果：
 
-For manual GUI launches, the intended profile lifecycle is:
+- 修改影响面大
+- 测试无法映射真实边界
+- 每次加功能都会把复杂度吸回入口文件
 
-1. click `Launch` to open a visible Chromium window for one profile
-2. detect that profile's matching Chromium process set
-3. show `Close` while those matching processes still exist
-4. if the user closes the window manually, keep probing until the matching process set is gone
-5. switch the button back to `Launch` once the profile fully exits
+本轮重构的目标不是机械拆文件，而是把这些边界稳定下来：
 
-This model intentionally tracks real Chromium processes, not only whether a window is visible.
+- GUI 入口层只做 UI 编排
+- 治理层只做会话/占用规则
+- 能力层只做浏览器能力与 fallback
+- Shared Core 只做共享规则和共享工具
 
-For multi-tab tasks, the intended page lifecycle inside one session is:
+## 测试分层
 
-1. list tabs or open a new tab
-2. activate the target tab explicitly
-3. perform page actions on that active tab
-4. switch again when needed
-5. close the tab or release the whole session
+当前默认测试按 `tmp/tests` 分层：
 
-For blocked or unstable pages, the intended diagnostic flow is:
+- `tmp/tests/unit/`
+  纯 helper、纯状态映射、纯 shared-core 逻辑
+- `tmp/tests/integration/`
+  `SessionManager`、daemon route、kernel 集成
+- `tmp/tests/contract/`
+  引擎/managed contract 稳定性
+- `tmp/tests/smoke/`
+  轻量 smoke
+- `tmp/tests/slow/`
+  本地重运行时、重依赖验证，不进入默认 `pytest -q`
+- `tmp/tests/manual/`
+  发布前人工脚本与一次性验证脚本
 
-1. capture the current interaction context
-2. inspect recent console messages
-3. inspect recent page errors
-4. inspect recent failed or bad network requests
-5. inspect `session_health.recovery_hint` to decide whether to retry, refresh candidates, or recreate the session
-6. inspect `session_health.recovery_actions` and `failure_classification` to decide whether the next step is a scoped retry, page resync, or full session recreation
-7. inspect `resolution_trace` on target-oriented reads to see whether the runtime hit directly, fell back to ranked DOM search, or had to rely on snapshot text
-8. use the bundled page diagnosis payload before falling back to screenshots
-9. if `session_health.failure_classification == "page_drift"`, prefer recovering the expected tab/page before changing selectors or recreating the full session
+默认约定：
 
-## Why Not a Generic Browser Sandbox
+- `pytest -q` 只跑快速、稳定的默认层
+- 慢测试和手工验证不得混入默认回归
 
-This project is intentionally not optimized for disposable generic browser automation. It is optimized for:
+## 当前仍保留的演进方向
 
-- persistent identities
-- real login state
-- human-managed browser profiles
-- long-lived local automation environments
+这轮完成后，结构已经进入“可继续演进”的状态，但还有明确后续方向：
 
-That design choice is what makes it useful for AI workflows that need access to real accounts in a controlled and reusable way.
+- 继续瘦身 `chromium_manage_gui.py`
+- 继续从 `browser_session_kernel.py` 抽离结果整形/诊断 helper
+- 继续把 engine 按 `targets_actions`、`diagnostics_traces` 等能力域拆开
+- 继续收紧 `chromium_profile_lib.py` 与 shared-core 的边界
 
-## Suggested Future Cleanup
-
-- split large GUI sections into smaller modules if the UI keeps growing
-- keep expanding i18n coverage so all user-facing strings come from resource files
-- add automated smoke tests for GUI startup, config loading, and MCP daemon lifecycle
-- document cross-platform packaging separately from source-level compatibility
-- consider eventually making `tab_id` a first-class optional parameter across every browser action, not just tab management and read/diagnostic helpers
+这些属于结构持续演进，不再是“入口职责完全混杂”的状态。

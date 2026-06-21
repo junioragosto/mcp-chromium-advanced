@@ -11,6 +11,7 @@ from queue import Queue
 from typing import Any, Dict
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
+from chromium_advanced.browser_engines import patchright_tabs_pages
 from chromium_advanced.chromium_profile_lib import (
     get_chromium_restore_prompt_suppression_args,
     get_profile_user_data_root,
@@ -943,13 +944,7 @@ class PatchrightBrowserSession(BrowserSession):
         return candidates
 
     def list_tabs(self) -> Dict:
-        tabs = self._safe_tabs_summary()
-        active_tab_id = ""
-        for item in tabs:
-            if item.get("active"):
-                active_tab_id = str(item.get("tab_id", "") or "")
-                break
-        return {**self.get_current_url(), "active_tab_id": active_tab_id, "count": len(tabs), "tabs": tabs}
+        return patchright_tabs_pages.list_tabs(self)
 
     def open_tab(
         self,
@@ -958,24 +953,13 @@ class PatchrightBrowserSession(BrowserSession):
         wait_for_ready: bool = True,
         timeout_seconds: int = 20,
     ) -> Dict:
-        page = self.context.new_page()
-        self._attach_page(page)
-        if str(url or "").strip():
-            wait_until = "domcontentloaded" if wait_for_ready else "commit"
-            page.goto(str(url).strip(), wait_until=wait_until, timeout=int(timeout_seconds) * 1000)
-        if activate:
-            self.page = page
-            try:
-                page.bring_to_front()
-            except Exception:
-                pass
-        return {
-            **self.get_current_url(tab_id=self._get_tab_id(page)),
-            "opened": True,
-            "activated": bool(activate),
-            "tab": self._tab_entry(page, self._live_pages().index(page)),
-            "tabs": self._safe_tabs_summary(),
-        }
+        return patchright_tabs_pages.open_tab(
+            self,
+            url=url,
+            activate=activate,
+            wait_for_ready=wait_for_ready,
+            timeout_seconds=timeout_seconds,
+        )
 
     def activate_tab(
         self,
@@ -984,73 +968,37 @@ class PatchrightBrowserSession(BrowserSession):
         title_contains: str = "",
         url_contains: str = "",
     ) -> Dict:
-        page = self._resolve_page(tab_id=tab_id, index=index, title_contains=title_contains, url_contains=url_contains)
-        self.page = page
-        try:
-            page.bring_to_front()
-        except Exception:
-            pass
-        return {
-            **self.get_current_url(tab_id=self._get_tab_id(page)),
-            "activated": True,
-            "tab": self._tab_entry(page, self._live_pages().index(page)),
-            "tabs": self._safe_tabs_summary(),
-        }
+        return patchright_tabs_pages.activate_tab(
+            self,
+            tab_id=tab_id,
+            index=index,
+            title_contains=title_contains,
+            url_contains=url_contains,
+        )
 
     def close_tab(self, tab_id: str = "", index: int = -1) -> Dict:
-        page = self._resolve_page(tab_id=tab_id, index=index)
-        closing_tab = self._tab_entry(page, self._live_pages().index(page))
-        page.close()
-        remaining_pages = self._live_pages()
-        if remaining_pages:
-            if self.page == page:
-                self.page = remaining_pages[0]
-        else:
-            self.page = self.context.new_page()
-            self._attach_page(self.page)
-        return {
-            **self.get_current_url(),
-            "closed": True,
-            "closed_tab": closing_tab,
-            "tabs": self._safe_tabs_summary(),
-        }
+        return patchright_tabs_pages.close_tab(self, tab_id=tab_id, index=index)
 
     def resize(self, width: int, height: int) -> Dict:
-        page = self._resolve_page()
-        target_width = max(320, int(width))
-        target_height = max(240, int(height))
-        try:
-            self.page.set_viewport_size({"width": target_width, "height": target_height})
-        except Exception:
-            page.set_viewport_size({"width": target_width, "height": target_height})
-        return {
-            **self.get_current_url(tab_id=self._get_tab_id(page)),
-            "resized": True,
-            "width": target_width,
-            "height": target_height,
-            "tabs": self._safe_tabs_summary(),
-        }
+        return patchright_tabs_pages.resize(self, width=width, height=height)
 
     def navigate(self, url: str, wait_for_ready: bool = True, timeout_seconds: int = 20, tab_id: str = "") -> Dict:
-        page = self._resolve_page(tab_id=tab_id)
-        wait_until = "domcontentloaded" if wait_for_ready else "commit"
-        page.goto(url, wait_until=wait_until, timeout=int(timeout_seconds) * 1000)
-        return {
-            **self.get_current_url(tab_id=self._get_tab_id(page)),
-        }
+        return patchright_tabs_pages.navigate(
+            self,
+            url=url,
+            wait_for_ready=wait_for_ready,
+            timeout_seconds=timeout_seconds,
+            tab_id=tab_id,
+        )
 
     def get_current_url(self, tab_id: str = "") -> Dict:
-        page = self._resolve_page(tab_id=tab_id)
-        return {"tab_id": self._get_tab_id(page), "url": page.url, "title": page.title()}
+        return patchright_tabs_pages.get_current_url(self, tab_id=tab_id)
 
     def get_page_text(self, tab_id: str = "") -> Dict:
-        page = self._resolve_page(tab_id=tab_id)
-        text = page.locator("body").inner_text(timeout=15000).strip()
-        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "text": text}
+        return patchright_tabs_pages.get_page_text(self, tab_id=tab_id)
 
     def get_page_html(self, tab_id: str = "") -> Dict:
-        page = self._resolve_page(tab_id=tab_id)
-        return {**self.get_current_url(tab_id=self._get_tab_id(page)), "html": page.content()}
+        return patchright_tabs_pages.get_page_html(self, tab_id=tab_id)
 
     def inspect_elements(self, selector: str, by: str = "css", limit: int = 10, tab_id: str = "") -> Dict:
         page = self._resolve_page(tab_id=tab_id)

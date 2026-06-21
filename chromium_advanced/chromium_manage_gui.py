@@ -114,6 +114,7 @@ from chromium_advanced.gui.gui_runtime import (
     show_single_instance_message,
     terminate_project_mcp_processes,
 )
+from chromium_advanced.gui import gui_mcp_runtime
 from chromium_advanced.gui.gui_state import (
     build_control_auth_headers,
     build_control_ping_url,
@@ -2687,30 +2688,28 @@ class ChromiumManagerWindow(QMainWindow):
             QMessageBox.critical(self, self.tr("error_open_failed_title"), self.trf("error_open_config_dir", error=exc))
 
     def get_mcp_endpoint(self) -> str:
-        return build_mcp_endpoint(self.config.get("mcp", {}), worker=False)
+        return gui_mcp_runtime.get_mcp_endpoint(self)
 
     def get_mcp_worker_endpoint(self) -> str:
-        return build_mcp_endpoint(self.config.get("mcp", {}), worker=True)
+        return gui_mcp_runtime.get_mcp_worker_endpoint(self)
 
     def get_mcp_trace_path(self) -> str:
-        return get_mcp_trace_path_helper()
+        return gui_mcp_runtime.get_mcp_trace_path()
 
     def get_mcp_status_url(self) -> str:
-        return build_control_ping_url(self.config.get("control", {}), self.config.get("mcp", {}))
+        return gui_mcp_runtime.get_mcp_status_url(self)
 
     def get_mcp_auth_headers(self) -> Dict[str, str]:
-        settings = self.config.get("control", {}) if isinstance(self.config, dict) else {}
-        return build_control_auth_headers(settings)
+        return gui_mcp_runtime.get_mcp_auth_headers(self)
 
     def get_mcp_admin_auth_headers(self) -> Dict[str, str]:
-        settings = self.config.get("control", {}) if isinstance(self.config, dict) else {}
-        return build_control_auth_headers(settings)
+        return gui_mcp_runtime.get_mcp_admin_auth_headers(self)
 
     def get_mcp_connect_host_port(self):
-        return resolve_mcp_connect_host_port(self.config.get("mcp", {}))
+        return gui_mcp_runtime.get_mcp_connect_host_port(self)
 
     def is_mcp_expected_enabled(self) -> bool:
-        return bool(self.config.get("mcp", {}).get("enabled", False))
+        return gui_mcp_runtime.is_mcp_expected_enabled(self)
 
     def query_mcp_status(
         self,
@@ -2718,284 +2717,88 @@ class ChromiumManagerWindow(QMainWindow):
         expected_pid: int = 0,
         expected_instance_id: str = "",
     ) -> Dict:
-        now_ts = time.monotonic()
-        result = query_mcp_status_snapshot(
+        return gui_mcp_runtime.query_mcp_status(
+            self,
             force=force,
-            now_ts=now_ts,
-            cache=self.mcp_status_cache,
-            last_query_at=self.mcp_status_last_query_at,
-            last_ok_at=self.mcp_status_last_ok_at,
-            consecutive_failures=self.mcp_status_consecutive_failures,
-            cache_ttl_seconds=MCP_STATUS_CACHE_TTL_SECONDS,
-            recent_health_grace_seconds=MCP_RECENT_HEALTH_GRACE_SECONDS,
-            fetch_status=lambda: fetch_json(
-                self.get_mcp_status_url(),
-                timeout=MCP_STATUS_QUERY_TIMEOUT_SECONDS,
-                headers=self.get_mcp_auth_headers(),
-            ),
             expected_pid=expected_pid,
             expected_instance_id=expected_instance_id,
         )
-        self.mcp_status_cache = result["cache"]
-        self.mcp_status_last_query_at = float(result["last_query_at"])
-        self.mcp_status_last_ok_at = float(result["last_ok_at"])
-        self.mcp_status_consecutive_failures = int(result["consecutive_failures"])
-        return result["status"]
 
     def query_mcp_ping(self) -> Dict:
-        try:
-            payload = fetch_json(
-                self.get_mcp_status_url(),
-                timeout=MCP_STATUS_QUERY_TIMEOUT_SECONDS,
-                headers=self.get_mcp_auth_headers(),
-            )
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return {}
+        return gui_mcp_runtime.query_mcp_ping(self)
 
     def get_control_profiles_url(self) -> str:
-        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
-        if base.endswith("/status"):
-            return base[: -len("/status")] + "/profiles?include_runtime_snapshot=false"
-        return base.rstrip("/") + "/profiles?include_runtime_snapshot=false"
+        return gui_mcp_runtime.get_control_profiles_url(self)
 
     def get_control_events_url(self, limit: int = 80) -> str:
-        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
-        bounded_limit = max(1, int(limit or 80))
-        if base.endswith("/status"):
-            return base[: -len("/status")] + f"/events?limit={bounded_limit}"
-        return base.rstrip("/") + f"/events?limit={bounded_limit}"
+        return gui_mcp_runtime.get_control_events_url(self, limit=limit)
 
     def get_control_profile_url(self, profile_name: str, include_runtime_snapshot: bool = False) -> str:
-        from urllib.parse import quote
-
-        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
-        encoded_profile_name = quote(str(profile_name or "").strip(), safe="")
-        query_text = "true" if include_runtime_snapshot else "false"
-        if base.endswith("/status"):
-            return base[: -len("/status")] + f"/profiles/{encoded_profile_name}?include_runtime_snapshot={query_text}"
-        return base.rstrip("/") + f"/profiles/{encoded_profile_name}?include_runtime_snapshot={query_text}"
+        return gui_mcp_runtime.get_control_profile_url(
+            self,
+            profile_name,
+            include_runtime_snapshot=include_runtime_snapshot,
+        )
 
     def get_control_keepalive_url(self) -> str:
-        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
-        if base.endswith("/status"):
-            return base[: -len("/status")] + "/keepalive"
-        return base.rstrip("/") + "/keepalive"
+        return gui_mcp_runtime.get_control_keepalive_url(self)
 
     def get_control_keepalive_run_url(self) -> str:
-        return self.get_control_keepalive_url().rstrip("/") + "/run"
+        return gui_mcp_runtime.get_control_keepalive_run_url(self)
 
     def get_control_keepalive_stop_url(self) -> str:
-        return self.get_control_keepalive_url().rstrip("/") + "/stop"
+        return gui_mcp_runtime.get_control_keepalive_stop_url(self)
 
     def get_control_profile_launch_url(self, profile_name: str) -> str:
-        from urllib.parse import quote
-
-        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
-        encoded_profile_name = quote(str(profile_name or "").strip(), safe="")
-        if base.endswith("/status"):
-            return base[: -len("/status")] + f"/profiles/{encoded_profile_name}/launch"
-        return base.rstrip("/") + f"/profiles/{encoded_profile_name}/launch"
+        return gui_mcp_runtime.get_control_profile_launch_url(self, profile_name)
 
     def get_control_profile_close_url(self, profile_name: str) -> str:
-        from urllib.parse import quote
-
-        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
-        encoded_profile_name = quote(str(profile_name or "").strip(), safe="")
-        if base.endswith("/status"):
-            return base[: -len("/status")] + f"/profiles/{encoded_profile_name}/close"
-        return base.rstrip("/") + f"/profiles/{encoded_profile_name}/close"
+        return gui_mcp_runtime.get_control_profile_close_url(self, profile_name)
 
     def get_control_plugins_url(self) -> str:
-        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
-        if base.endswith("/status"):
-            return base[: -len("/status")] + "/plugins"
-        return base.rstrip("/") + "/plugins"
+        return gui_mcp_runtime.get_control_plugins_url(self)
 
     def get_control_plugin_url(self, plugin_id: str) -> str:
-        from urllib.parse import quote
-
-        base = build_control_status_url(self.config.get("control", {}), self.config.get("mcp", {}))
-        encoded_plugin_id = quote(str(plugin_id or "").strip(), safe="")
-        if base.endswith("/status"):
-            return base[: -len("/status")] + f"/plugins/{encoded_plugin_id}"
-        return base.rstrip("/") + f"/plugins/{encoded_plugin_id}"
+        return gui_mcp_runtime.get_control_plugin_url(self, plugin_id)
 
     def query_control_profiles(self, force: bool = False) -> Dict:
-        now_ts = time.monotonic()
-        if (
-            not force
-            and self.control_profiles_cache
-            and self.control_profiles_last_query_at > 0
-            and (now_ts - self.control_profiles_last_query_at) < CONTROL_PROFILES_REFRESH_INTERVAL_SECONDS
-        ):
-            return self.control_profiles_cache
-        try:
-            payload = fetch_json(
-                self.get_control_profiles_url(),
-                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
-                headers=self.get_mcp_auth_headers(),
-            )
-            if isinstance(payload, dict):
-                self.control_profiles_cache = payload
-                self.control_profiles_last_query_at = now_ts
-                self.prune_fallback_profile_occupancy_cache()
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return self.control_profiles_cache if isinstance(self.control_profiles_cache, dict) else {}
+        return gui_mcp_runtime.query_control_profiles(self, force=force)
 
     def query_control_events(self, limit: int = 80) -> Dict:
-        try:
-            payload = fetch_json(
-                self.get_control_events_url(limit=limit),
-                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
-                headers=self.get_mcp_auth_headers(),
-            )
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return {}
+        return gui_mcp_runtime.query_control_events(self, limit=limit)
 
     def query_control_keepalive(self) -> Dict:
-        now_ts = time.monotonic()
-        if (
-            self.control_keepalive_cache
-            and self.control_keepalive_last_query_at > 0
-            and (now_ts - self.control_keepalive_last_query_at) < CONTROL_KEEPALIVE_REFRESH_INTERVAL_SECONDS
-        ):
-            return self.control_keepalive_cache
-        try:
-            payload = fetch_json(
-                self.get_control_keepalive_url(),
-                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
-                headers=self.get_mcp_auth_headers(),
-            )
-            if isinstance(payload, dict):
-                self.control_keepalive_cache = payload
-                self.control_keepalive_last_query_at = now_ts
-                return payload
-            return {}
-        except Exception:
-            return self.control_keepalive_cache if isinstance(self.control_keepalive_cache, dict) else {}
+        return gui_mcp_runtime.query_control_keepalive(self)
 
     def invalidate_control_keepalive_cache(self) -> None:
-        self.control_keepalive_cache = {}
-        self.control_keepalive_last_query_at = 0.0
+        gui_mcp_runtime.invalidate_control_keepalive_cache(self)
 
     def query_control_keepalive_runtime(self) -> Dict:
-        payload = self.query_control_keepalive()
-        runtime = payload.get("runtime", {}) if isinstance(payload.get("runtime", {}), dict) else {}
-        return runtime
+        return gui_mcp_runtime.query_control_keepalive_runtime(self)
 
     def control_launch_profile(self, profile_name: str) -> Dict:
-        return fetch_json(
-            self.get_control_profile_launch_url(profile_name),
-            method="POST",
-            headers=self.get_mcp_auth_headers(),
-            timeout=max(2.0, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
-        )
+        return gui_mcp_runtime.control_launch_profile(self, profile_name)
 
     def control_close_profile(self, profile_name: str) -> Dict:
-        return fetch_json(
-            self.get_control_profile_close_url(profile_name),
-            method="POST",
-            headers=self.get_mcp_auth_headers(),
-            timeout=max(2.0, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
-        )
+        return gui_mcp_runtime.control_close_profile(self, profile_name)
 
     def control_start_keepalive(self, selected_profiles: List[str], source: str) -> Dict:
-        return fetch_json(
-            self.get_control_keepalive_run_url(),
-            method="POST",
-            headers=self.get_mcp_auth_headers(),
-            json_payload={
-                "selected_profiles": [str(item).strip() for item in (selected_profiles or []) if str(item).strip()],
-                "source": str(source or "manual"),
-            },
-            timeout=max(2.0, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
-        )
+        return gui_mcp_runtime.control_start_keepalive(self, selected_profiles, source)
 
     def control_stop_keepalive(self) -> Dict:
-        return fetch_json(
-            self.get_control_keepalive_stop_url(),
-            method="POST",
-            headers=self.get_mcp_auth_headers(),
-            timeout=max(2.0, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
-        )
+        return gui_mcp_runtime.control_stop_keepalive(self)
 
     def query_control_plugins(self) -> Dict:
-        try:
-            payload = fetch_json(
-                self.get_control_plugins_url(),
-                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
-                headers=self.get_mcp_auth_headers(),
-            )
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return {}
+        return gui_mcp_runtime.query_control_plugins(self)
 
     def refresh_mcp_status_ui(self):
-        self.mcp_endpoint_label.setText(self.get_mcp_endpoint())
-        self.mcp_worker_endpoint_label.setText(self.get_mcp_worker_endpoint())
-        self.mcp_trace_path_label.setText(self.get_mcp_trace_path())
-        self.mcp_default_engine_label.setText(
-            f"{normalize_browser_engine_name(self.config.get('app', {}).get('browser_engine', DEFAULT_BROWSER_ENGINE))}"
-            f" / {str(self.config.get('app', {}).get('concurrency_mode', 'per_profile_live') or 'per_profile_live')}"
-        )
-
-        daemon_status = self.query_mcp_status()
-        view_model = build_mcp_status_view_model(
-            daemon_status,
-            self.is_mcp_expected_enabled(),
-            self.mcp_startup_in_progress,
-            self.tr,
-        )
-        self.mcp_status_label.setText(view_model["label"])
-        self.mcp_status_detail_label.setText(view_model["detail"])
-        self.refresh_bottom_stats()
+        gui_mcp_runtime.refresh_mcp_status_ui(self)
 
     def maybe_refresh_profiles_in_background(self, *, force: bool = False) -> None:
-        if self.gui_bootstrap_in_progress:
-            return
-        if self.is_ui_interaction_busy():
-            return
-        now_ts = time.monotonic()
-        if (
-            not force
-            and self.background_profiles_refresh_last_at > 0
-            and (now_ts - self.background_profiles_refresh_last_at) < BACKGROUND_PROFILES_REFRESH_INTERVAL_SECONDS
-        ):
-            return
-        payload = self.query_control_profiles(force=force)
-        self.background_profiles_refresh_last_at = now_ts
-        if not isinstance(payload, dict) or not payload:
-            return
-        self.current_ui_refresh_context = {
-            "control_profiles_payload": payload,
-            "keepalive_runtime": self.query_control_keepalive_runtime(),
-        }
-        self.refresh_external_profile_process_state()
-        self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
+        gui_mcp_runtime.maybe_refresh_profiles_in_background(self, force=force)
 
     def apply_initial_mcp_state(self):
-        if self.mcp_startup_applied:
-            return
-        self.mcp_startup_applied = True
-        if not bool(self.config.get("mcp", {}).get("enabled", False)):
-            return
-        if self.mcp_bootstrap_prelaunched:
-            self.mcp_startup_in_progress = True
-            self.mcp_startup_token += 1
-            self.mcp_startup_deadline = datetime.datetime.now() + datetime.timedelta(
-                milliseconds=MCP_HEALTHCHECK_START_TIMEOUT_MS
-            )
-            self.append_mcp_log("Detected prelaunched daemon bootstrap; waiting for readiness", prefix="MCP")
-            QTimer.singleShot(0, lambda token=self.mcp_startup_token: self.check_mcp_health_after_start(token))
-            return
-        try:
-            self.start_mcp_service()
-        except Exception as exc:
-            self.append_mcp_log(self.trf("log_mcp_error", error=exc), prefix="MCP-ERR")
-            self.finish_mcp_startup_failure()
+        gui_mcp_runtime.apply_initial_mcp_state(self)
 
     def ensure_mcp_process(self):
         if self.mcp_process is not None:
@@ -3008,172 +2811,31 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_process.errorOccurred.connect(self.on_mcp_process_error)
 
     def finish_mcp_startup_failure(self):
-        self.mcp_startup_in_progress = False
-        self.mcp_startup_deadline = None
-        self.mcp_stop_requested = True
-        self.cleanup_mcp_process_residue()
-        self.mcp_launch_pid = 0
-        self.mcp_launch_instance_id = ""
-        self.mcp_owned_process = False
-        self.mcp_status_cache = {}
-        self.invalidate_control_profiles_cache()
-        self.request_ui_refresh(mcp_status=True)
+        gui_mcp_runtime.finish_mcp_startup_failure(self)
 
     def check_mcp_health_after_start(self, startup_token: int):
-        if startup_token != self.mcp_startup_token or not self.mcp_startup_in_progress:
-            return
-        try:
-            status = self.query_mcp_status(
-                force=True,
-                expected_pid=self.mcp_launch_pid,
-                expected_instance_id=self.mcp_launch_instance_id,
-            )
-            if status:
-                if not self.mcp_launch_instance_id:
-                    self.mcp_launch_instance_id = str(status.get("daemon_instance_id", "") or "").strip()
-                # A daemon prelaunched during GUI bootstrap should still be governed
-                # by this GUI instance for stop/exit behavior.
-                self.mcp_owned_process = True
-                self.mcp_startup_in_progress = False
-                self.mcp_startup_deadline = None
-                self.request_ui_refresh(mcp_status=True)
-                return
-        except Exception:
-            pass
-
-        deadline = self.mcp_startup_deadline or datetime.datetime.now()
-        if datetime.datetime.now() >= deadline:
-            self.append_mcp_log(self.tr("log_mcp_watchdog_port_down"), prefix="MCP-ERR")
-            self.finish_mcp_startup_failure()
-            return
-
-        QTimer.singleShot(
-            MCP_HEALTHCHECK_POLL_INTERVAL_MS,
-            lambda token=startup_token: self.check_mcp_health_after_start(token),
-        )
+        gui_mcp_runtime.check_mcp_health_after_start(self, startup_token)
 
     def build_mcp_process_arguments(self) -> List[str]:
-        settings = self.config.get("mcp", {})
-        return build_mcp_process_arguments_helper(
-            settings,
-            self.config.get("control", {}),
-            self.config_path,
-            MCP_TRANSPORT_OPTIONS,
-            bool(getattr(sys, "frozen", False)),
-        )
+        return gui_mcp_runtime.build_mcp_process_arguments(self)
 
     def start_mcp_service(self):
-        self.save_mcp_settings()
-        if self.mcp_startup_in_progress:
-            self.request_ui_refresh(mcp_status=True)
-            return
-        if self.query_mcp_status(force=True):
-            self.mcp_owned_process = True
-            self.request_ui_refresh(mcp_status=True)
-            return
-
-        terminated_pids = terminate_project_mcp_processes(exclude_pid=os.getpid())
-        plan = build_mcp_startup_plan(
-            terminated_pids=terminated_pids,
-            startup_timeout_ms=MCP_HEALTHCHECK_START_TIMEOUT_MS,
-            tr=self.tr,
-            trf=self.trf,
-            now_dt=datetime.datetime.now(),
-        )
-        if str(plan.get("cleanup_log", "")).strip():
-            self.append_mcp_log(str(plan["cleanup_log"]), prefix=str(plan.get("log_prefix", "MCP")))
-
-        self.mcp_restart_pending = bool(plan.get("set_restart_pending", False))
-        self.mcp_stop_requested = bool(plan.get("set_stop_requested", False))
-        self.mcp_owned_process = bool(plan.get("set_owned_process", True))
-        self.mcp_startup_in_progress = bool(plan.get("set_startup_in_progress", True))
-        self.mcp_startup_token += 1
-        self.mcp_launch_instance_id = ""
-        if bool(plan.get("reset_consecutive_failures")):
-            self.mcp_status_consecutive_failures = 0
-        self.mcp_startup_deadline = plan.get("startup_deadline")
-        self.append_mcp_log(str(plan.get("prepare_log", "")))
-        program = sys.executable
-        if getattr(sys, "frozen", False):
-            program = get_frozen_companion_executable("ChromiumMcpDaemon")
-        command = [program, *self.build_mcp_process_arguments()]
-        try:
-            process = subprocess.Popen(
-                command,
-                cwd=get_runtime_launch_cwd(program),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                **get_hidden_subprocess_kwargs(),
-            )
-            self.mcp_launch_pid = int(process.pid or 0)
-        except Exception as exc:
-            failure_plan = build_mcp_startup_failure_plan(error=exc, trf=self.trf)
-            self.mcp_startup_in_progress = bool(failure_plan.get("startup_in_progress", False))
-            self.mcp_startup_deadline = failure_plan.get("startup_deadline")
-            self.mcp_owned_process = bool(failure_plan.get("owned_process", False))
-            self.append_mcp_log(
-                str(failure_plan.get("error_log", "")),
-                prefix=str(failure_plan.get("error_prefix", "MCP-ERR")),
-            )
-            if bool(failure_plan.get("request_status_refresh", True)):
-                self.request_ui_refresh(mcp_status=True)
-            return
-        self.request_ui_refresh(mcp_status=True)
-        QTimer.singleShot(0, lambda token=self.mcp_startup_token: self.check_mcp_health_after_start(token))
+        gui_mcp_runtime.start_mcp_service(self)
 
     def stop_mcp_service(self, update_checkbox: bool = True):
-        plan = build_mcp_stop_plan(update_checkbox=update_checkbox, tr=self.tr)
-        self.mcp_startup_in_progress = bool(plan.get("startup_in_progress", False))
-        self.mcp_startup_deadline = plan.get("startup_deadline")
-        if bool(plan.get("increment_startup_token", True)):
-            self.mcp_startup_token += 1
-        if bool(plan.get("reset_consecutive_failures", True)):
-            self.mcp_status_consecutive_failures = 0
-        self.mcp_restart_pending = bool(plan.get("restart_pending", False))
-        self.mcp_stop_requested = bool(plan.get("stop_requested", True))
-        self.append_mcp_log(str(plan.get("prepare_log", "")))
-        if bool(plan.get("cleanup_residue", True)):
-            self.cleanup_mcp_process_residue()
-        self.mcp_launch_pid = int(plan.get("launch_pid", 0) or 0)
-        self.mcp_launch_instance_id = ""
-        if bool(plan.get("update_checkbox", False)):
-            self.mcp_service_checkbox.blockSignals(True)
-            self.mcp_service_checkbox.setChecked(False)
-            self.mcp_service_checkbox.blockSignals(False)
-        self.mcp_owned_process = bool(plan.get("owned_process", False))
-        if bool(plan.get("clear_status_cache", True)):
-            self.mcp_status_cache = {}
-        self.invalidate_control_profiles_cache()
-        if bool(plan.get("request_status_refresh", True)):
-            self.request_ui_refresh(mcp_status=True)
+        gui_mcp_runtime.stop_mcp_service(self, update_checkbox=update_checkbox)
 
     def restart_mcp_service(self):
-        if not self.is_mcp_expected_enabled():
-            self.mcp_service_checkbox.setChecked(True)
-            return
-        self.stop_mcp_service(update_checkbox=False)
-        self.mcp_restart_pending = False
-        QTimer.singleShot(800, self.start_mcp_service)
+        gui_mcp_runtime.restart_mcp_service(self)
 
     def on_mcp_service_checkbox_changed(self, state):
-        enabled = (state == Qt.Checked)
-        if enabled:
-            self.start_mcp_service()
-        else:
-            self.config.setdefault("mcp", {})
-            self.config["mcp"]["enabled"] = False
-            self.config = save_app_config(self.config, self.config_path)
-            self.stop_mcp_service(update_checkbox=False)
+        gui_mcp_runtime.on_mcp_service_checkbox_changed(self, state)
 
     def on_mcp_process_output(self):
-        if self.mcp_process is None:
-            return
-        text = bytes(self.mcp_process.readAllStandardOutput()).decode(errors="replace")
-        if text.strip():
-            self.append_mcp_log(text.rstrip())
+        gui_mcp_runtime.on_mcp_process_output(self)
 
     def on_mcp_process_state_changed(self, _state):
-        self.request_ui_refresh(mcp_status=True)
+        gui_mcp_runtime.on_mcp_process_state_changed(self, _state)
 
     def on_mcp_process_finished(self, exit_code: int, exit_status):
         return
@@ -3182,34 +2844,10 @@ class ChromiumManagerWindow(QMainWindow):
         return
 
     def cleanup_mcp_process_residue(self):
-        terminated_pids = terminate_project_mcp_processes(exclude_pid=os.getpid())
-        if terminated_pids:
-            self.append_mcp_log(
-                self.trf("log_mcp_cleanup_stale", pid_text=", ".join(str(pid) for pid in terminated_pids)),
-                prefix="MCP",
-            )
+        gui_mcp_runtime.cleanup_mcp_process_residue(self)
 
     def on_mcp_watchdog_timer(self):
-        if not self.is_mcp_expected_enabled():
-            return
-        if self.mcp_startup_in_progress:
-            return
-        ping_status = self.query_mcp_ping()
-        if ping_status:
-            had_failures = self.mcp_status_consecutive_failures > 0
-            self.mcp_status_consecutive_failures = 0
-            if had_failures:
-                self.request_ui_refresh(mcp_status=True)
-            self.maybe_refresh_profiles_in_background(force=False)
-            return
-        self.mcp_status_consecutive_failures += 1
-        if self.mcp_status_consecutive_failures >= 3:
-            if find_project_mcp_processes(exclude_pid=os.getpid()):
-                return
-            self.append_mcp_log(self.tr("log_mcp_watchdog_not_running"), prefix="MCP-WARN")
-            self.start_mcp_service()
-            return
-        self.request_ui_refresh(mcp_status=True)
+        gui_mcp_runtime.on_mcp_watchdog_timer(self)
 
     def setup_tray_icon(self):
         self.tray_icon = None
