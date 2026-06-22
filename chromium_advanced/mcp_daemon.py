@@ -34,6 +34,7 @@ from chromium_advanced.chromium_profile_lib import (
     get_keepalive_plugin_source_text,
     get_hidden_subprocess_kwargs,
     inspect_keepalive_plugin_source,
+    get_packaged_app_root,
     get_project_root,
     get_runtime_launch_cwd,
     get_chromium_processes_for_profile,
@@ -364,6 +365,35 @@ def can_connect(host: str, port: int, timeout: float = HEALTHCHECK_TIMEOUT_SECON
         return False
 
 
+def _get_frozen_companion_executable(stem: str) -> str:
+    extension = ".exe" if platform.system() == "Windows" else ""
+    base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    parent_dir = os.path.dirname(base_dir)
+    packaged_app_root = get_packaged_app_root()
+    candidates = [
+        os.path.join(base_dir, f"{stem}{extension}"),
+        os.path.join(base_dir, stem, f"{stem}{extension}"),
+        os.path.join(base_dir, stem, stem, f"{stem}{extension}"),
+        os.path.join(parent_dir, f"{stem}{extension}"),
+        os.path.join(parent_dir, stem, f"{stem}{extension}"),
+        os.path.join(parent_dir, stem, stem, f"{stem}{extension}"),
+    ]
+    if packaged_app_root:
+        candidates.extend(
+            [
+                os.path.join(packaged_app_root, f"{stem}{extension}"),
+                os.path.join(packaged_app_root, "bin", f"{stem}{extension}"),
+                os.path.join(packaged_app_root, stem, f"{stem}{extension}"),
+            ]
+        )
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    raise FileNotFoundError(
+        f"frozen companion executable not found for {stem}: {', '.join(candidates)}"
+    )
+
+
 def build_worker_command(
     transport: str,
     host: str,
@@ -374,29 +404,9 @@ def build_worker_command(
 ) -> list[str]:
     worker_args: list[str]
     if getattr(sys, "frozen", False):
-        extension = ".exe" if platform.system() == "Windows" else ""
-        base_dir = os.path.dirname(os.path.abspath(sys.executable))
-        parent_dir = os.path.dirname(base_dir)
-        candidates = [
-            os.path.join(base_dir, f"ChromiumMcpWorker{extension}"),
-            os.path.join(base_dir, "ChromiumMcpWorker", f"ChromiumMcpWorker{extension}"),
-            os.path.join(base_dir, "ChromiumMcpWorker", "ChromiumMcpWorker", f"ChromiumMcpWorker{extension}"),
-            os.path.join(parent_dir, f"ChromiumMcpWorker{extension}"),
-            os.path.join(parent_dir, "ChromiumMcpWorker", f"ChromiumMcpWorker{extension}"),
-            os.path.join(parent_dir, "ChromiumMcpWorker", "ChromiumMcpWorker", f"ChromiumMcpWorker{extension}"),
-        ]
-        worker_executable = ""
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                worker_executable = candidate
-                break
-        if not worker_executable:
-            raise FileNotFoundError(
-                "ChromiumMcpWorker companion executable not found. Checked: "
-                + ", ".join(candidates)
-            )
+        worker_program = _get_frozen_companion_executable("ChromiumMcpWorker")
         worker_args = [
-            worker_executable,
+            worker_program,
             "--transport",
             transport,
             "--host",

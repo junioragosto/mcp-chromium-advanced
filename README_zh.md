@@ -4,7 +4,7 @@
 
 MCP Chromium Advanced 不是一次性、无状态的自动化浏览器工具，而是一套用于管理和复用真实 Chromium Profile 登录态的本地系统。
 
-当前版本基线：`0.1.0`
+版本与发布信息以后应以项目版本和打包产物中的 release metadata 为准，而不是在 README 中单独手工维护版本号。
 
 - [English README](./README.md)
 - [文档目录](./docs/README.md)
@@ -154,7 +154,7 @@ GUI / scheduler
 
 ## 当前边界
 
-- 项目刻意保持通用、开源、可复用，不会在核心代码里为 Gmail、YouTube Studio、GitHub 等站点写死专用 DOM 适配器。
+- 项目刻意保持通用、开源、可复用，不会在核心代码里为某些特定业务网站写死专用 DOM 适配器。
 - 在复杂动态前端上，最可靠的读取与验收面仍然是高层结构化路径，例如 `structured_page`、`browser_list_candidates(...)`、`browser_get_interaction_context(...)`、截图和 trace。
 - `run_script(...)` 在健康页面上仍可能合法返回 `result=null`，这应视为读回边界，而不是自动判定为页面坏了。
 - 如果任务依赖高保真结构化抽取，应优先使用默认 `official_playwright_mcp` 或显式切到 `patchright`。

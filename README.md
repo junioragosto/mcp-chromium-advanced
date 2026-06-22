@@ -6,7 +6,7 @@ MCP Chromium Advanced is a desktop GUI plus MCP service for workflows that must
 reuse a real Chromium profile with persistent login state instead of starting a
 fresh disposable automation browser every time.
 
-Current release baseline: `0.1.0`
+Release/version metadata is governed by the project version and packaged release metadata, not by separately hand-maintained README version text.
 
 - [中文说明](./README_zh.md)
 - [Documentation Index](./docs/README.md)
@@ -179,7 +179,7 @@ This is what lets engines stay independent while callers still see one coherent 
 
 ## Current Boundaries
 
-- The project intentionally stays generic and open. It does not ship site-specific DOM adapters for Gmail, YouTube Studio, GitHub, or other individual targets.
+- The project intentionally stays generic and open. It does not ship site-specific DOM adapters for individual business websites.
 - On difficult dynamic frontends, the strongest validation surface is still the higher-level structured path such as `structured_page`, `browser_list_candidates(...)`, `browser_get_interaction_context(...)`, screenshots, and traces.
 - `run_script(...)` can still legitimately return `result=null` on healthy pages. Treat that as a runtime readback boundary, not automatic proof that the page is broken.
 - If a task depends on very high-fidelity structured extraction, prefer the default `official_playwright_mcp` path or explicit `patchright`.

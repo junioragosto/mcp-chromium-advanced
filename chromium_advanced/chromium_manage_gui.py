@@ -11,7 +11,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 import time
+import webbrowser
 import urllib.request
 from typing import Dict, List, Optional
 
@@ -163,6 +165,12 @@ from chromium_advanced.gui.gui_widgets import (
 from chromium_advanced.i18n import load_language_options, load_translations
 from chromium_advanced.mcp_runtime_config import resolve_control_api_token, resolve_mcp_api_token
 from chromium_advanced.occupancy_registry import get_occupancy_events_path, list_profile_occupancy_entries, occupancy_entry_is_expired
+from chromium_advanced.update_service import (
+    build_default_update_config,
+    check_for_update,
+    normalize_update_channel,
+    should_check_now,
+)
 
 
 SYSTEM_TYPE = platform.system()
@@ -184,6 +192,8 @@ CONTROL_KEEPALIVE_REFRESH_INTERVAL_SECONDS = 10.0
 SCHEDULE_TRIGGER_WINDOW_SECONDS = 90
 UI_REFRESH_DEBOUNCE_MS = 120
 BACKGROUND_PROFILES_REFRESH_INTERVAL_SECONDS = 20.0
+UPDATE_CHECK_STARTUP_DELAY_MS = 4000
+UPDATE_CHECK_TIMER_MS = 15 * 60 * 1000
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
 MCP_WORKER_POLICY_OPTIONS = ["lazy", "sticky", "always_on"]
@@ -204,6 +214,16 @@ def append_gui_startup_diagnostic(message: str) -> None:
         pass
 
 
+def append_runtime_role_diagnostic(role: str, message: str) -> None:
+    try:
+        log_dir = get_state_storage_dir()
+        log_path = os.path.join(log_dir, f"{str(role).strip() or 'runtime'}_startup.log")
+        with open(log_path, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(f"[{now_text()}] {str(message).rstrip()}\n")
+    except Exception:
+        pass
+
+
 def fetch_mcp_status_snapshot_for_bootstrap(config: Dict) -> Dict:
     host, port = resolve_mcp_connect_host_port(config.get("mcp", {}))
     url = f"http://{host}:{int(port)}/_daemon/status"
@@ -217,6 +237,9 @@ def fetch_mcp_status_snapshot_for_bootstrap(config: Dict) -> Dict:
 def bootstrap_mcp_daemon_if_enabled() -> None:
     global BOOTSTRAP_MCP_PRELAUNCHED
     try:
+        if str(os.environ.get("CPM_DISABLE_BOOTSTRAP_DAEMON", "")).strip().lower() in {"1", "true", "yes", "on"}:
+            append_gui_startup_diagnostic("bootstrap skipped: CPM_DISABLE_BOOTSTRAP_DAEMON=1")
+            return
         config_path = get_default_config_path()
         config = load_app_config(config_path)
         settings = config.get("mcp", {}) if isinstance(config, dict) else {}
@@ -233,19 +256,22 @@ def bootstrap_mcp_daemon_if_enabled() -> None:
         except Exception as exc:
             append_gui_startup_diagnostic(f"bootstrap precheck miss: {exc}")
 
-        program = sys.executable
-        if getattr(sys, "frozen", False):
+        if bool(getattr(sys, "frozen", False)):
             program = get_frozen_companion_executable("ChromiumMcpDaemon")
-        command = [
-            program,
-            *build_mcp_process_arguments_helper(
+        else:
+            program = sys.executable
+        command = [program]
+        if not bool(getattr(sys, "frozen", False)):
+            command.append("--run-mcp-daemon")
+        command.extend(
+            build_mcp_process_arguments_helper(
                 settings,
                 config.get("control", {}),
                 config_path,
                 MCP_TRANSPORT_OPTIONS,
                 bool(getattr(sys, "frozen", False)),
-            ),
-        ]
+            )
+        )
         subprocess.Popen(
             command,
             cwd=get_runtime_launch_cwd(program),
@@ -261,7 +287,9 @@ def bootstrap_mcp_daemon_if_enabled() -> None:
 
 class ChromiumManagerWindow(QMainWindow):
     def __init__(self):
+        append_gui_startup_diagnostic("window init: before QMainWindow.__init__")
         super().__init__()
+        append_gui_startup_diagnostic("window init: after QMainWindow.__init__")
         self.config_path = get_default_config_path()
         self.config = load_app_config(self.config_path)
         self.current_language = normalize_language_code(
@@ -304,63 +332,100 @@ class ChromiumManagerWindow(QMainWindow):
         self.pending_ui_refresh_flags: Dict[str, bool] = {}
         self.keepalive_icon_refresh_scheduled = False
         self.gui_bootstrap_in_progress = True
+        self.update_last_result: Dict[str, object] = {}
         self.mcp_bootstrap_prelaunched = BOOTSTRAP_MCP_PRELAUNCHED
         self._single_instance_server: Optional[QLocalServer] = None
 
         self.ensure_mcp_api_token_persisted()
+        append_gui_startup_diagnostic("window init: ensured tokens")
         self.setWindowTitle(self.trf("window_title", version=APP_VERSION))
         bounds = self.config.get("app", {}).get("window_bounds", {})
         initial_width = max(720, int(bounds.get("width", 860) or 860))
         initial_height = max(560, int(bounds.get("height", 680) or 680))
         self.resize(initial_width, initial_height)
+        append_gui_startup_diagnostic("window init: before init_ui")
         self.init_ui()
+        append_gui_startup_diagnostic("window init: after init_ui")
         self.restore_window_bounds()
+        append_gui_startup_diagnostic("window init: after restore_window_bounds")
         self.fit_window_to_screen()
-        self.retranslate_ui()
+        append_gui_startup_diagnostic("window init: after fit_window_to_screen")
+        self.retranslate_ui(refresh_runtime=False)
+        append_gui_startup_diagnostic("window init: after retranslate_ui")
         self.setup_tray_icon()
+        append_gui_startup_diagnostic("window init: after setup_tray_icon")
         self.setup_single_instance_server()
+        append_gui_startup_diagnostic("window init: after setup_single_instance_server")
         self.refresh_app_auto_start_checkbox()
+        append_gui_startup_diagnostic("window init: after refresh_app_auto_start_checkbox")
         self.refresh_close_to_tray_checkbox()
-        self.refresh_all(initial_bootstrap=True)
+        append_gui_startup_diagnostic("window init: after refresh_close_to_tray_checkbox")
+        append_gui_startup_diagnostic("window init: skip sync refresh_all during bootstrap")
         occupancy_events_path = get_occupancy_events_path()
         if os.path.exists(occupancy_events_path):
             try:
                 self.occupancy_event_file_offset = os.path.getsize(occupancy_events_path)
             except OSError:
                 self.occupancy_event_file_offset = 0
+        append_gui_startup_diagnostic("window init: after occupancy event offset")
         self.warm_keepalive_icon_cache_async()
+        append_gui_startup_diagnostic("window init: after warm_keepalive_icon_cache_async")
         QTimer.singleShot(0, self.apply_initial_mcp_state)
+        QTimer.singleShot(0, lambda: self.refresh_all(initial_bootstrap=True))
         QTimer.singleShot(1200, self.complete_startup_refresh)
+        append_gui_startup_diagnostic("window init: after startup timers")
 
         self.scheduler_timer = QTimer(self)
         self.scheduler_timer.timeout.connect(self.on_scheduler_timer)
         self.scheduler_timer.start(SCHEDULER_POLL_MS)
+        append_gui_startup_diagnostic("window init: after scheduler_timer")
 
         self.log_flush_timer = QTimer(self)
         self.log_flush_timer.timeout.connect(self.flush_log_buffer)
         self.log_flush_timer.start(LOG_FLUSH_INTERVAL_MS)
+        append_gui_startup_diagnostic("window init: after log_flush_timer")
 
         self.mcp_watchdog_timer = QTimer(self)
         self.mcp_watchdog_timer.timeout.connect(self.on_mcp_watchdog_timer)
         self.mcp_watchdog_timer.start(MCP_WATCHDOG_INTERVAL_MS)
+        append_gui_startup_diagnostic("window init: after mcp_watchdog_timer")
 
         self.occupancy_events_timer = QTimer(self)
         self.occupancy_events_timer.timeout.connect(self.on_occupancy_events_timer)
         self.occupancy_events_timer.start(OCCUPANCY_EVENTS_POLL_MS)
+        append_gui_startup_diagnostic("window init: after occupancy_events_timer")
 
         self.window_state_timer = QTimer(self)
         self.window_state_timer.setSingleShot(True)
         self.window_state_timer.timeout.connect(self.persist_window_bounds)
+        append_gui_startup_diagnostic("window init: after window_state_timer")
 
         self.ui_refresh_timer = QTimer(self)
         self.ui_refresh_timer.setSingleShot(True)
         self.ui_refresh_timer.timeout.connect(self.flush_pending_ui_refresh)
+        append_gui_startup_diagnostic("window init: after ui_refresh_timer")
+
+        self.update_check_timer = QTimer(self)
+        self.update_check_timer.timeout.connect(self.on_update_check_timer)
+        self.update_check_timer.start(UPDATE_CHECK_TIMER_MS)
+        append_gui_startup_diagnostic("window init: after update_check_timer")
+
+        QTimer.singleShot(UPDATE_CHECK_STARTUP_DELAY_MS, self.run_startup_update_check)
+        append_gui_startup_diagnostic("window init: complete")
 
     def ensure_mcp_api_token_persisted(self):
         self.config.setdefault("mcp", {})
         self.config.setdefault("control", {})
         token = str(self.config["mcp"].get("api_token", "")).strip()
         control_token = str(self.config["control"].get("api_token", "")).strip()
+        try:
+            mcp_port = int(self.config["mcp"].get("port", 28888) or 28888)
+        except Exception:
+            mcp_port = 28888
+        try:
+            worker_port = int(self.config["mcp"].get("worker_port", 28889) or 28889)
+        except Exception:
+            worker_port = 28889
         changed = False
         if not token:
             token = resolve_mcp_api_token(self.config)
@@ -369,6 +434,12 @@ class ChromiumManagerWindow(QMainWindow):
         if not control_token:
             control_token = resolve_control_api_token(self.config)
             self.config["control"]["api_token"] = control_token
+            changed = True
+        if mcp_port <= 1024:
+            self.config["mcp"]["port"] = 28888
+            changed = True
+        if worker_port <= 1024:
+            self.config["mcp"]["worker_port"] = 28889
             changed = True
         if changed:
             self.config = save_app_config(self.config, self.config_path)
@@ -487,6 +558,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_open_config_dir.clicked.connect(self.open_config_dir)
         toolbar.addWidget(self.btn_open_config_dir)
 
+        self.btn_check_updates = QPushButton()
+        self.btn_check_updates.clicked.connect(self.check_updates_manually)
+        toolbar.addWidget(self.btn_check_updates)
+
         self.app_auto_start_checkbox = QCheckBox()
         self.app_auto_start_checkbox.stateChanged.connect(self.on_app_auto_start_changed)
         toolbar.addWidget(self.app_auto_start_checkbox)
@@ -567,6 +642,12 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_log_layout.setSpacing(10)
         self.tabs.addTab(self.mcp_log_tab, "")
 
+        self.update_tab = QWidget()
+        self.update_layout = QVBoxLayout(self.update_tab)
+        self.update_layout.setContentsMargins(12, 12, 12, 12)
+        self.update_layout.setSpacing(10)
+        self.tabs.addTab(self.update_tab, "")
+
         self.config_tab = QScrollArea()
         self.config_tab.setWidgetResizable(True)
         self.config_content = QWidget()
@@ -582,6 +663,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.build_log_tab()
         self.build_occupancy_tab()
         self.build_mcp_log_tab()
+        self.build_update_tab()
         self.build_config_tab()
         splitter.addWidget(lower_widget)
         splitter.setSizes([360, 360])
@@ -840,6 +922,61 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_log_output.document().setMaximumBlockCount(LOG_MAX_BLOCKS)
         self.mcp_log_layout.addWidget(self.mcp_log_output, 1)
 
+    def build_update_tab(self):
+        self.update_settings_group = QGroupBox()
+        self.update_settings_layout = QFormLayout(self.update_settings_group)
+
+        self.update_enabled_checkbox = QCheckBox()
+        self.update_check_on_startup_checkbox = QCheckBox()
+        self.update_channel_combo = QComboBox()
+        for channel_name in ("stable", "rc", "beta", "dev"):
+            self.update_channel_combo.addItem(channel_name, channel_name)
+        self.update_feed_url_edit = QLineEdit()
+        self.update_check_interval_spin = FocusWheelSpinBox()
+        self.update_check_interval_spin.setRange(1, 168)
+
+        self.update_settings_layout.addRow("", self.update_enabled_checkbox)
+        self.update_settings_layout.addRow("", self.update_check_on_startup_checkbox)
+        self.update_settings_layout.addRow("Channel", self.update_channel_combo)
+        self.update_settings_layout.addRow("Feed URL", self.update_feed_url_edit)
+        self.update_settings_layout.addRow("Interval (hours)", self.update_check_interval_spin)
+        self.update_layout.addWidget(self.update_settings_group)
+
+        self.update_status_group = QGroupBox()
+        self.update_status_layout = QFormLayout(self.update_status_group)
+        self.update_current_version_label = QLabel(APP_VERSION)
+        self.update_last_checked_label = QLabel("-")
+        self.update_last_status_label = QLabel("-")
+        self.update_last_available_version_label = QLabel("-")
+        self.update_last_notes_url_label = QLabel("-")
+        self.update_last_notes_url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.update_last_error_label = QLabel("-")
+        self.update_last_error_label.setWordWrap(True)
+        self.update_status_layout.addRow("Current Version", self.update_current_version_label)
+        self.update_status_layout.addRow("Last Checked", self.update_last_checked_label)
+        self.update_status_layout.addRow("Last Status", self.update_last_status_label)
+        self.update_status_layout.addRow("Available Version", self.update_last_available_version_label)
+        self.update_status_layout.addRow("Notes URL", self.update_last_notes_url_label)
+        self.update_status_layout.addRow("Last Error", self.update_last_error_label)
+        self.update_layout.addWidget(self.update_status_group)
+
+        update_button_row = QHBoxLayout()
+        self.btn_save_updates = QPushButton()
+        self.btn_save_updates.clicked.connect(self.save_update_settings)
+        self.btn_run_update_check = QPushButton()
+        self.btn_run_update_check.clicked.connect(self.check_updates_manually)
+        self.btn_open_update_notes = QPushButton()
+        self.btn_open_update_notes.clicked.connect(self.open_update_notes)
+        self.btn_skip_update_version = QPushButton()
+        self.btn_skip_update_version.clicked.connect(self.skip_current_update_version)
+        update_button_row.addWidget(self.btn_save_updates)
+        update_button_row.addWidget(self.btn_run_update_check)
+        update_button_row.addWidget(self.btn_open_update_notes)
+        update_button_row.addWidget(self.btn_skip_update_version)
+        update_button_row.addStretch()
+        self.update_layout.addLayout(update_button_row)
+        self.update_layout.addStretch()
+
     def get_config_mtime(self) -> float:
         try:
             return os.path.getmtime(self.config_path)
@@ -879,8 +1016,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.path_browse_buttons = {}
 
         fields = [
-            ("chromium_dir", self.tr("path_chromium"), "dir"),
-            ("chromedriver_path", self.tr("path_driver"), "any"),
+            ("chromium_dir", self.tr("path_chromium"), "file"),
+            ("chromedriver_path", self.tr("path_driver"), "file"),
             ("user_data_profiles_root", self.tr("path_user_data"), "dir"),
             ("mirror_user_data_root", self.tr("path_mirror_user_data"), "dir"),
             ("bookmarks_template_path", self.tr("path_bookmarks"), "file"),
@@ -1096,14 +1233,18 @@ class ChromiumManagerWindow(QMainWindow):
         if not flags:
             return
         context: Dict[str, object] = dict(self.current_ui_refresh_context) if isinstance(self.current_ui_refresh_context, dict) else {}
-        if flags.get("table") or flags.get("selected_status") or flags.get("bottom_stats") or flags.get("occupancy_tab"):
+        bootstrap_mode = bool(getattr(self, "gui_bootstrap_in_progress", False))
+        if (
+            not bootstrap_mode
+            and (flags.get("table") or flags.get("selected_status") or flags.get("bottom_stats") or flags.get("occupancy_tab"))
+        ):
             context.setdefault("control_profiles_payload", self.query_control_profiles(force=False))
             context.setdefault("keepalive_runtime", self.query_control_keepalive_runtime())
         self.current_ui_refresh_context = context
-        if flags.get("mcp_status"):
+        if flags.get("mcp_status") and not bootstrap_mode:
             self.refresh_mcp_status_ui()
             flags["bottom_stats"] = False
-        if flags.get("scheduler_status"):
+        if flags.get("scheduler_status") and not bootstrap_mode:
             self.refresh_scheduler_status()
         if flags.get("table"):
             self.refresh_table()
@@ -1149,6 +1290,26 @@ class ChromiumManagerWindow(QMainWindow):
     def build_external_profile_process_signature(self) -> str:
         process_map = self.build_external_profile_process_map()
         return self.serialize_external_profile_process_map(process_map)
+
+    def get_cached_keepalive_runtime(self) -> Dict:
+        context = self.current_ui_refresh_context if isinstance(self.current_ui_refresh_context, dict) else {}
+        runtime = context.get("keepalive_runtime")
+        if isinstance(runtime, dict):
+            return runtime
+        cached_keepalive = self.control_keepalive_cache if isinstance(self.control_keepalive_cache, dict) else {}
+        runtime = cached_keepalive.get("runtime")
+        if isinstance(runtime, dict):
+            return runtime
+        return {}
+
+    def get_cached_control_profiles_payload(self) -> Dict:
+        context = self.current_ui_refresh_context if isinstance(self.current_ui_refresh_context, dict) else {}
+        payload = context.get("control_profiles_payload")
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(self.control_profiles_cache, dict):
+            return self.control_profiles_cache
+        return {}
 
     def build_external_profile_process_map(self) -> Dict[str, List[int]]:
         # Reuse the cached control payload during steady-state refreshes; the
@@ -1227,15 +1388,18 @@ class ChromiumManagerWindow(QMainWindow):
         self.control_keepalive_cache = {}
         self.control_keepalive_last_query_at = 0.0
         self.load_app_settings_to_ui()
-        self.retranslate_ui()
-        self.refresh_keepalive_plugin_table()
-        self.refresh_occupancy_tab()
+        self.retranslate_ui(refresh_runtime=not initial_bootstrap)
+        if not initial_bootstrap:
+            self.refresh_keepalive_plugin_table()
+            self.refresh_occupancy_tab()
         self.load_keepalive_settings_to_ui()
         self.load_path_settings_to_ui()
-        self.load_mcp_settings_to_ui()
+        self.load_mcp_settings_to_ui(refresh_runtime=not initial_bootstrap)
+        self.load_update_settings_to_ui()
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
-        self.refresh_fallback_profile_occupancy_cache()
+        if not initial_bootstrap:
+            self.refresh_fallback_profile_occupancy_cache()
         if not initial_bootstrap:
             self.refresh_scheduler_status()
             self.current_ui_refresh_context = {
@@ -1259,6 +1423,7 @@ class ChromiumManagerWindow(QMainWindow):
             "keepalive_runtime": self.query_control_keepalive_runtime(),
             **(self.current_ui_refresh_context if isinstance(self.current_ui_refresh_context, dict) else {}),
         }
+        self.refresh_keepalive_plugin_table()
         self.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True, delay_ms=0)
 
     def reload_config_from_disk(self):
@@ -1383,7 +1548,9 @@ class ChromiumManagerWindow(QMainWindow):
         # This view is refreshed frequently through the generic UI refresh path.
         # Prefer the cached control snapshot unless the caller explicitly forced
         # a control refresh earlier in the same cycle.
-        profiles_payload = self.current_ui_refresh_context.get("control_profiles_payload", self.query_control_profiles(force=False))
+        profiles_payload = self.get_cached_control_profiles_payload()
+        if not profiles_payload and not self.gui_bootstrap_in_progress:
+            profiles_payload = self.query_control_profiles(force=False)
         entries = {}
         profiles = profiles_payload.get("profiles", []) if isinstance(profiles_payload.get("profiles", []), list) else []
         for item in profiles:
@@ -1393,7 +1560,7 @@ class ChromiumManagerWindow(QMainWindow):
             occupancy = item.get("occupancy", {}) if isinstance(item.get("occupancy", {}), dict) else {}
             if profile_name and occupancy:
                 entries[profile_name] = occupancy
-        events_payload = self.query_control_events(limit=80)
+        events_payload = {} if self.gui_bootstrap_in_progress else self.query_control_events(limit=80)
         recent_events = events_payload.get("events", []) if isinstance(events_payload.get("events", []), list) else []
         payload = build_occupancy_tab_payload(
             entries,
@@ -1494,7 +1661,9 @@ class ChromiumManagerWindow(QMainWindow):
 
     def update_selected_profile_status(self):
         profile = self.get_selected_profile()
-        keepalive_runtime = self.current_ui_refresh_context.get("keepalive_runtime", self.query_control_keepalive_runtime())
+        keepalive_runtime = self.get_cached_keepalive_runtime()
+        if not keepalive_runtime and not self.gui_bootstrap_in_progress:
+            keepalive_runtime = self.query_control_keepalive_runtime()
         control_profile = self.get_control_profile_entry(profile.get("profile_name", "") if profile else "")
         self.selected_profile_status.setPlainText(
             build_selected_profile_status_text(
@@ -1523,11 +1692,15 @@ class ChromiumManagerWindow(QMainWindow):
         return profile_name in selected_profiles
 
     def is_profile_keepalive_running(self, profile_name: str) -> bool:
-        runtime = self.query_control_keepalive_runtime()
+        runtime = self.get_cached_keepalive_runtime()
+        if not runtime:
+            runtime = self.query_control_keepalive_runtime()
         return self._is_profile_keepalive_running_from_runtime(profile_name, runtime)
 
     def is_single_profile_keepalive_active(self) -> bool:
-        runtime = self.query_control_keepalive_runtime()
+        runtime = self.get_cached_keepalive_runtime()
+        if not runtime:
+            runtime = self.query_control_keepalive_runtime()
         selected_profiles = [str(item).strip() for item in runtime.get("selected_profiles", []) if str(item).strip()]
         return bool(runtime.get("running", False)) and len(selected_profiles) == 1
 
@@ -1542,7 +1715,9 @@ class ChromiumManagerWindow(QMainWindow):
         return profile_name == current_profile_name or profile_name in selected_profiles
 
     def is_profile_keepalive_ui_locked(self, profile_name: str) -> bool:
-        runtime = self.query_control_keepalive_runtime()
+        runtime = self.get_cached_keepalive_runtime()
+        if not runtime:
+            runtime = self.query_control_keepalive_runtime()
         return self._is_profile_keepalive_ui_locked_from_runtime(profile_name, runtime)
 
     def status_color_for_profile(self, profile: Dict) -> Optional[QColor]:
@@ -1550,7 +1725,10 @@ class ChromiumManagerWindow(QMainWindow):
         return QColor(color_hex) if color_hex else None
 
     def create_profile_site_selector(self, profile: Dict) -> QWidget:
-        return self.create_profile_site_selector_from_runtime(profile, self.query_control_keepalive_runtime())
+        runtime = self.get_cached_keepalive_runtime()
+        if not runtime and not self.gui_bootstrap_in_progress:
+            runtime = self.query_control_keepalive_runtime()
+        return self.create_profile_site_selector_from_runtime(profile, runtime)
 
     def create_profile_site_selector_from_runtime(self, profile: Dict, keepalive_runtime: Optional[Dict] = None) -> QWidget:
         wrapper = QWidget()
@@ -1754,10 +1932,9 @@ class ChromiumManagerWindow(QMainWindow):
         self.schedule_table_refresh()
 
     def refresh_keepalive_plugin_table(self):
-        plugins_payload = self.query_control_plugins()
+        plugins_payload = {} if self.gui_bootstrap_in_progress else self.query_control_plugins()
         plugin_records = plugins_payload.get("plugins", []) if isinstance(plugins_payload.get("plugins", []), list) else []
         self.keepalive_plugin_records = plugin_records if plugin_records else get_keepalive_plugin_records(self.config)
-        keepalive_running = bool(self.query_control_keepalive_runtime().get("running", False))
         view_model = build_keepalive_plugin_table_view_model(
             self.keepalive_plugin_records,
             self.selected_plugin_site_id,
@@ -1803,9 +1980,12 @@ class ChromiumManagerWindow(QMainWindow):
 
     def on_keepalive_plugin_selection_changed(self):
         record = self.get_selected_keepalive_plugin_record()
+        keepalive_runtime = self.get_cached_keepalive_runtime()
+        if not keepalive_runtime and not self.gui_bootstrap_in_progress:
+            keepalive_runtime = self.query_control_keepalive_runtime()
         view_model = build_keepalive_plugin_selection_view_model(
             record,
-            keepalive_worker_present=bool(self.query_control_keepalive_runtime().get("running", False)),
+            keepalive_worker_present=bool(keepalive_runtime.get("running", False)),
             tr=self.tr,
         )
         self.selected_plugin_site_id = str(view_model.get("selected_plugin_site_id", "") or "")
@@ -1947,7 +2127,9 @@ class ChromiumManagerWindow(QMainWindow):
 
     def refresh_table(self):
         profiles = sorted(self.config.get("profiles", []), key=lambda item: profile_sort_key(item.get("profile_name", "")))
-        keepalive_runtime = self.query_control_keepalive_runtime()
+        keepalive_runtime = self.get_cached_keepalive_runtime()
+        if not keepalive_runtime and not self.gui_bootstrap_in_progress:
+            keepalive_runtime = self.query_control_keepalive_runtime()
         keepalive_running_globally = bool(keepalive_runtime.get("running", False))
         control_profiles = (
             self.control_profiles_cache.get("profiles", [])
@@ -2262,6 +2444,128 @@ class ChromiumManagerWindow(QMainWindow):
         self.append_log(self.tr("log_keepalive_settings_saved"))
         self.refresh_scheduler_status()
 
+    def save_update_settings(self):
+        self.config.setdefault("update", {})
+        self.config["update"]["enabled"] = self.update_enabled_checkbox.isChecked()
+        self.config["update"]["check_on_startup"] = self.update_check_on_startup_checkbox.isChecked()
+        self.config["update"]["channel"] = normalize_update_channel(self.update_channel_combo.currentData() or "stable")
+        self.config["update"]["feed_url"] = self.update_feed_url_edit.text().strip()
+        self.config["update"]["check_interval_hours"] = self.update_check_interval_spin.value()
+        self.config = save_app_config(self.config, self.config_path)
+        self.append_log(self.tr("log_update_settings_saved"))
+        self.load_update_settings_to_ui()
+
+    def _apply_update_check_result_on_ui_thread(self, *, manual: bool, result: Optional[Dict] = None, error: Optional[BaseException] = None):
+        self.config.setdefault("update", {})
+        if error is None and isinstance(result, dict):
+            self.update_last_result = result
+            self.config["update"]["last_checked_at"] = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            self.config["update"]["last_status"] = str(result.get("status", "") or "unknown")
+            self.config["update"]["last_error"] = ""
+            self.config["update"]["last_available_version"] = str(result.get("version", "") or "")
+            self.config["update"]["last_notes_url"] = str(result.get("notes_url", "") or "")
+            self.config = save_app_config(self.config, self.config_path)
+            self.load_update_settings_to_ui()
+            if bool(result.get("available", False)):
+                self.append_log(self.trf("update_status_available", version=result.get("version", "")), prefix="UPDATE")
+                if self.is_tray_available():
+                    self.tray_icon.showMessage(
+                        APP_NAME,
+                        self.trf("tray_update_available_message", version=result.get("version", "")),
+                        QSystemTrayIcon.Information,
+                        5000,
+                    )
+            elif manual:
+                self.append_log(self.tr("update_status_up_to_date"), prefix="UPDATE")
+            return
+
+        exc = error if error is not None else RuntimeError("unknown update check error")
+        self.config["update"]["last_checked_at"] = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        self.config["update"]["last_status"] = "error"
+        self.config["update"]["last_error"] = str(exc)
+        self.config = save_app_config(self.config, self.config_path)
+        self.load_update_settings_to_ui()
+        if manual:
+            QMessageBox.warning(self, self.tr("info_title"), str(exc))
+
+    def perform_update_check(self, manual: bool = False):
+        self.config.setdefault("update", {})
+        update_settings = build_default_update_config()
+        update_settings.update(self.config.get("update", {}))
+        result = check_for_update(current_version=APP_VERSION, update_config=update_settings)
+        self._apply_update_check_result_on_ui_thread(manual=manual, result=result, error=None)
+
+    def _run_update_check_in_background(self, *, manual: bool = False) -> None:
+        def _worker():
+            try:
+                update_settings = build_default_update_config()
+                update_settings.update(self.config.get("update", {}))
+                result = check_for_update(current_version=APP_VERSION, update_config=update_settings)
+                QTimer.singleShot(
+                    0,
+                    lambda result=result, manual=manual: self._apply_update_check_result_on_ui_thread(
+                        manual=manual,
+                        result=result,
+                        error=None,
+                    ),
+                )
+            except Exception as exc:
+                try:
+                    append_gui_startup_diagnostic(f"background update check failed: {exc!r}")
+                    append_gui_startup_diagnostic(traceback.format_exc())
+                except Exception:
+                    pass
+                QTimer.singleShot(
+                    0,
+                    lambda exc=exc, manual=manual: self._apply_update_check_result_on_ui_thread(
+                        manual=manual,
+                        result=None,
+                        error=exc,
+                    ),
+                )
+        threading.Thread(
+            target=_worker,
+            name="gui-update-check",
+            daemon=True,
+        ).start()
+
+    def run_startup_update_check(self):
+        update_settings = self.config.get("update", {})
+        if not isinstance(update_settings, dict):
+            return
+        if not bool(update_settings.get("enabled", True)):
+            return
+        if not bool(update_settings.get("check_on_startup", True)):
+            return
+        if not should_check_now(update_settings):
+            return
+        self._run_update_check_in_background(manual=False)
+
+    def on_update_check_timer(self):
+        if self.is_ui_interaction_busy():
+            return
+        if should_check_now(self.config.get("update", {})):
+            self._run_update_check_in_background(manual=False)
+
+    def check_updates_manually(self):
+        self.perform_update_check(manual=True)
+
+    def open_update_notes(self):
+        notes_url = str(self.config.get("update", {}).get("last_notes_url", "") or "").strip()
+        if not notes_url:
+            return
+        webbrowser.open(notes_url)
+
+    def skip_current_update_version(self):
+        version_text = str(self.config.get("update", {}).get("last_available_version", "") or "").strip()
+        if not version_text:
+            return
+        self.config.setdefault("update", {})
+        self.config["update"]["skipped_version"] = version_text
+        self.config = save_app_config(self.config, self.config_path)
+        self.load_update_settings_to_ui()
+        self.append_log(self.trf("update_status_skipped", version=version_text), prefix="UPDATE")
+
     def set_profile_keepalive_enabled(self, profile_name: str, enabled: bool):
         changed = False
         for item in self.config.get("profiles", []):
@@ -2344,6 +2648,30 @@ class ChromiumManagerWindow(QMainWindow):
         self.global_last_status.setText(keepalive.get("last_run_status", "") or "-")
         self.global_last_message.setText(keepalive.get("last_run_message", "") or "-")
 
+    def load_update_settings_to_ui(self):
+        update_settings = build_default_update_config()
+        loaded_update = self.config.get("update", {})
+        if isinstance(loaded_update, dict):
+            update_settings.update(loaded_update)
+        self.update_enabled_checkbox.setChecked(bool(update_settings.get("enabled", True)))
+        self.update_check_on_startup_checkbox.setChecked(bool(update_settings.get("check_on_startup", True)))
+        channel = normalize_update_channel(update_settings.get("channel", "stable"))
+        for index in range(self.update_channel_combo.count()):
+            if self.update_channel_combo.itemData(index) == channel:
+                self.update_channel_combo.setCurrentIndex(index)
+                break
+        self.update_feed_url_edit.setText(str(update_settings.get("feed_url", "")))
+        try:
+            self.update_check_interval_spin.setValue(max(1, int(update_settings.get("check_interval_hours", 12) or 12)))
+        except Exception:
+            self.update_check_interval_spin.setValue(12)
+        self.update_current_version_label.setText(APP_VERSION)
+        self.update_last_checked_label.setText(str(update_settings.get("last_checked_at", "") or "-"))
+        self.update_last_status_label.setText(str(update_settings.get("last_status", "") or "-"))
+        self.update_last_available_version_label.setText(str(update_settings.get("last_available_version", "") or "-"))
+        self.update_last_notes_url_label.setText(str(update_settings.get("last_notes_url", "") or "-"))
+        self.update_last_error_label.setText(str(update_settings.get("last_error", "") or "-"))
+
     def load_path_settings_to_ui(self):
         paths = self.config.get("paths", {})
         for key, line_edit in self.path_editors.items():
@@ -2424,7 +2752,12 @@ class ChromiumManagerWindow(QMainWindow):
         self.append_log(f"Concurrency mode saved: {mode_name}")
         self.refresh_mcp_status_ui()
 
-    def retranslate_ui(self):
+    def retranslate_ui(self, refresh_runtime: bool = True):
+        def _safe_set_form_label(form_layout, field, text: str):
+            label = form_layout.labelForField(field)
+            if label is not None:
+                label.setText(text)
+
         self.setWindowTitle(self.trf("window_title", version=APP_VERSION))
         self.btn_add.setText(self.tr("toolbar_add"))
         self.btn_edit.setText(self.tr("toolbar_edit"))
@@ -2434,6 +2767,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_reclaim_selected.setText(self.tr("toolbar_reclaim"))
         self.btn_keepalive_all.setText(self.tr("toolbar_keepalive_all"))
         self.btn_open_config_dir.setText(self.tr("toolbar_open_config"))
+        self.btn_check_updates.setText(self.tr("toolbar_check_updates"))
         self.app_auto_start_checkbox.setText(self.tr("toolbar_autostart"))
         self.close_to_tray_checkbox.setText(self.tr("toolbar_tray"))
         self.mcp_service_checkbox.setText(self.tr("toolbar_mcp"))
@@ -2452,6 +2786,7 @@ class ChromiumManagerWindow(QMainWindow):
         self.tabs.setTabText(self.tabs.indexOf(self.log_tab), self.tr("tab_logs"))
         self.tabs.setTabText(self.tabs.indexOf(self.occupancy_tab), self.tr("tab_occupancy"))
         self.tabs.setTabText(self.tabs.indexOf(self.mcp_log_tab), self.tr("tab_mcp_logs"))
+        self.tabs.setTabText(self.tabs.indexOf(self.update_tab), self.tr("tab_updates"))
         self.tabs.setTabText(self.tabs.indexOf(self.config_tab), self.tr("tab_config"))
         self.selected_group.setTitle(self.tr("group_selected"))
         self.settings_group.setTitle(self.tr("group_keepalive"))
@@ -2459,6 +2794,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.mcp_status_group.setTitle(self.tr("group_mcp_status"))
         self.form_group.setTitle(self.tr("group_paths"))
         self.mcp_group.setTitle(self.tr("group_mcp_config"))
+        self.update_settings_group.setTitle(self.tr("group_update_config"))
+        self.update_status_group.setTitle(self.tr("group_update_status"))
         self.bottom_status_label.setText(self.tr("bottom_ready"))
         self.refresh_bottom_stats()
 
@@ -2477,6 +2814,10 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_save_mcp.setText(self.tr("save_mcp"))
         self.btn_restart_mcp.setText(self.tr("restart_mcp"))
         self.btn_reload.setText(self.tr("reload_disk"))
+        self.btn_save_updates.setText(self.tr("save_updates"))
+        self.btn_run_update_check.setText(self.tr("toolbar_check_updates"))
+        self.btn_open_update_notes.setText(self.tr("update_open_notes"))
+        self.btn_skip_update_version.setText(self.tr("update_skip_version"))
         self.keepalive_headless.setText(self.tr("headless"))
         self.mcp_status_detail_label.setText(self.tr("mcp_detail_idle"))
         self.site_scope_hint.setText(self.tr("site_scope_hint"))
@@ -2498,32 +2839,43 @@ class ChromiumManagerWindow(QMainWindow):
             ("fingerprint_zip_path", "path_fingerprint"),
         ]
         for key, title_key in path_keys:
-            self.form_layout.labelForField(self.path_editors[key].parentWidget()).setText(self.tr(title_key))
+            _safe_set_form_label(self.form_layout, self.path_editors[key].parentWidget(), self.tr(title_key))
             self.path_browse_buttons[key].setText(self.tr("browse"))
-        self.form_layout.labelForField(self.language_combo).setText(self.tr("language"))
-        self.form_layout.labelForField(self.browser_engine_combo).setText(self.tr("browser_engine"))
-        self.form_layout.labelForField(self.concurrency_mode_combo).setText(self.tr("concurrency_mode"))
+        _safe_set_form_label(self.form_layout, self.language_combo, self.tr("language"))
+        _safe_set_form_label(self.form_layout, self.browser_engine_combo, self.tr("browser_engine"))
+        _safe_set_form_label(self.form_layout, self.concurrency_mode_combo, self.tr("concurrency_mode"))
 
-        self.settings_layout.labelForField(self.keepalive_headless).setText(self.tr("headless"))
-        self.settings_layout.labelForField(self.site_scope_hint).setText(self.tr("site_label"))
-        self.settings_layout.labelForField(self.keepalive_timeout).setText(self.tr("page_timeout"))
-        self.settings_layout.labelForField(self.keepalive_between_profiles).setText(self.tr("between_profiles"))
-        self.settings_layout.labelForField(self.keepalive_settle).setText(self.tr("settle"))
-        self.settings_layout.labelForField(self.keepalive_site_dwell).setText(self.tr("site_dwell"))
-        self.settings_layout.labelForField(self.chatgpt_prompt).setText(self.tr("chatgpt_prompt"))
-        self.settings_layout.labelForField(self.chatgpt_conversation_hint).setText(self.tr("chatgpt_hint"))
-        self.settings_layout.labelForField(self.google_query).setText(self.tr("google_query"))
-        self.settings_layout.labelForField(self.keepalive_plugin_dirs_row).setText(self.tr("keepalive_plugin_dirs"))
-        self.settings_layout.labelForField(self.schedule_time).setText(self.tr("schedule_time"))
+        _safe_set_form_label(self.settings_layout, self.keepalive_headless, self.tr("headless"))
+        _safe_set_form_label(self.settings_layout, self.site_scope_hint, self.tr("site_label"))
+        _safe_set_form_label(self.settings_layout, self.keepalive_timeout, self.tr("page_timeout"))
+        _safe_set_form_label(self.settings_layout, self.keepalive_between_profiles, self.tr("between_profiles"))
+        _safe_set_form_label(self.settings_layout, self.keepalive_settle, self.tr("settle"))
+        _safe_set_form_label(self.settings_layout, self.keepalive_site_dwell, self.tr("site_dwell"))
+        _safe_set_form_label(self.settings_layout, self.chatgpt_prompt, self.tr("chatgpt_prompt"))
+        _safe_set_form_label(self.settings_layout, self.chatgpt_conversation_hint, self.tr("chatgpt_hint"))
+        _safe_set_form_label(self.settings_layout, self.google_query, self.tr("google_query"))
+        _safe_set_form_label(self.settings_layout, self.keepalive_plugin_dirs_row, self.tr("keepalive_plugin_dirs"))
+        _safe_set_form_label(self.settings_layout, self.schedule_time, self.tr("schedule_time"))
+        _safe_set_form_label(self.update_settings_layout, self.update_enabled_checkbox, self.tr("update_enabled"))
+        _safe_set_form_label(self.update_settings_layout, self.update_check_on_startup_checkbox, self.tr("update_check_on_startup"))
+        _safe_set_form_label(self.update_settings_layout, self.update_channel_combo, self.tr("update_channel"))
+        _safe_set_form_label(self.update_settings_layout, self.update_feed_url_edit, self.tr("update_feed_url"))
+        _safe_set_form_label(self.update_settings_layout, self.update_check_interval_spin, self.tr("update_check_interval_hours"))
+        _safe_set_form_label(self.update_status_layout, self.update_current_version_label, self.tr("update_current_version"))
+        _safe_set_form_label(self.update_status_layout, self.update_last_checked_label, self.tr("update_last_checked"))
+        _safe_set_form_label(self.update_status_layout, self.update_last_status_label, self.tr("update_last_status"))
+        _safe_set_form_label(self.update_status_layout, self.update_last_available_version_label, self.tr("update_last_available_version"))
+        _safe_set_form_label(self.update_status_layout, self.update_last_notes_url_label, self.tr("update_last_notes_url"))
+        _safe_set_form_label(self.update_status_layout, self.update_last_error_label, self.tr("update_last_error"))
         self.plugin_detail_group.setTitle(self.tr("plugin_group_detail"))
         self.plugin_source_hint.setText(self.tr("plugin_source_hint"))
         self.plugin_source_editor.setPlaceholderText(self.tr("plugin_editor_placeholder"))
-        self.plugin_detail_layout.labelForField(self.plugin_detail_site_id).setText(self.tr("plugin_table_site_id"))
-        self.plugin_detail_layout.labelForField(self.plugin_detail_display_name).setText(self.tr("plugin_table_display_name"))
-        self.plugin_detail_layout.labelForField(self.plugin_detail_type).setText(self.tr("plugin_table_type"))
-        self.plugin_detail_layout.labelForField(self.plugin_detail_source).setText(self.tr("plugin_table_source"))
-        self.plugin_detail_layout.labelForField(self.plugin_detail_home_url).setText(self.tr("plugin_detail_home_url"))
-        self.plugin_detail_layout.labelForField(self.plugin_detail_icon_url).setText(self.tr("plugin_detail_icon_url"))
+        _safe_set_form_label(self.plugin_detail_layout, self.plugin_detail_site_id, self.tr("plugin_table_site_id"))
+        _safe_set_form_label(self.plugin_detail_layout, self.plugin_detail_display_name, self.tr("plugin_table_display_name"))
+        _safe_set_form_label(self.plugin_detail_layout, self.plugin_detail_type, self.tr("plugin_table_type"))
+        _safe_set_form_label(self.plugin_detail_layout, self.plugin_detail_source, self.tr("plugin_table_source"))
+        _safe_set_form_label(self.plugin_detail_layout, self.plugin_detail_home_url, self.tr("plugin_detail_home_url"))
+        _safe_set_form_label(self.plugin_detail_layout, self.plugin_detail_icon_url, self.tr("plugin_detail_icon_url"))
         self.plugin_table.setHorizontalHeaderLabels(
             [
                 self.tr("plugin_table_site_id"),
@@ -2533,38 +2885,39 @@ class ChromiumManagerWindow(QMainWindow):
             ]
         )
 
-        self.summary_layout.labelForField(self.global_last_run).setText(self.tr("last_run"))
-        self.summary_layout.labelForField(self.global_last_status).setText(self.tr("last_status"))
-        self.summary_layout.labelForField(self.global_last_message).setText(self.tr("last_message"))
-        self.summary_layout.labelForField(self.global_task_status).setText(self.tr("task_status"))
-        self.summary_layout.labelForField(self.global_task_next_run).setText(self.tr("next_run"))
-        self.summary_layout.labelForField(self.global_task_last_result).setText(self.tr("today_result"))
+        _safe_set_form_label(self.summary_layout, self.global_last_run, self.tr("last_run"))
+        _safe_set_form_label(self.summary_layout, self.global_last_status, self.tr("last_status"))
+        _safe_set_form_label(self.summary_layout, self.global_last_message, self.tr("last_message"))
+        _safe_set_form_label(self.summary_layout, self.global_task_status, self.tr("task_status"))
+        _safe_set_form_label(self.summary_layout, self.global_task_next_run, self.tr("next_run"))
+        _safe_set_form_label(self.summary_layout, self.global_task_last_result, self.tr("today_result"))
 
-        self.mcp_status_layout.labelForField(self.mcp_status_label).setText(self.tr("mcp_state"))
-        self.mcp_status_layout.labelForField(self.mcp_endpoint_label).setText(self.tr("mcp_endpoint"))
-        self.mcp_status_layout.labelForField(self.mcp_worker_endpoint_label).setText(self.tr("mcp_worker"))
-        self.mcp_status_layout.labelForField(self.mcp_default_engine_label).setText(self.tr("mcp_default_engine"))
-        self.mcp_status_layout.labelForField(self.mcp_trace_path_label).setText(self.tr("mcp_trace_path"))
-        self.mcp_status_layout.labelForField(self.mcp_status_detail_label).setText(self.tr("mcp_detail"))
+        _safe_set_form_label(self.mcp_status_layout, self.mcp_status_label, self.tr("mcp_state"))
+        _safe_set_form_label(self.mcp_status_layout, self.mcp_endpoint_label, self.tr("mcp_endpoint"))
+        _safe_set_form_label(self.mcp_status_layout, self.mcp_worker_endpoint_label, self.tr("mcp_worker"))
+        _safe_set_form_label(self.mcp_status_layout, self.mcp_default_engine_label, self.tr("mcp_default_engine"))
+        _safe_set_form_label(self.mcp_status_layout, self.mcp_trace_path_label, self.tr("mcp_trace_path"))
+        _safe_set_form_label(self.mcp_status_layout, self.mcp_status_detail_label, self.tr("mcp_detail"))
 
         self.mcp_api_token_label.setText(self.tr("mcp_api_token"))
         self.mcp_api_token_edit.setToolTip(self.tr("mcp_api_token_tooltip"))
         self.btn_regenerate_api_token.setText(self.tr("mcp_regenerate_token"))
         self._refresh_api_token_warning(self.mcp_api_token_edit.text().strip())
         self.mcp_start_minimized_checkbox.setText(self.tr("mcp_start_minimized_hint"))
-        self.mcp_layout.labelForField(self.mcp_start_minimized_checkbox).setText(self.tr("mcp_start_minimized"))
-        self.mcp_layout.labelForField(self.mcp_log_level_combo).setText(self.tr("mcp_log_level"))
+        _safe_set_form_label(self.mcp_layout, self.mcp_start_minimized_checkbox, self.tr("mcp_start_minimized"))
+        _safe_set_form_label(self.mcp_layout, self.mcp_log_level_combo, self.tr("mcp_log_level"))
         if hasattr(self, "tray_action_show") and self.tray_action_show:
             self.tray_action_show.setText(self.tr("tray_show"))
         if hasattr(self, "tray_action_hide") and self.tray_action_hide:
             self.tray_action_hide.setText(self.tr("tray_hide"))
         if hasattr(self, "tray_action_exit") and self.tray_action_exit:
             self.tray_action_exit.setText(self.tr("tray_exit"))
-        self.schedule_table_refresh()
-        self.update_selected_profile_status()
-        self.refresh_scheduler_status()
+        if refresh_runtime:
+            self.schedule_table_refresh()
+            self.update_selected_profile_status()
+            self.refresh_scheduler_status()
 
-    def load_mcp_settings_to_ui(self):
+    def load_mcp_settings_to_ui(self, refresh_runtime: bool = True):
         settings = self.config.get("mcp", {})
         transport = str(settings.get("transport", MCP_TRANSPORT_OPTIONS[0]))
         if transport not in MCP_TRANSPORT_OPTIONS:
@@ -2592,7 +2945,8 @@ class ChromiumManagerWindow(QMainWindow):
         self._refresh_api_token_warning(api_token)
         self.mcp_service_checkbox.setChecked(bool(settings.get("enabled", False)))
         self.mcp_service_checkbox.blockSignals(False)
-        self.refresh_mcp_status_ui()
+        if refresh_runtime:
+            self.refresh_mcp_status_ui()
 
     def save_path_settings(self):
         for key, line_edit in self.path_editors.items():
@@ -2871,6 +3225,8 @@ class ChromiumManagerWindow(QMainWindow):
         self.tray_action_show.triggered.connect(self.show_from_tray)
         self.tray_action_hide = self.tray_menu.addAction(self.tr("tray_hide"))
         self.tray_action_hide.triggered.connect(self.hide_to_tray)
+        self.tray_action_check_updates = self.tray_menu.addAction(self.tr("tray_check_updates"))
+        self.tray_action_check_updates.triggered.connect(self.check_updates_manually)
         self.tray_menu.addSeparator()
         self.tray_action_exit = self.tray_menu.addAction(self.tr("tray_exit"))
         self.tray_action_exit.triggered.connect(self.request_exit)
@@ -2954,10 +3310,17 @@ class ChromiumManagerWindow(QMainWindow):
 
     def request_exit(self):
         self.force_exit_requested = True
-        self.close()
         app = QApplication.instance()
+        self.hide()
+        if self.tray_icon:
+            try:
+                self.tray_icon.hide()
+            except Exception:
+                pass
         if app is not None:
             QTimer.singleShot(0, app.quit)
+        else:
+            self.close()
 
     def setup_single_instance_server(self):
         try:
@@ -3139,58 +3502,99 @@ class ChromiumManagerWindow(QMainWindow):
 
 def main():
     multiprocessing.freeze_support()
+    append_gui_startup_diagnostic("main enter")
     parser = argparse.ArgumentParser(description="Chromium profile manager")
     parser.add_argument("--start-minimized", action="store_true", help="Start minimized to tray when available.")
     parser.add_argument("--exit-existing-instance", action="store_true", help="Request an existing GUI instance to exit.")
     parser.add_argument("--run-mcp-daemon", action="store_true", help="Run the MCP daemon instead of the GUI.")
     parser.add_argument("--run-mcp-worker", action="store_true", help="Run the MCP worker instead of the GUI.")
     args, remaining = parser.parse_known_args()
+    append_gui_startup_diagnostic(f"args parsed start_minimized={args.start_minimized} exit_existing={args.exit_existing_instance} run_daemon={args.run_mcp_daemon} run_worker={args.run_mcp_worker} remaining={remaining!r}")
 
     if args.exit_existing_instance:
         from chromium_advanced.gui.gui_runtime import request_existing_instance_exit
 
+        append_gui_startup_diagnostic("exit-existing-instance branch")
         raise SystemExit(0 if request_existing_instance_exit() else 1)
 
     if args.run_mcp_daemon:
-        from chromium_advanced.mcp_daemon import main as daemon_main
+        append_runtime_role_diagnostic("daemon", f"enter remaining={remaining!r}")
+        try:
+            from chromium_advanced.mcp_daemon import main as daemon_main
 
-        sys.argv = [sys.argv[0], *remaining]
-        daemon_main()
+            sys.argv = [sys.argv[0], *remaining]
+            daemon_main()
+        except Exception as exc:
+            append_runtime_role_diagnostic("daemon", f"crash: {exc!r}")
+            append_runtime_role_diagnostic("daemon", traceback.format_exc())
+            raise
         return
 
     if args.run_mcp_worker:
-        from chromium_advanced.mcp_server import main as worker_main
+        append_runtime_role_diagnostic("worker", f"enter remaining={remaining!r}")
+        try:
+            from chromium_advanced.mcp_server import main as worker_main
 
-        sys.argv = [sys.argv[0], *remaining]
-        worker_main()
+            sys.argv = [sys.argv[0], *remaining]
+            worker_main()
+        except Exception as exc:
+            append_runtime_role_diagnostic("worker", f"crash: {exc!r}")
+            append_runtime_role_diagnostic("worker", traceback.format_exc())
+            raise
         return
 
     single_instance_guard = acquire_single_instance_guard()
     if not single_instance_guard:
+        append_gui_startup_diagnostic("single instance guard denied; notifying existing instance")
         notify_existing_instance()
         show_single_instance_message()
         raise SystemExit(0)
+    append_gui_startup_diagnostic(f"single instance guard acquired: {single_instance_guard[0] if isinstance(single_instance_guard, tuple) else single_instance_guard!r}")
 
     app = QApplication(sys.argv)
+    append_gui_startup_diagnostic("QApplication created")
     app.setQuitOnLastWindowClosed(True)
     app._single_instance_guard = single_instance_guard
     app.aboutToQuit.connect(lambda: release_single_instance_guard(getattr(app, "_single_instance_guard", None)))
     app_icon = get_app_icon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
+        append_gui_startup_diagnostic("app icon applied")
+    else:
+        append_gui_startup_diagnostic("app icon missing")
 
     bootstrap_mcp_daemon_if_enabled()
+    append_gui_startup_diagnostic("bootstrap_mcp_daemon_if_enabled finished")
 
     window = ChromiumManagerWindow()
+    append_gui_startup_diagnostic("ChromiumManagerWindow constructed")
     if not app_icon.isNull():
         window.setWindowIcon(app_icon)
     window.show()
+    append_gui_startup_diagnostic(
+        f"window shown visible={window.isVisible()} minimized={window.isMinimized()} tray={window.is_tray_available()}"
+    )
+    try:
+        append_gui_startup_diagnostic(
+            f"window geometry x={window.x()} y={window.y()} w={window.width()} h={window.height()} title={window.windowTitle()!r}"
+        )
+    except Exception as exc:
+        append_gui_startup_diagnostic(f"window geometry log failed: {exc!r}")
     if args.start_minimized:
         if window.is_tray_available():
             QTimer.singleShot(0, window.hide_to_tray)
         else:
             QTimer.singleShot(0, window.showMinimized)
-    raise SystemExit(app.exec_())
+    QTimer.singleShot(
+        1500,
+        lambda: append_gui_startup_diagnostic(
+            f"post-show state visible={window.isVisible()} minimized={window.isMinimized()} active={window.isActiveWindow()}"
+        ),
+    )
+    append_gui_startup_diagnostic("enter app.exec")
+    exit_code = app.exec_()
+    append_gui_startup_diagnostic(f"app.exec exit_code={exit_code}")
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

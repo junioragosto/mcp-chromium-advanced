@@ -31,16 +31,23 @@ The packaged application normally contains:
 
 ```text
 <install_root>\ChromiumProfileManager.exe
-<install_root>\ChromiumProfileManager\ChromiumProfileManager.exe
-<install_root>\ChromiumMcpDaemon\ChromiumMcpDaemon.exe
-<install_root>\ChromiumMcpWorker\ChromiumMcpWorker.exe
+<install_root>\ChromiumMcpDaemon.exe
+<install_root>\ChromiumMcpWorker.exe
+<install_root>\app\bin\ChromiumProfileManager\...
+<install_root>\resources\...
+<install_root>\skill_templates\...
+<install_root>\README.md
+<install_root>\README_zh.md
+<install_root>\AI_INSTALLATION_RUNBOOK.md
+<install_root>\RELEASE_README.md
+<install_root>\RELEASE_README_zh.md
 ```
 
 Windows launcher rule:
 
 - Always treat `<install_root>\ChromiumProfileManager.exe` as the user-facing entrypoint.
-- The nested `ChromiumProfileManager\ChromiumProfileManager.exe` is the real GUI runtime resolved by the root launcher.
-- Autostart should point to the root launcher, not to an old desktop path and not directly to the nested GUI runtime.
+- The same packaged GUI runtime also serves daemon and worker roles through `--run-mcp-daemon` and `--run-mcp-worker`.
+- Autostart should point to the root launcher, not to an old desktop path and not to an unpacked helper binary from a previous release layout.
 
 The default MCP service shape is:
 
@@ -224,9 +231,9 @@ Required setup flow:
 
 Important account rule:
 
-- A profile can be logged in to Google but not GitHub, or GitHub but not YouTube Studio.
+- A profile may already be logged in to one business website while remaining logged out of another.
 - The GUI `Account` label is not authoritative for every site.
-- Before a task that needs login state, verify the actual site identity in the page DOM or page text.
+- Before a task that needs login state, verify the identity of the actual target site from the page DOM or page text.
 
 ## 7. Keepalive And Mirror Refresh
 
@@ -362,6 +369,12 @@ Do not assume an engine switch affects an already running session. Close the cur
 
 Only build after source-level verification passes.
 
+The source-of-truth packaging workflow is now:
+
+- `docs/04-operations/BUILD_AND_RELEASE_PLAYBOOK.md`
+
+Use that document for version governance, release-manifest rules, local/package/release entrypoints, and acceptance criteria.
+
 If the C drive is space constrained, redirect temp directories before packaging:
 
 ```powershell
@@ -380,8 +393,11 @@ Expected output:
 
 ```text
 dist\ChromiumProfileManager.exe
-dist\ChromiumMcpDaemon\
-dist\ChromiumMcpWorker\
+dist\ChromiumMcpDaemon.exe
+dist\ChromiumMcpWorker.exe
+dist\app\bin\ChromiumProfileManager\...
+dist\resources\...
+dist\skill_templates\...
 ```
 
 Replace an installed copy:
@@ -390,9 +406,7 @@ Replace an installed copy:
 $src = (Resolve-Path 'dist').Path
 $dst = '<install_root>'
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
-Copy-Item "$src\ChromiumProfileManager.exe" "$dst\ChromiumProfileManager.exe" -Force
-robocopy "$src\ChromiumMcpDaemon" "$dst\ChromiumMcpDaemon" /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
-robocopy "$src\ChromiumMcpWorker" "$dst\ChromiumMcpWorker" /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
+Copy-Item "$src\*" $dst -Recurse -Force
 ```
 
 Post-package verification:

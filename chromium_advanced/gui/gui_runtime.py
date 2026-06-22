@@ -15,7 +15,7 @@ from PyQt5.QtCore import QLockFile, QTime
 from PyQt5.QtGui import QIcon
 from PyQt5.QtNetwork import QLocalSocket
 
-from chromium_advanced.chromium_profile_lib import APP_NAME, get_project_root, get_state_storage_dir
+from chromium_advanced.chromium_profile_lib import APP_NAME, get_packaged_app_root, get_project_root, get_state_storage_dir
 
 
 SYSTEM_TYPE = platform.system()
@@ -264,6 +264,7 @@ def get_frozen_companion_executable(stem: str) -> str:
     base_dir = os.path.dirname(os.path.abspath(sys.executable))
     parent_dir = os.path.dirname(base_dir)
     extension = ".exe" if SYSTEM_TYPE == "Windows" else ""
+    packaged_app_root = get_packaged_app_root()
     candidates = [
         os.path.join(base_dir, f"{stem}{extension}"),
         os.path.join(base_dir, stem, f"{stem}{extension}"),
@@ -272,6 +273,14 @@ def get_frozen_companion_executable(stem: str) -> str:
         os.path.join(parent_dir, stem, f"{stem}{extension}"),
         os.path.join(parent_dir, stem, stem, f"{stem}{extension}"),
     ]
+    if packaged_app_root:
+        candidates.extend(
+            [
+                os.path.join(packaged_app_root, f"{stem}{extension}"),
+                os.path.join(packaged_app_root, "bin", f"{stem}{extension}"),
+                os.path.join(packaged_app_root, stem, f"{stem}{extension}"),
+            ]
+        )
     for candidate in candidates:
         if os.path.exists(candidate):
             return candidate

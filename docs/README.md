@@ -15,6 +15,7 @@ If you are new to the project, use this order:
 3. [Architecture Guide](./02-architecture/ARCHITECTURE_GUIDE.md)
 4. [System Architecture Overview](./02-architecture/SYSTEM_ARCHITECTURE_OVERVIEW.md)
 5. [Browser Core Validation Playbook](./04-operations/BROWSER_CORE_VALIDATION_PLAYBOOK.md)
+6. [Build And Release Playbook](./04-operations/BUILD_AND_RELEASE_PLAYBOOK.md)
 
 ## 1. Getting Started
 
@@ -33,6 +34,7 @@ If you are new to the project, use this order:
 ## 4. Operations
 
 - [Browser Core Validation Playbook](./04-operations/BROWSER_CORE_VALIDATION_PLAYBOOK.md)
+- [Build And Release Playbook](./04-operations/BUILD_AND_RELEASE_PLAYBOOK.md)
 - [Runtime State Consistency Notes](./04-operations/RUNTIME_STATE_CONSISTENCY.md)
 
 ## 5. Reference

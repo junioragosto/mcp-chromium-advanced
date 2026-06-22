@@ -1,6 +1,6 @@
 ---
 name: browser-identity-mcp
-description: Use when a task needs to control a browser through an MCP service that exposes real browser profile identities, personas, browser slots, or user spaces with persistent site login state. Apply this skill across projects whenever Codex must choose or confirm an identity-bearing browser context, check service occupancy before starting work, avoid conflicting sessions, verify target-site login state when needed, and release the session when finished.
+description: Use when a task needs to control a browser through an MCP service that exposes real browser profile identities, personas, browser slots, or user spaces with persistent site login state. Apply this skill across projects whenever Codex must choose or confirm an identity-bearing browser context, check service occupancy before starting work, avoid conflicting sessions, verify target-site login state only when the task explicitly depends on it, and release the session when finished.
 ---
 
 # Browser Identity MCP
@@ -11,7 +11,7 @@ Treat browser identity as a scarce shared resource. In some projects the identit
 
 A browser profile is a persistent browser data container. It can store cookies, local storage, extensions, bookmarks, permissions, and login state for many unrelated websites. It is not the same thing as a universal website account.
 
-For the Chromium Profile Manager service, the GUI profile `Account` field is only a human-maintained profile label or note. It must not be treated as proof of the currently logged-in account on GitHub, YouTube, ChatGPT, Gmail, Google, or any other target site. The only close relationship is with Google-family workflows when the label was intentionally maintained as the Google account hint, and even then the target site must still be verified when account correctness matters.
+For the Chromium Profile Manager service, the GUI profile `Account` field is only a human-maintained profile label or note. It must not be treated as proof of the currently logged-in account on any website. The browser identity MCP is a neutral user-state container, not a site-specific integration.
 
 Always optimize for safety over convenience: if the user did not specify which identity to use, ask before taking control of a real logged-in browser context.
 
@@ -63,7 +63,8 @@ For multi-step tasks, keep one session open for the whole task. Do not repeatedl
 - Never start a new session blindly; check occupancy first.
 - If the service reports a busy state, surface that clearly to the user.
 - If the same identity is already occupied, do not steal it unless the project explicitly supports safe reuse and the user intends that reuse.
-- When the task depends on a specific website login, verify that website's actual logged-in account inside the page before doing account-sensitive work.
+- Only verify a target website's actual logged-in account when the task explicitly depends on that site's login state, account identity, membership, creator/backend permissions, or other account-sensitive state.
+- Do not do arbitrary preflight login checks against any website unless the user task actually depends on that site.
 - Always close or release the session after the task completes unless the user explicitly asks to keep it open.
 - For one task with many browser steps, prefer one `start_profile_session(...)`, many page actions, then one `close_profile_session(...)`.
 - If direct daemon HTTP verification is needed, include the configured bearer token on every request instead of assuming localhost is trusted.
@@ -93,16 +94,17 @@ Do not collapse these concepts:
 - Site account:
   the account that the current page is actually logged into for a specific website
 
-Account-sensitive tasks must verify the site account using site evidence. Examples:
+Account-sensitive tasks must verify the target site account using site evidence. This is conditional, not a default preflight. If the user task does not depend on site login state, do not navigate to unrelated sites just to "check whether this profile is logged in".
 
-- GitHub:
-  read `meta[name="user-login"]`, the account menu, or another GitHub-owned login indicator
-- Google or YouTube:
-  inspect the Google account menu, page identity metadata, or other Google-owned account indicators
-- ChatGPT or other apps:
-  inspect the app's own account menu, settings page, or authenticated API/page metadata
+When a task does depend on a site's login/account state, verify it using evidence from that same target site only.
 
 If the requested target account and the verified site account do not match, stop and report the mismatch instead of continuing with the wrong account. If the site is signed out, report that the chosen browser profile does not currently have usable login state for that site.
+
+Anti-patterns:
+
+- do not treat `online_sites` as a mandatory startup checklist
+- do not verify arbitrary websites unless the task is actually about those websites
+- do not perform login-state sampling on "reference sites" before the real user task starts
 
 ## Typical Tool Order
 

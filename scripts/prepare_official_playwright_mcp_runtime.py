@@ -13,12 +13,28 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = PROJECT_ROOT / "resources" / "runtime"
 NODE_ROOT = RUNTIME_ROOT / "node"
 OFFICIAL_ROOT = RUNTIME_ROOT / "official_playwright_mcp"
+RELEASE_MANIFEST_PATH = PROJECT_ROOT / "release-manifest.json"
 
 
 def run(command: list[str], *, cwd: Path | None = None) -> None:
     completed = subprocess.run(command, cwd=str(cwd or PROJECT_ROOT), check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"command failed: {' '.join(command)}")
+
+
+def load_release_manifest() -> dict:
+    return json.loads(RELEASE_MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def get_official_runtime_versions() -> tuple[str, str]:
+    manifest = load_release_manifest()
+    runtime = manifest.get("runtime", {})
+    official = runtime.get("official_playwright_mcp", {})
+    package_version = str(official.get("package_version", "") or "").strip()
+    sdk_version = str(official.get("sdk_version", "") or "").strip()
+    if not package_version or not sdk_version:
+        raise RuntimeError("release-manifest.json is missing official_playwright_mcp version fields")
+    return package_version, sdk_version
 
 
 def clean_dir(path: Path) -> None:
@@ -56,7 +72,7 @@ def prepare_node_runtime(source: Path) -> None:
     shutil.copytree(source, NODE_ROOT, dirs_exist_ok=True)
 
 
-def prepare_official_runtime(node_executable: Path, package_version: str) -> None:
+def prepare_official_runtime(node_executable: Path, package_version: str, sdk_version: str) -> None:
     template_bridge = OFFICIAL_ROOT / "bridge.mjs"
     bridge_text = template_bridge.read_text(encoding="utf-8") if template_bridge.exists() else ""
     clean_dir(OFFICIAL_ROOT)
@@ -68,7 +84,7 @@ def prepare_official_runtime(node_executable: Path, package_version: str) -> Non
         "version": "0.1.0",
         "type": "module",
         "dependencies": {
-            "@modelcontextprotocol/sdk": "^1.29.0",
+            "@modelcontextprotocol/sdk": sdk_version,
             "@playwright/mcp": package_version,
         },
     }
@@ -99,7 +115,7 @@ def prepare_official_runtime(node_executable: Path, package_version: str) -> Non
         raise RuntimeError(f"official_playwright_mcp runtime is incomplete after prepare: missing={missing}")
 
 
-def write_manifest(node_source: Path, package_version: str) -> None:
+def write_manifest(node_source: Path, package_version: str, sdk_version: str) -> None:
     manifest = {
         "prepared_at": subprocess.check_output(
             [sys.executable, "-c", "from datetime import datetime; print(datetime.now().isoformat())"],
@@ -107,6 +123,7 @@ def write_manifest(node_source: Path, package_version: str) -> None:
         ).strip(),
         "node_source": str(node_source),
         "package_version": package_version,
+        "sdk_version": sdk_version,
         "runtime_root": str(RUNTIME_ROOT),
     }
     (RUNTIME_ROOT / "official_playwright_mcp.runtime.json").write_text(
@@ -117,14 +134,18 @@ def write_manifest(node_source: Path, package_version: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare bundled Node.js and @playwright/mcp runtime under resources/runtime.")
-    parser.add_argument("--package-version", default="^0.0.76")
+    parser.add_argument("--package-version", default="")
+    parser.add_argument("--sdk-version", default="")
     args = parser.parse_args()
 
     node_source = detect_node_source()
     prepare_node_runtime(node_source)
     node_executable = resolve_node_executable(NODE_ROOT)
-    prepare_official_runtime(node_executable, str(args.package_version or "^0.0.76"))
-    write_manifest(node_source, str(args.package_version or "^0.0.76"))
+    manifest_package_version, manifest_sdk_version = get_official_runtime_versions()
+    package_version = str(args.package_version or manifest_package_version).strip() or manifest_package_version
+    sdk_version = str(args.sdk_version or manifest_sdk_version).strip() or manifest_sdk_version
+    prepare_official_runtime(node_executable, package_version, sdk_version)
+    write_manifest(node_source, package_version, sdk_version)
     print(str(RUNTIME_ROOT))
 
 

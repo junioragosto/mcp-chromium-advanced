@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "runtime": {
+    "node": {
+      "source": "patchright-driver",
+      "playwright_core_version": "1.60.0"
+    },
+    "official_playwright_mcp": {
+      "package_version": "0.0.76",
+      "sdk_version": "1.29.0"
+    },
+    "playwright_cli": {
+      "package_version": "0.1.13"
+    }
+  },
+  "assets": {
+    "fingerprint_extension": {
+      "source_repo": "omegaee/my-fingerprint",
+      "source_mode": "local-cache",
+      "tag_name": "local-cache",
+      "asset_name": "fingerprint-extension.zip"
+    }
+  }
+}

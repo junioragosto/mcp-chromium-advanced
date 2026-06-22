@@ -499,6 +499,19 @@ def build_default_config() -> Dict:
             "last_run_message": "",
             "last_run_profile_count": 0,
         },
+        "update": {
+            "enabled": True,
+            "check_on_startup": True,
+            "channel": "stable",
+            "feed_url": "",
+            "check_interval_hours": 12,
+            "last_checked_at": "",
+            "last_status": "idle",
+            "last_error": "",
+            "last_available_version": "",
+            "last_notes_url": "",
+            "skipped_version": "",
+        },
         "profile_plugins": {},
     }
 
@@ -567,32 +580,108 @@ def get_script_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_packaged_app_root() -> str:
+    if not getattr(sys, "frozen", False):
+        return ""
+    base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    search_roots: list[str] = []
+    current = base_dir
+    for _ in range(6):
+        if current and current not in search_roots:
+            search_roots.append(current)
+        parent = os.path.dirname(current)
+        if not parent or parent == current:
+            break
+        current = parent
+    extension = ".exe" if SYSTEM_NAME == "Windows" else ""
+    best_candidate = ""
+    best_score = 0
+    for candidate in search_roots:
+        score = 0
+        if os.path.isdir(os.path.join(candidate, "resources")):
+            score += 3
+        if os.path.isdir(os.path.join(candidate, "resources", "runtime")):
+            score += 4
+        if os.path.isdir(os.path.join(candidate, "skill_templates")):
+            score += 2
+        if os.path.isdir(os.path.join(candidate, "app", "bin")):
+            score += 3
+        if os.path.isfile(os.path.join(candidate, f"ChromiumProfileManager{extension}")):
+            score += 1
+        if os.path.isdir(os.path.join(candidate, "_internal")):
+            score -= 2
+        if score > best_score:
+            best_score = score
+            best_candidate = candidate
+    if best_score > 0 and best_candidate:
+        return os.path.abspath(best_candidate)
+    return ""
+
+
 def get_project_root() -> str:
+    packaged_app_root = get_packaged_app_root()
+    if packaged_app_root:
+        return packaged_app_root
     return os.path.abspath(os.path.join(get_script_dir(), ".."))
 
 
 def get_runtime_resource_root() -> str:
     project_root = get_project_root()
-    bundled_root = os.path.join(project_root, "resources", "runtime")
-    return bundled_root
+    candidates = [
+        os.path.join(project_root, "resources", "runtime"),
+        os.path.join(project_root, "runtime"),
+    ]
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return os.path.abspath(candidate)
+    return os.path.join(project_root, "resources", "runtime")
+
+
+def _is_path_within_root(path: str, root: str) -> bool:
+    candidate = str(path or "").strip()
+    base_root = str(root or "").strip()
+    if not candidate or not base_root:
+        return False
+    try:
+        return os.path.commonpath([os.path.abspath(candidate), os.path.abspath(base_root)]) == os.path.abspath(base_root)
+    except Exception:
+        return False
 
 
 def get_bundled_node_dir(config: Optional[Dict] = None) -> str:
+    packaged_default = os.path.join(get_runtime_resource_root(), "node")
     if isinstance(config, dict):
         normalized = normalize_config(config)
         configured = str(normalized.get("paths", {}).get("bundled_node_dir", "") or "").strip()
         if configured:
-            return os.path.abspath(os.path.expanduser(configured))
-    return os.path.join(get_runtime_resource_root(), "node")
+            expanded = os.path.abspath(os.path.expanduser(configured))
+            packaged_app_root = get_packaged_app_root()
+            if not getattr(sys, "frozen", False):
+                return expanded
+            if packaged_app_root and _is_path_within_root(expanded, packaged_app_root):
+                return expanded
+            if os.path.isdir(packaged_default):
+                return os.path.abspath(packaged_default)
+            return expanded
+    return packaged_default
 
 
 def get_bundled_playwright_mcp_dir(config: Optional[Dict] = None) -> str:
+    packaged_default = os.path.join(get_runtime_resource_root(), "official_playwright_mcp")
     if isinstance(config, dict):
         normalized = normalize_config(config)
         configured = str(normalized.get("paths", {}).get("bundled_playwright_mcp_dir", "") or "").strip()
         if configured:
-            return os.path.abspath(os.path.expanduser(configured))
-    return os.path.join(get_runtime_resource_root(), "official_playwright_mcp")
+            expanded = os.path.abspath(os.path.expanduser(configured))
+            packaged_app_root = get_packaged_app_root()
+            if not getattr(sys, "frozen", False):
+                return expanded
+            if packaged_app_root and _is_path_within_root(expanded, packaged_app_root):
+                return expanded
+            if os.path.isdir(packaged_default):
+                return os.path.abspath(packaged_default)
+            return expanded
+    return packaged_default
 
 
 def resolve_bundled_node_executable(config: Optional[Dict] = None) -> str:
@@ -603,6 +692,18 @@ def resolve_bundled_node_executable(config: Optional[Dict] = None) -> str:
     else:
         candidates.append(os.path.join(node_dir, "bin", "node"))
         candidates.append(os.path.join(node_dir, "node"))
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return ""
+
+
+def resolve_bundled_playwright_cli_entrypoint(config: Optional[Dict] = None) -> str:
+    node_dir = get_bundled_node_dir(config)
+    candidates = [
+        os.path.join(node_dir, "package", "cli.js"),
+        os.path.join(node_dir, "node_modules", "playwright-core", "cli.js"),
+    ]
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
             return os.path.abspath(candidate)
@@ -1615,6 +1716,29 @@ def normalize_config(config: Optional[Dict]) -> Dict:
         ):
             if key in loaded_mirror:
                 normalized["mirror"][key] = loaded_mirror[key]
+
+    loaded_update = loaded.get("update", {})
+    if isinstance(loaded_update, dict):
+        for key in (
+            "enabled",
+            "check_on_startup",
+        ):
+            if key in loaded_update:
+                normalized["update"][key] = bool(loaded_update.get(key))
+        for key in (
+            "channel",
+            "feed_url",
+            "last_checked_at",
+            "last_status",
+            "last_error",
+            "last_available_version",
+            "last_notes_url",
+            "skipped_version",
+        ):
+            if key in loaded_update and loaded_update.get(key) is not None:
+                normalized["update"][key] = str(loaded_update.get(key)).strip()
+        if "check_interval_hours" in loaded_update:
+            normalized["update"]["check_interval_hours"] = loaded_update.get("check_interval_hours")
 
     profiles = loaded.get("profiles", [])
     if isinstance(profiles, list):

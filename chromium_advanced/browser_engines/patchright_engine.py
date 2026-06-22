@@ -14,6 +14,8 @@ from chromium_advanced.browser_capability_kernel import enrich_capability_payloa
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
 from chromium_advanced.browser_engines import patchright_tabs_pages
 from chromium_advanced.chromium_profile_lib import (
+    resolve_bundled_node_executable,
+    resolve_bundled_playwright_cli_entrypoint,
     get_chromium_restore_prompt_suppression_args,
     get_profile_user_data_root,
     now_text,
@@ -51,8 +53,18 @@ def _safe_log(text: str) -> None:
 def _load_patchright():
     try:
         from patchright.sync_api import sync_playwright
+        from patchright._impl import _driver as patchright_driver
     except ImportError as exc:
         raise RuntimeError("Patchright is not installed. Install it with: pip install patchright") from exc
+    bundled_node = resolve_bundled_node_executable()
+    bundled_cli = resolve_bundled_playwright_cli_entrypoint()
+    if bundled_node:
+        os.environ["PLAYWRIGHT_NODEJS_PATH"] = bundled_node
+    if bundled_node and bundled_cli:
+        def _shared_compute_driver_executable():
+            return bundled_node, bundled_cli
+
+        patchright_driver.compute_driver_executable = _shared_compute_driver_executable
     return sync_playwright
 
 

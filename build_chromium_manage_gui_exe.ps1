@@ -148,3 +148,41 @@ Invoke-ExternalChecked -StepName "Build ChromiumMcpWorker" -Command {
 }
 
 Copy-BuildOutput -SourcePath $stageDistRoot -DestinationPath $finalDistRoot
+
+$releaseDocEnPath = Join-Path $projectRoot "docs\05-reference\RELEASE_README.md"
+$releaseDocZhPath = Join-Path $projectRoot "docs\05-reference\RELEASE_README_zh.md"
+$aiRunbookPath = Join-Path $projectRoot "docs\01-getting-started\AI_INSTALLATION_RUNBOOK.md"
+$skillTemplatesSource = Join-Path $projectRoot "docs\skill_templates"
+$releaseManifestPath = Join-Path $projectRoot "release-manifest.json"
+$exampleConfigPath = Join-Path $projectRoot "chromium_profiles.example.json"
+$readmeEnPath = Join-Path $projectRoot "README.md"
+$readmeZhPath = Join-Path $projectRoot "README_zh.md"
+$resourcesSource = Join-Path $projectRoot "resources"
+
+if (Test-Path $releaseDocEnPath) {
+    Copy-Item -Force $releaseDocEnPath (Join-Path $finalDistRoot "RELEASE_README.md")
+}
+if (Test-Path $releaseDocZhPath) {
+    Copy-Item -Force $releaseDocZhPath (Join-Path $finalDistRoot "RELEASE_README_zh.md")
+}
+if (Test-Path $aiRunbookPath) {
+    Copy-Item -Force $aiRunbookPath (Join-Path $finalDistRoot "AI_INSTALLATION_RUNBOOK.md")
+}
+if (Test-Path $releaseManifestPath) {
+    Copy-Item -Force $releaseManifestPath (Join-Path $finalDistRoot "release-manifest.json")
+}
+if (Test-Path $exampleConfigPath) {
+    Copy-Item -Force $exampleConfigPath (Join-Path $finalDistRoot "chromium_profiles.example.json")
+}
+if (Test-Path $readmeEnPath) {
+    Copy-Item -Force $readmeEnPath (Join-Path $finalDistRoot "README.md")
+}
+if (Test-Path $readmeZhPath) {
+    Copy-Item -Force $readmeZhPath (Join-Path $finalDistRoot "README_zh.md")
+}
+if (Test-Path $skillTemplatesSource) {
+    Copy-BuildOutput -SourcePath $skillTemplatesSource -DestinationPath (Join-Path $finalDistRoot "skill_templates")
+}
+if (Test-Path $resourcesSource) {
+    Copy-BuildOutput -SourcePath $resourcesSource -DestinationPath (Join-Path $finalDistRoot "resources")
+}

@@ -63,7 +63,8 @@ Each release artifact must:
 - local:
   `python scripts/build_release.py --artifact-name <artifact-name>`
 - CI:
-  `.github/workflows/build-release.yml`
+  `.github/workflows/release-candidate.yml`
+  `.github/workflows/release-publish.yml`
 
 ## Future Upgrade Path
 

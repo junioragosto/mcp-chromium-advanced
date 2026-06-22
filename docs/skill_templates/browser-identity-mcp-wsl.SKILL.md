@@ -9,7 +9,7 @@ description: Use when a task needs to access a Windows-hosted browser MCP servic
 
 When a browser MCP service runs on Windows and the caller runs inside WSL, do not assume `127.0.0.1` works. WSL often needs the Windows host IP instead.
 
-Use this skill only for the WSL-to-Windows access layer. The normal identity, occupancy, and target-site account verification rules from the main browser identity MCP workflow still apply.
+Use this skill only for the WSL-to-Windows access layer. The normal identity, occupancy, and conditional target-site account verification rules from the main browser identity MCP workflow still apply.
 
 For the Chromium Profile Manager service on this machine:
 
@@ -285,7 +285,7 @@ HTTP error responses such as `400` or `405` can still mean the service is reacha
 - If auth is enabled on Windows, include the bearer token on every WSL-side connectivity check and MCP request.
 - Do not assume the MCP token can call control routes. `/_control/*` operations require the control token when the daemon is configured with one.
 - After connectivity is confirmed, follow the same identity confirmation and occupancy rules as the normal browser identity MCP workflow.
-- After connectivity is confirmed, do not infer a target website account from the GUI profile account label; verify the actual site login inside the target website when account correctness matters.
+- After connectivity is confirmed, do not infer a target website account from the GUI profile account label; verify the actual site login inside the target website only when the user task explicitly depends on that site's account correctness.
 - After connectivity is confirmed, prefer MCP debug tools such as `browser_get_console_messages`, `browser_get_page_errors`, `browser_get_network_requests`, `browser_diagnose_page`, `browser_get_action_trace`, and `get_mcp_tool_trace` over screenshot-only diagnosis.
 - After connectivity is confirmed, prefer `session_health.recovery_actions`, `session_health.page_drift`, and `resolution_trace` over ad-hoc retries when a dynamic page fails under WSL.
 - The Windows MCP server publishes standard tool annotations, treating normal profile/session operations, navigation, tab operations, browser actions, screenshots, diagnostics, and cleanup as trusted low-risk.

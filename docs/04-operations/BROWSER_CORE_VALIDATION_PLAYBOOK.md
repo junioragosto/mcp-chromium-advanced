@@ -152,7 +152,7 @@
 
 ## 复杂页面读取验证指导
 
-对于 Gmail、YouTube Studio、GitHub 这类复杂页面：
+对于复杂动态页面、重前端页面或 shadow-heavy 页面：
 
 - 优先看 `structured_page`
 - 优先看 `browser_get_interaction_context(...)`

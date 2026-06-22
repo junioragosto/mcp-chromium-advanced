@@ -76,7 +76,7 @@ Example body:
 {
   "profile_name": "Profile 4",
   "engine": "selenium_uc",
-  "owner_label": "gmail_batch_job",
+  "owner_label": "automation_job",
   "reuse_existing": true,
   "heartbeat_timeout_seconds": 180,
   "runtime_options": {
@@ -148,10 +148,10 @@ Example body:
 ```json
 {
   "session_id": "session-xxxx",
-  "owner_label": "gmail_batch_job",
+  "owner_label": "automation_job",
   "action": "navigate",
   "args": {
-    "url": "https://mail.google.com/",
+    "url": "https://example.com/",
     "wait_for_ready": true,
     "timeout_seconds": 30
   }
@@ -196,7 +196,7 @@ Typical failures:
 ```json
 {
   "session_id": "session-xxxx",
-  "owner_label": "gmail_batch_job",
+  "owner_label": "automation_job",
   "action": "run_script_batch",
   "args": {
     "tab_id": "",
@@ -227,7 +227,7 @@ Example body:
   "session_id": "session-xxxx",
   "profile_name": "Profile 4",
   "engine_name": "selenium_uc",
-  "owner_label": "gmail_batch_job",
+  "owner_label": "automation_job",
   "owner_pid": 12345,
   "heartbeat_timeout_seconds": 180,
   "details": {
@@ -290,13 +290,14 @@ Practical selection pattern:
 
 1. `GET /_daemon/profiles`
 2. keep only profiles with `busy_state=idle`
-3. keep only profiles whose `online_sites` contains the required site ids
+3. if the business flow explicitly depends on known target-site login state, optionally keep only profiles whose `online_sites` contains the required site ids
 4. acquire the selected profile through `/_daemon/automation/acquire`
 
 Important access rule:
 
 - reading status/profile state uses the business token
 - force reclaim uses the admin token
+- `online_sites` and related arrays are optional keepalive-derived hints for caller-side filtering, not mandatory preflight checks enforced by the daemon
 
 ## Runtime Options
 
@@ -350,9 +351,9 @@ Latest validation status on the current code line:
 
 - isolated daemon regression on `127.0.0.1:38888` with `playwright_cli` passed
 - five consecutive rounds of
-  `acquire -> get_summary -> navigate(https://github.com/) -> run_script(meta[name="user-login"]) -> release`
-  completed successfully on `Profile 1`
-- GitHub login extraction returned `junioragosto` during validation
+  `acquire -> get_summary -> navigate(target_url) -> run_script(target_page_probe) -> release`
+  completed successfully on the validation profile
+- target-site identity extraction succeeded during validation when the current task required it
 
 Important validation rule:
 

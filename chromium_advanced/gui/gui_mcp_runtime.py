@@ -14,6 +14,7 @@ from chromium_advanced.browser_engines.factory import normalize_browser_engine_n
 from chromium_advanced.chromium_profile_lib import (
     get_hidden_subprocess_kwargs,
     get_runtime_launch_cwd,
+    get_state_storage_dir,
     save_app_config,
 )
 from chromium_advanced.gui.gui_runtime import (
@@ -43,6 +44,15 @@ def _safe_attr(window, name: str, default):
         return object.__getattribute__(window, name)
     except Exception:
         return default
+
+
+def _append_debug_log(filename: str, message: str) -> None:
+    try:
+        path = os.path.join(get_state_storage_dir(), filename)
+        with open(path, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(f"{message.rstrip()}\n")
+    except Exception:
+        pass
 
 
 def _fetch_json(window, *args, **kwargs):
@@ -513,11 +523,19 @@ def start_mcp_service(window):
         window.mcp_status_consecutive_failures = 0
     window.mcp_startup_deadline = plan.get("startup_deadline")
     window.append_mcp_log(str(plan.get("prepare_log", "")))
-    program = sys.executable
-    if getattr(sys, "frozen", False):
+    if bool(getattr(sys, "frozen", False)):
         program = get_frozen_companion_executable("ChromiumMcpDaemon")
-    command = [program, *build_mcp_process_arguments(window)]
+    else:
+        program = sys.executable
+    command = [program]
+    if not bool(getattr(sys, "frozen", False)):
+        command.append("--run-mcp-daemon")
+    command.extend(build_mcp_process_arguments(window))
     try:
+        _append_debug_log(
+            "mcp_spawn_debug.log",
+            f"start_mcp_service program={program} cwd={get_runtime_launch_cwd(program)} command={command!r}",
+        )
         process = subprocess.Popen(
             command,
             cwd=get_runtime_launch_cwd(program),
@@ -526,7 +544,15 @@ def start_mcp_service(window):
             **get_hidden_subprocess_kwargs(),
         )
         window.mcp_launch_pid = int(process.pid or 0)
+        _append_debug_log(
+            "mcp_spawn_debug.log",
+            f"start_mcp_service spawned pid={window.mcp_launch_pid}",
+        )
     except Exception as exc:
+        _append_debug_log(
+            "mcp_spawn_debug.log",
+            f"start_mcp_service spawn failed: {exc!r}",
+        )
         failure_plan = build_mcp_startup_failure_plan(error=exc, trf=window.trf)
         window.mcp_startup_in_progress = bool(failure_plan.get("startup_in_progress", False))
         window.mcp_startup_deadline = failure_plan.get("startup_deadline")

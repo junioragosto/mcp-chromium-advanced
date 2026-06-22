@@ -3,7 +3,7 @@
 This project supports a lightweight keepalive plugin runtime for adding new
 site-specific keepalive logic without rebuilding the packaged application.
 
-中文说明：保活站点已经按插件化方向设计。内置站点包括 `chatgpt`、`google`、`gmail`、`github`；未来新增 YouTube、YouTube Studio 或其他站点时，可以把 Python 插件放到插件目录，让 GUI 和保活任务自动发现。
+中文说明：保活站点已经按插件化方向设计。这里提到的站点名称只属于“保活插件示例/内置插件”范围，不代表 MCP 默认业务站点，也不代表调用方必须检查这些站点。未来新增其他站点时，可以把 Python 插件放到插件目录，让 GUI 和保活任务自动发现。
 
 ## Plugin Directory
 
