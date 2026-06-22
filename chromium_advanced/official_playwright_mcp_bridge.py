@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import queue
 import subprocess
 import tempfile
 import threading
@@ -48,6 +49,8 @@ class OfficialPlaywrightMcpBridge:
         self._payload_path = os.path.join(tempfile.gettempdir(), f"official-playwright-mcp-bootstrap-{uuid.uuid4().hex}.json")
         self._process: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
+        self._response_queue: "queue.Queue[object]" = queue.Queue()
+        self._stdout_thread: threading.Thread | None = None
         self._start_process()
 
     def _start_process(self) -> None:
@@ -74,6 +77,8 @@ class OfficialPlaywrightMcpBridge:
             cwd=self.runtime_dir,
             **_hidden_kwargs(),
         )
+        self._stdout_thread = threading.Thread(target=self._stdout_reader_loop, name="official-playwright-mcp-stdout", daemon=True)
+        self._stdout_thread.start()
         ready = self._read_response(timeout_seconds=120)
         if not ready.get("ok") or ready.get("event") != "ready":
             self._terminate_process()
@@ -83,28 +88,33 @@ class OfficialPlaywrightMcpBridge:
         except Exception:
             pass
 
+    def _stdout_reader_loop(self) -> None:
+        process = self._process
+        if not process or not process.stdout:
+            self._response_queue.put(RuntimeError("official_playwright_mcp bridge is not running"))
+            return
+        try:
+            for raw_line in process.stdout:
+                self._response_queue.put(raw_line)
+        except BaseException as exc:  # pragma: no cover
+            self._response_queue.put(exc)
+        finally:
+            self._response_queue.put(None)
+
     def _read_response(self, *, timeout_seconds: int) -> Dict[str, Any]:
-        if not self._process or not self._process.stdout:
+        if not self._process:
             raise RuntimeError("official_playwright_mcp bridge is not running")
-        queue: list[str] = []
-        error_holder: list[BaseException] = []
-
-        def _reader() -> None:
-            try:
-                line = self._process.stdout.readline()
-                queue.append(line)
-            except BaseException as exc:  # pragma: no cover
-                error_holder.append(exc)
-
-        thread = threading.Thread(target=_reader, daemon=True)
-        thread.start()
-        thread.join(timeout_seconds)
-        if thread.is_alive():
+        try:
+            item = self._response_queue.get(timeout=timeout_seconds)
+        except queue.Empty:
             self._terminate_process()
             raise TimeoutError("official_playwright_mcp bridge response timed out")
-        if error_holder:
-            raise RuntimeError(str(error_holder[0]))
-        raw = "".join(queue).strip()
+        if isinstance(item, BaseException):
+            raise RuntimeError(str(item))
+        if item is None:
+            raw = ""
+        else:
+            raw = str(item or "").strip()
         if not raw:
             stderr = ""
             if self._process.stderr:
@@ -136,6 +146,7 @@ class OfficialPlaywrightMcpBridge:
             os.remove(self._payload_path)
         except OSError:
             pass
+        self._stdout_thread = None
 
     def _run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:

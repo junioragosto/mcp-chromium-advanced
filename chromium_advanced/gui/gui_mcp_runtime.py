@@ -379,9 +379,19 @@ def maybe_refresh_profiles_in_background(window, *, force: bool = False) -> None
     window.background_profiles_refresh_last_at = now_ts
     if not isinstance(payload, dict) or not payload:
         return
+    keepalive_runtime = None
+    cached_context = getattr(window, "current_ui_refresh_context", {}) if isinstance(getattr(window, "current_ui_refresh_context", {}), dict) else {}
+    if force:
+        keepalive_runtime = query_control_keepalive_runtime(window)
+    else:
+        keepalive_runtime = cached_context.get("keepalive_runtime")
+        if not isinstance(keepalive_runtime, dict):
+            keepalive_runtime = window.control_keepalive_cache.get("runtime", {}) if isinstance(window.control_keepalive_cache, dict) else {}
+        if not isinstance(keepalive_runtime, dict) or not keepalive_runtime:
+            keepalive_runtime = query_control_keepalive_runtime(window)
     window.current_ui_refresh_context = {
         "control_profiles_payload": payload,
-        "keepalive_runtime": query_control_keepalive_runtime(window),
+        "keepalive_runtime": keepalive_runtime,
     }
     window.refresh_external_profile_process_state()
     window.request_ui_refresh(table=True, selected_status=True, bottom_stats=True, occupancy_tab=True)
