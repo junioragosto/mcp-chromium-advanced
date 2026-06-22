@@ -137,6 +137,8 @@ class SessionManager:
     SESSION_ALIVE_PROBE_GRACE_SECONDS = 20.0
     SESSION_ALIVE_MAX_CONSECUTIVE_FAILURES = 3
     EXTERNAL_BUSY_CACHE_TTL_SECONDS = 5.0
+    EXTERNAL_BUSY_HEAVY_CACHE_TTL_SECONDS = 5.0
+    EXTERNAL_BUSY_LIGHT_CACHE_TTL_SECONDS = 12.0
     STARTING_PROFILE_STALE_SECONDS = 120.0
 
     def __init__(self, config_path: Optional[str] = None, config_override: Optional[Dict] = None):
@@ -148,6 +150,8 @@ class SessionManager:
         self._starting_profiles: Dict[str, float] = {}
         self._external_busy_cache: Dict = {}
         self._external_busy_cache_at = 0.0
+        self._external_busy_light_cache: Dict = {}
+        self._external_busy_light_cache_at = 0.0
         self._status_snapshot_cache: Dict[str, Dict] = {}
         self._status_snapshot_cache_at: Dict[str, float] = {}
         self._status_snapshot_cache_ttl_seconds = 2.0
@@ -168,6 +172,10 @@ class SessionManager:
         with self._lock:
             self._status_snapshot_cache.clear()
             self._status_snapshot_cache_at.clear()
+            self._external_busy_cache = {}
+            self._external_busy_cache_at = 0.0
+            self._external_busy_light_cache = {}
+            self._external_busy_light_cache_at = 0.0
             if profile_name:
                 self._status_snapshot_cache.pop(profile_name, None)
                 self._status_snapshot_cache_at.pop(profile_name, None)
@@ -631,12 +639,16 @@ class SessionManager:
     def _isolated_sessions_locked(self) -> List[SessionRecord]:
         return [session for session in self._sessions_by_id.values() if session.runtime_mode == "isolated_runtime"]
 
-    def _get_external_busy_details(self, config: Optional[Dict] = None) -> Dict:
+    def _get_external_busy_details(self, config: Optional[Dict] = None, *, heavy: bool = True) -> Dict:
         config = normalize_config(config or self._load_config())
         now_ts = time.time()
         with self._lock:
-            if self._external_busy_cache and (now_ts - self._external_busy_cache_at) < self.EXTERNAL_BUSY_CACHE_TTL_SECONDS:
-                return dict(self._external_busy_cache)
+            if heavy:
+                if self._external_busy_cache and (now_ts - self._external_busy_cache_at) < self.EXTERNAL_BUSY_HEAVY_CACHE_TTL_SECONDS:
+                    return dict(self._external_busy_cache)
+            else:
+                if self._external_busy_light_cache and (now_ts - self._external_busy_light_cache_at) < self.EXTERNAL_BUSY_LIGHT_CACHE_TTL_SECONDS:
+                    return dict(self._external_busy_light_cache)
         scan_started = time.perf_counter()
         scanned_processes = find_running_chromium_processes(config)
         running_processes = [item for item in scanned_processes if not bool(item.get("noise_only", False))]
@@ -653,6 +665,12 @@ class SessionManager:
         with self._lock:
             self._external_busy_cache = dict(details)
             self._external_busy_cache_at = now_ts
+            if not heavy:
+                self._external_busy_light_cache = dict(details)
+                self._external_busy_light_cache_at = now_ts
+            else:
+                self._external_busy_light_cache = dict(details)
+                self._external_busy_light_cache_at = now_ts
         return details
 
     @staticmethod
@@ -958,6 +976,7 @@ class SessionManager:
         *,
         include_external_processes: bool = True,
         include_mirror_status: bool = True,
+        external_process_scan_mode: str = "heavy",
     ) -> Dict:
         config = normalize_config(self._load_config())
         concurrency_mode = str(config.get("app", {}).get("concurrency_mode", "per_profile_live") or "per_profile_live")
@@ -984,7 +1003,10 @@ class SessionManager:
             isolated_session_count = sum(1 for session in active_session_view if session.runtime_mode == "isolated_runtime")
             active_profile_names = {str(session.profile_name).strip() for session in active_session_view if str(session.profile_name).strip()}
         if include_external_processes:
-            external_busy = self._get_external_busy_details(config)
+            external_busy = self._get_external_busy_details(
+                config,
+                heavy=str(external_process_scan_mode or "heavy").strip().lower() != "light",
+            )
             running_processes = external_busy.get("running_processes", [])
             running_process_payload = self._compact_running_process_payload(running_processes)
             keepalive_lock_active = bool(external_busy.get("keepalive_lock_active"))
@@ -1052,6 +1074,15 @@ class SessionManager:
         }
 
     def get_server_status(self) -> Dict:
+        return self.get_server_status_with_options()
+
+    def get_server_status_with_options(
+        self,
+        *,
+        include_external_processes: bool = True,
+        include_mirror_status: bool = True,
+        external_process_scan_mode: str = "light",
+    ) -> Dict:
         config = normalize_config(self._load_config())
         self.reconcile_stale_profile_occupancy()
         self.reap_expired_profile_occupancy()
@@ -1067,13 +1098,23 @@ class SessionManager:
             isolated_sessions = [session.to_summary(refresh=False) for session in active_session_view if session.runtime_mode == "isolated_runtime"]
             active_profile_names = {str(session.profile_name).strip() for session in active_session_view if str(session.profile_name).strip()}
 
-        external_busy = self._get_external_busy_details(config)
-        running_processes = external_busy.get("running_processes", [])
-        running_process_payload = self._compact_running_process_payload(running_processes)
-        keepalive_lock_active = bool(external_busy.get("keepalive_lock_active"))
-        mirror_lock_active = bool(external_busy.get("mirror_lock_active"))
-        external_scan_ms = int(external_busy.get("external_scan_ms", 0) or 0)
-        mirror_status = self._build_mirror_status(config)
+        if include_external_processes:
+            external_busy = self._get_external_busy_details(
+                config,
+                heavy=str(external_process_scan_mode or "light").strip().lower() != "light",
+            )
+            running_processes = external_busy.get("running_processes", [])
+            running_process_payload = self._compact_running_process_payload(running_processes)
+            keepalive_lock_active = bool(external_busy.get("keepalive_lock_active"))
+            mirror_lock_active = bool(external_busy.get("mirror_lock_active"))
+            external_scan_ms = int(external_busy.get("external_scan_ms", 0) or 0)
+        else:
+            running_processes = []
+            running_process_payload = self._compact_running_process_payload([])
+            keepalive_lock_active = bool(os.path.exists(get_lock_path()))
+            mirror_lock_active = bool(os.path.exists(get_mirror_lock_path()))
+            external_scan_ms = 0
+        mirror_status = self._build_mirror_status(config) if include_mirror_status else {}
 
         base = {
             "default_engine_name": default_engine_name,

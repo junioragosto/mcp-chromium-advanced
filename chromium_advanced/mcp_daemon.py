@@ -322,7 +322,7 @@ def _call_with_optional_runtime_flags(target, method_name: str, **kwargs):
     except TypeError as exc:
         filtered = dict(kwargs)
         changed = False
-        for key in ("include_external_processes", "include_mirror_status"):
+        for key in ("include_external_processes", "include_mirror_status", "external_process_scan_mode"):
             if key in filtered:
                 filtered.pop(key, None)
                 changed = True
@@ -850,10 +850,13 @@ def create_daemon_app(
         ):
             cached_payload = runtime_status_cache.get("payload", {})
             return dict(cached_payload) if isinstance(cached_payload, dict) else {}
-        if hasattr(session_manager, "get_server_status"):
+        if hasattr(session_manager, "get_server_status_with_options"):
             payload = _call_with_optional_runtime_flags(
                 session_manager,
-                "get_server_status",
+                "get_server_status_with_options",
+                include_external_processes=include_external_processes,
+                include_mirror_status=include_mirror_status,
+                external_process_scan_mode="light",
             )
         else:
             payload = _call_with_optional_runtime_flags(
@@ -861,6 +864,7 @@ def create_daemon_app(
                 "get_runtime_status_snapshot",
                 include_external_processes=include_external_processes,
                 include_mirror_status=include_mirror_status,
+                external_process_scan_mode="light",
             )
         if not include_external_processes and isinstance(payload, dict):
             payload = dict(payload)
@@ -1518,7 +1522,11 @@ def create_daemon_app(
                 "daemon_pid": daemon_pid,
                 "daemon_instance_id": daemon_instance_id,
                 "daemon_ready": _daemon_ready(),
-                "profiles": session_manager.list_profiles(reconcile_occupancy=False),
+                "profiles": session_manager.list_profiles(
+                    reconcile_occupancy=False,
+                    include_external_processes=False,
+                    include_mirror_validation=False,
+                ),
                 "events": session_manager.list_recent_occupancy_events(limit=50),
                 "status_build_ms": int((time.perf_counter() - started_at) * 1000),
             }
