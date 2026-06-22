@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
+from chromium_advanced.browser_capability_kernel import enrich_capability_payload
 from chromium_advanced.chromium_profile_lib import (
     get_profile_directory_path,
     get_profile_user_data_root,
@@ -126,7 +127,7 @@ class OfficialPlaywrightMcpBrowserSession(BrowserSession):
         )
 
     def get_capabilities(self) -> Dict:
-        return self._call("get_capabilities")
+        return enrich_capability_payload(self._call("get_capabilities"))
 
     def list_tabs(self) -> Dict:
         return self._call("list_tabs")
@@ -168,23 +169,16 @@ class OfficialPlaywrightMcpBrowserSession(BrowserSession):
         return self._call("get_page_html", tab_id=tab_id)
 
     def inspect_elements(self, selector: str, by: str = "css", limit: int = 10, tab_id: str = "") -> Dict:
-        result = self.run_script(
-            f"""() => Array.from(document.querySelectorAll({json.dumps(str(selector or ""))}))
-                .slice(0, {max(1, int(limit or 10))})
-                .map((el, index) => {{
-                    const rect = el.getBoundingClientRect();
-                    return {{
-                        index,
-                        tag_name: String(el.tagName || '').toLowerCase(),
-                        text: String(el.innerText || el.textContent || '').trim(),
-                        visible: !!(rect.width || rect.height),
-                        id: String(el.id || ''),
-                        class_name: String(el.className || ''),
-                    }};
-                }})"""
-        )
-        matches = result.get("result", []) if isinstance(result.get("result"), list) else []
-        return {"selector": str(selector or ""), "by": str(by or "css"), "matches": matches, **self.get_current_url(tab_id=tab_id)}
+        page = self._call("get_page_context_bundle", selector=selector, limit=max(1, int(limit or 10)), tab_id=tab_id)
+        return {
+            "selector": str(selector or ""),
+            "by": str(by or "css"),
+            "matches": list(page.get("inspect_matches", []) or []),
+            "url": str(page.get("url", "") or ""),
+            "title": str(page.get("title", "") or ""),
+            "tab_id": str(page.get("tab_id", "") or ""),
+            "alive": bool(page.get("alive", True)),
+        }
 
     def get_active_element(self, tab_id: str = "") -> Dict:
         return self.run_script(
@@ -208,29 +202,27 @@ class OfficialPlaywrightMcpBrowserSession(BrowserSession):
         return self._call("snapshot", target=target, by=by, depth=depth, boxes=boxes, filename=filename, tab_id=tab_id)
 
     def list_candidates(self, target: str = "", by: str = "css", text_filter: str = "", limit: int = 25, include_boxes: bool = True, tab_id: str = "") -> Dict:
-        script = f"""() => {{
-            const nodes = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role],[tabindex]'));
-            const filter = {json.dumps(str(text_filter or "").strip().lower())};
-            return nodes.map((el, index) => {{
-                const rect = el.getBoundingClientRect();
-                const text = String(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '').trim();
-                return {{
-                    index,
-                    tag_name: String(el.tagName || '').toLowerCase(),
-                    role: String(el.getAttribute('role') || ''),
-                    text,
-                    visible: !!(rect.width || rect.height),
-                    box: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }},
-                }};
-            }}).filter((item) => !filter || item.text.toLowerCase().includes(filter)).slice(0, {max(1, int(limit or 25))});
-        }}"""
-        result = self.run_script(script)
-        candidates = result.get("result", []) if isinstance(result.get("result"), list) else []
+        page = self._call(
+            "get_page_context_bundle",
+            text_filter=text_filter,
+            limit=max(1, int(limit or 25)),
+            tab_id=tab_id,
+        )
+        candidates = list(page.get("candidates", []) or [])
         if not include_boxes:
             for item in candidates:
                 if isinstance(item, dict):
                     item.pop("box", None)
-        return {"candidates": candidates, "target": str(target or ""), "by": str(by or "css"), "text_filter": str(text_filter or ""), **self.get_current_url(tab_id=tab_id)}
+        return {
+            "candidates": candidates,
+            "target": str(target or ""),
+            "by": str(by or "css"),
+            "text_filter": str(text_filter or ""),
+            "url": str(page.get("url", "") or ""),
+            "title": str(page.get("title", "") or ""),
+            "tab_id": str(page.get("tab_id", "") or ""),
+            "alive": bool(page.get("alive", True)),
+        }
 
     def wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict:
         return self._call("wait_for", selector=selector, by=by, timeout_seconds=timeout_seconds, condition=condition)
@@ -387,6 +379,65 @@ class OfficialPlaywrightMcpBrowserSession(BrowserSession):
 
     def verify_element(self, role: str, accessible_name: str) -> Dict:
         return self._call("verify_element", role=role, accessible_name=accessible_name)
+
+    def execute_native_action(self, action_name: str, args: Dict[str, Any] | None = None) -> Dict:
+        payload = dict(args or {})
+        normalized = str(action_name or "").strip()
+        if normalized == "get_current_url":
+            page = self._call("get_page_context_bundle", tab_id=str(payload.get("tab_id", "") or ""))
+            return {
+                "url": str(page.get("url", "") or ""),
+                "title": str(page.get("title", "") or ""),
+                "readyState": str(page.get("readyState", "") or ""),
+                "tab_id": str(page.get("tab_id", "") or ""),
+                "alive": bool(page.get("alive", True)),
+            }
+        if normalized == "get_page_text":
+            page = self._call("get_page_context_bundle", tab_id=str(payload.get("tab_id", "") or ""))
+            return {
+                "text": str(page.get("text", "") or ""),
+                "url": str(page.get("url", "") or ""),
+                "title": str(page.get("title", "") or ""),
+                "tab_id": str(page.get("tab_id", "") or ""),
+                "alive": bool(page.get("alive", True)),
+            }
+        if normalized == "get_page_html":
+            page = self._call("get_page_context_bundle", include_html=True, tab_id=str(payload.get("tab_id", "") or ""))
+            return {
+                "html": str(page.get("html", "") or ""),
+                "url": str(page.get("url", "") or ""),
+                "title": str(page.get("title", "") or ""),
+                "tab_id": str(page.get("tab_id", "") or ""),
+                "alive": bool(page.get("alive", True)),
+            }
+        if normalized == "get_interaction_context":
+            return self._call("get_interaction_context", tab_id=str(payload.get("tab_id", "") or ""))
+        if normalized == "inspect_elements":
+            return self.inspect_elements(
+                selector=str(payload.get("selector", "") or ""),
+                by=str(payload.get("by", "css") or "css"),
+                limit=int(payload.get("limit", 10) or 10),
+                tab_id=str(payload.get("tab_id", "") or ""),
+            )
+        if normalized == "list_candidates":
+            return self.list_candidates(
+                target=str(payload.get("target", "") or ""),
+                by=str(payload.get("by", "css") or "css"),
+                text_filter=str(payload.get("text_filter", "") or ""),
+                limit=int(payload.get("limit", 25) or 25),
+                include_boxes=bool(payload.get("include_boxes", True)),
+                tab_id=str(payload.get("tab_id", "") or ""),
+            )
+        if normalized == "snapshot":
+            return self.snapshot(
+                target=str(payload.get("target", "") or ""),
+                by=str(payload.get("by", "css") or "css"),
+                depth=(int(payload.get("depth", 0) or 0) or None),
+                boxes=bool(payload.get("boxes", False)),
+                filename=str(payload.get("filename", "") or ""),
+                tab_id=str(payload.get("tab_id", "") or ""),
+            )
+        raise ValueError(f"unsupported native action: {normalized}")
 
     def highlight_target(self, target: str, element: str = "", by: str = "css", style: str = "") -> Dict:
         return self._call("highlight_target", target=target, element=element, by=by, style=style)

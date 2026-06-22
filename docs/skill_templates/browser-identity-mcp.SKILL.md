@@ -196,6 +196,13 @@ Recommended engine-selection policy for this project:
 - use `patchright` when the task explicitly needs the older live-root integration path or when a site behaves better under the existing Patchright stack
 - treat `official_playwright_mcp` as the preferred governed isolated-runtime backend, not as a live-root backend
 
+Capability-kernel note:
+
+- this service now exposes one governed tool surface over a capability-kernel/orchestrator layer
+- engines can advertise `native_actions` and `preferred_paths`
+- when a structured read is available natively, the managed runtime may execute it on the engine-native path instead of forcing a generic fallback path
+- do not assume all four engines expose the same native-read surface
+
 Important engine capability examples:
 
 - `official_playwright_mcp`
@@ -210,6 +217,18 @@ Important engine capability examples:
   this path requires the build to ship the bundled official runtime and runs through governed `isolated_runtime`; it is the normal default governed path, not a live-root backend
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as a formal capability boundary rather than a generic fallback every engine should support
+
+Current native structured-read coverage:
+
+- `official_playwright_mcp`
+  native `get_page_text`, `get_current_url`, `get_page_html`, `get_interaction_context`, `inspect_elements`, `list_candidates`, `snapshot`
+- `patchright`
+  same first-batch native structured-read surface
+- `selenium_uc`
+  same first-batch native structured-read surface
+- `playwright_cli`
+  native `get_page_text`, `get_current_url`, `get_page_html`, `get_interaction_context`, `snapshot`
+  do not assume `inspect_elements` or `list_candidates` are native on this engine
 - prefer the high-level gesture path first:
   - `browser_detect_gesture_grid(...)`
   - `browser_unlock_gesture_pattern(...)`

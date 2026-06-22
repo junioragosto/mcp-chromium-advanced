@@ -70,6 +70,31 @@ Supported engines:
 - `playwright_cli`
   lightweight compatibility path, not the default high-capability path
 
+## Capability Kernel
+
+The managed browser surface is no longer a flat adapter over four equal engines.
+
+Current execution model:
+
+- `SessionManager` still owns profile governance, occupancy, and lifecycle
+- `browser_session_kernel.py` still owns the public managed tool contract
+- `ActionPipeline` now routes through a capability-kernel/orchestrator layer
+- engines can expose engine-native actions through `native_actions`
+- the orchestrator chooses between `native` and `standard` paths through `preferred_paths`
+
+Current native-read coverage:
+
+- `official_playwright_mcp`
+  first-class native path for `get_page_text`, `get_current_url`, `get_page_html`, `get_interaction_context`, `inspect_elements`, `list_candidates`, and `snapshot`
+- `patchright`
+  same first-class native read surface as `official_playwright_mcp`
+- `selenium_uc`
+  native path for `get_page_text`, `get_current_url`, `get_page_html`, `get_interaction_context`, `inspect_elements`, `list_candidates`, and `snapshot`
+- `playwright_cli`
+  native path for `get_page_text`, `get_current_url`, `get_page_html`, `get_interaction_context`, and `snapshot`
+
+This means callers still get one governed interface, but the strongest engine can now keep more of its own semantics and fewer unnecessary fallback roundtrips.
+
 ## User Entry Points
 
 Source entry:
@@ -148,6 +173,7 @@ Callers do not talk to raw engines directly. The managed layer adds:
 - diagnostics and traces
 - session health and recovery hints
 - cross-engine fallback behavior where appropriate
+- capability-kernel path selection between engine-native and managed-standard execution
 
 This is what lets engines stay independent while callers still see one coherent browser tool surface.
 

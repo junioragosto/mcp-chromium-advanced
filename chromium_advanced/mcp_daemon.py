@@ -1072,14 +1072,16 @@ def create_daemon_app(
         try:
             maybe_run_housekeeping(force=False)
             status = worker_manager.get_status()
+            server_status = get_runtime_status_cached(
+                include_external_processes=False,
+                include_mirror_status=False,
+            )
             status["daemon_pid"] = daemon_pid
             status["daemon_instance_id"] = daemon_instance_id
             status["daemon_ready"] = _daemon_ready()
             status["warmup_remaining_ms"] = max(0, int((effective_warmup_seconds - (time.time() - daemon_started_at)) * 1000))
-            status["server_status"] = get_runtime_status_cached(
-                include_external_processes=False,
-                include_mirror_status=False,
-            )
+            status["server_status"] = server_status
+            status["default_engine_name"] = server_status.get("default_engine_name")
             status["status_build_ms"] = int((time.perf_counter() - started_at) * 1000)
             return status
         except Exception as exc:

@@ -23,6 +23,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+from chromium_advanced.browser_capability_kernel import enrich_capability_payload
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
 
 
@@ -513,7 +514,7 @@ class SeleniumBrowserSession(BrowserSession):
             return BrowserSessionSummary(alive=False)
 
     def get_capabilities(self) -> Dict:
-        return {
+        return enrich_capability_payload({
             "engine_name": "selenium_uc",
             "supports_snapshot": False,
             "supports_snapshot_refs": False,
@@ -527,7 +528,7 @@ class SeleniumBrowserSession(BrowserSession):
             "supports_console_messages": True,
             "supports_page_errors": True,
             "supports_network_requests": True,
-        }
+        })
 
     def list_tabs(self) -> Dict:
         tabs = [self._tab_entry(handle, index) for index, handle in enumerate(self._list_window_handles())]
@@ -796,6 +797,45 @@ class SeleniumBrowserSession(BrowserSession):
             "count": len(candidates),
             "candidates": candidates,
         }
+
+    def execute_native_action(self, action_name: str, args: Dict[str, Any] | None = None) -> Dict:
+        payload = dict(args or {})
+        normalized = str(action_name or "").strip()
+        if normalized == "get_current_url":
+            return self.get_current_url(tab_id=str(payload.get("tab_id", "") or ""))
+        if normalized == "get_page_text":
+            return self.get_page_text(tab_id=str(payload.get("tab_id", "") or ""))
+        if normalized == "get_page_html":
+            return self.get_page_html(tab_id=str(payload.get("tab_id", "") or ""))
+        if normalized == "get_interaction_context":
+            return self.get_interaction_context(tab_id=str(payload.get("tab_id", "") or ""))
+        if normalized == "inspect_elements":
+            return self.inspect_elements(
+                selector=str(payload.get("selector", "") or ""),
+                by=str(payload.get("by", "css") or "css"),
+                limit=int(payload.get("limit", 10) or 10),
+                tab_id=str(payload.get("tab_id", "") or ""),
+            )
+        if normalized == "list_candidates":
+            return self.list_candidates(
+                target=str(payload.get("target", "") or ""),
+                by=str(payload.get("by", "css") or "css"),
+                text_filter=str(payload.get("text_filter", "") or ""),
+                limit=int(payload.get("limit", 25) or 25),
+                include_boxes=bool(payload.get("include_boxes", True)),
+                tab_id=str(payload.get("tab_id", "") or ""),
+            )
+        if normalized == "snapshot":
+            depth_value = payload.get("depth", None)
+            return self.snapshot(
+                target=str(payload.get("target", "") or ""),
+                by=str(payload.get("by", "css") or "css"),
+                depth=(int(depth_value) if depth_value not in (None, "", 0, "0") else None),
+                boxes=bool(payload.get("boxes", False)),
+                filename=str(payload.get("filename", "") or ""),
+                tab_id=str(payload.get("tab_id", "") or ""),
+            )
+        raise ValueError(f"unsupported native action: {normalized}")
 
     def wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict:
         try:

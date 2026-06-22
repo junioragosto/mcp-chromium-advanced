@@ -56,6 +56,24 @@
 - `playwright_cli`
   重点看轻量兼容、tab/page、低保真场景兜底
 
+同时验证 capability-kernel contract：
+
+- `get_capabilities()` 返回 `capability_version = 3`
+- 返回 `native_actions`
+- 返回 `preferred_paths`
+- 返回 `capability_kernel.enabled = true`
+
+当前安装态预期：
+
+- `official_playwright_mcp`
+  第一批结构化读能力默认走 `native`
+- `patchright`
+  第一批结构化读能力默认走 `native`
+- `selenium_uc`
+  第一批结构化读能力默认走 `native`
+- `playwright_cli`
+  仅其真实支持的读能力走 `native`
+
 验证结果不应拿错引擎去判断系统能力上限。
 
 ## 大版本发布验证
@@ -70,6 +88,13 @@
 2. 默认引擎确认
 - `get_server_status()` 返回的默认引擎与配置一致
 - 当前预期默认值：`official_playwright_mcp`
+
+2.1 capability-kernel 路径确认
+
+- 对每个引擎至少验证一条 `get_page_text`
+- 检查返回中的 `action_pipeline.execution_path`
+- 对 `official_playwright_mcp` / `patchright` / `selenium_uc` 至少再验证一条结构化读动作
+- 不要要求 `playwright_cli` 对未实现的 `inspect_elements` / `list_candidates` 走 native
 
 3. 真实登录态场景
 - 使用有登录态的真实 profile

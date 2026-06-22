@@ -245,6 +245,38 @@ flowchart LR
 
 它负责把多引擎差异收敛成统一的外部工具语义。
 
+## 8.1 Capability Kernel / Orchestrator
+
+当前浏览器内核不再只是“统一接口后直接调原始引擎”。
+
+新增能力层职责：
+
+- `browser_action_registry.py`
+  定义标准动作集与各引擎默认 `native_actions`
+- `browser_capability_kernel.py`
+  统一补齐 `capability_version=3`、`native_actions`、`preferred_paths`、`capability_kernel`
+- `browser_action_orchestrator.py`
+  在 managed action 执行时决定走 `native_engine` 还是 `legacy_standard`
+
+当前原生优先能力面：
+
+- `official_playwright_mcp`
+  `get_page_text` / `get_current_url` / `get_page_html` / `get_interaction_context` / `inspect_elements` / `list_candidates` / `snapshot`
+- `patchright`
+  与 `official_playwright_mcp` 相同的第一批原生读能力
+- `selenium_uc`
+  同样接入第一批原生读能力
+- `playwright_cli`
+  仅对已真实实现的读动作开放原生路径：
+  `get_page_text` / `get_current_url` / `get_page_html` / `get_interaction_context` / `snapshot`
+
+结果：
+
+- 治理层仍统一
+- 调用方能力面仍统一
+- 但强引擎不再被过度适配后损失能力
+- 弱引擎也不会被错误声明成支持并不存在的高保真原生能力
+
 ## 9. keepalive 架构
 
 ```mermaid

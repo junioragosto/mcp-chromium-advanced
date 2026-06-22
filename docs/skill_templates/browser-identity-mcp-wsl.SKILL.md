@@ -56,6 +56,13 @@ Recommended engine-selection policy remains the same from WSL:
 - use `patchright` from WSL when a workflow explicitly needs the older live-root integration path or site-specific compatibility
 - treat `official_playwright_mcp` as the preferred governed isolated-runtime backend from WSL, not as a live-root backend
 
+Capability-kernel note from WSL:
+
+- the Windows-side service now exposes a capability-kernel/orchestrator layer
+- engines can advertise `native_actions` and `preferred_paths`
+- governed callers still use one session/tool surface, but structured reads may run on engine-native paths when available
+- do not assume all engines expose the same native-read surface
+
 Important engine capability examples from WSL remain the same:
 
 - `official_playwright_mcp`
@@ -70,6 +77,18 @@ Important engine capability examples from WSL remain the same:
   use this as the preferred governed isolated-runtime backend when the bundled official runtime is present; do not treat it as a live-root backend
 - `gesture_actions`
   treat `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, and `browser_mouse_gesture_path` as engine-scoped capabilities, not as guaranteed fallback tools on every runtime
+
+Current native structured-read coverage from WSL is the same:
+
+- `official_playwright_mcp`
+  native `get_page_text`, `get_current_url`, `get_page_html`, `get_interaction_context`, `inspect_elements`, `list_candidates`, `snapshot`
+- `patchright`
+  same first-batch native structured-read surface
+- `selenium_uc`
+  same first-batch native structured-read surface
+- `playwright_cli`
+  native `get_page_text`, `get_current_url`, `get_page_html`, `get_interaction_context`, `snapshot`
+  do not assume `inspect_elements` or `list_candidates` are native on this engine
 - prefer the high-level gesture path first:
   - `browser_detect_gesture_grid(...)`
   - `browser_unlock_gesture_pattern(...)`

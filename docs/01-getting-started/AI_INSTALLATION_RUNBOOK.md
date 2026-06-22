@@ -56,11 +56,20 @@ Supported browser engines:
 - `selenium_uc`: best stealth-oriented option, useful when avoiding automation detection matters more than throughput.
 - `playwright_cli`: lightweight integrated option for lower-overhead compatibility flows, but no longer the default high-capability path.
 
+Capability-kernel note:
+
+- the managed runtime now exposes a capability-kernel/orchestrator layer
+- engines may declare `native_actions` and `preferred_paths`
+- governed callers still use one managed surface, but structured reads can execute on the engine-native path when available
+- current native coverage is strongest on `official_playwright_mcp`, `patchright`, and `selenium_uc`
+- `playwright_cli` currently exposes a smaller native read surface and should still be treated as a bounded compatibility path
+
 Practical engine-selection rule for AI operators:
 
 - choose `official_playwright_mcp` for ordinary browsing, forms, navigation, screenshots, multi-tab work, and most production MCP calls
 - choose `patchright` when the task specifically benefits from the older live-root behavior or a site proves more stable there
 - choose `selenium_uc` when stealth or anti-detection tolerance is the first concern
+- choose `playwright_cli` only when a lightweight compatibility path is explicitly desired
 
 Changing the GUI default engine affects only future sessions. Existing sessions keep the engine used at startup.
 

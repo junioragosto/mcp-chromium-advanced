@@ -322,17 +322,74 @@ class OfficialPlaywrightMcpBridge:
         return {"html": str(payload.get("result", "") or ""), **self._summary_from_state()}
 
     def get_interaction_context(self, *, tab_id: str = "") -> Dict:
-        payload = self.run_script(
-            script="""() => ({
+        page_context = self.get_page_context_bundle(tab_id=tab_id)
+        context = dict(page_context.get("context", {}) or {})
+        return {"context": context, "interaction_context": context, **self._summary_from_state()}
+
+    def get_page_context_bundle(self, *, selector: str = "", text_filter: str = "", limit: int = 25, include_html: bool = False, tab_id: str = "") -> Dict:
+        script = f"""() => {{
+          const active = document.activeElement;
+          const selectorValue = {json.dumps(str(selector or ""))};
+          const textFilter = {json.dumps(str(text_filter or "").strip().lower())};
+          const limit = {max(1, int(limit or 25))};
+          const inspectMatches = selectorValue
+            ? Array.from(document.querySelectorAll(selectorValue)).slice(0, limit).map((el, index) => {{
+                const rect = el.getBoundingClientRect();
+                return {{
+                  index,
+                  tag_name: String(el.tagName || '').toLowerCase(),
+                  text: String(el.innerText || el.textContent || '').trim(),
+                  visible: !!(rect.width || rect.height),
+                  id: String(el.id || ''),
+                  class_name: String(el.className || ''),
+                }};
+              }})
+            : [];
+          const candidates = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role],[tabindex]'))
+            .map((el, index) => {{
+              const rect = el.getBoundingClientRect();
+              const text = String(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '').trim();
+              return {{
+                index,
+                tag_name: String(el.tagName || '').toLowerCase(),
+                role: String(el.getAttribute('role') || ''),
+                text,
+                visible: !!(rect.width || rect.height),
+                box: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }},
+              }};
+            }})
+            .filter((item) => !textFilter || item.text.toLowerCase().includes(textFilter))
+            .slice(0, limit);
+          return {{
+            url: location.href,
+            title: document.title,
+            readyState: document.readyState,
+            text: document.body ? document.body.innerText : '',
+            html: {str(bool(include_html)).lower()} ? (document.documentElement ? document.documentElement.outerHTML : '') : '',
+            context: {{
               url: location.href,
               title: document.title,
-              activeTag: document.activeElement ? document.activeElement.tagName : '',
-              activeText: document.activeElement ? (document.activeElement.innerText || document.activeElement.value || '') : '',
-            })""",
-            tab_id=tab_id,
-        )
-        result = payload.get("result")
-        return {"context": result if isinstance(result, dict) else {"value": result}, **self._summary_from_state()}
+              activeTag: active ? String(active.tagName || '') : '',
+              activeText: active ? String(active.innerText || active.value || '') : '',
+            }},
+            inspectMatches,
+            candidates,
+          }};
+        }}"""
+        payload = self.run_script(script=script, tab_id=tab_id)
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        summary = self._summary_from_state()
+        return {
+            **summary,
+            **result,
+            "url": str(result.get("url", "") or summary.get("url", "") or ""),
+            "title": str(result.get("title", "") or summary.get("title", "") or ""),
+            "text": str(result.get("text", "") or ""),
+            "html": str(result.get("html", "") or ""),
+            "context": dict(result.get("context", {}) or {}),
+            "inspect_matches": list(result.get("inspectMatches", []) or []),
+            "candidates": list(result.get("candidates", []) or []),
+        }
 
     def snapshot(self, *, target: str = "", by: str = "css", depth: int | None = None, boxes: bool = False, filename: str = "", tab_id: str = "") -> Dict:
         args: Dict[str, Any] = {}

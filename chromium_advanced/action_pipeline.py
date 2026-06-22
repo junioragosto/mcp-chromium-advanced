@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict
 
+from chromium_advanced.browser_action_orchestrator import BrowserActionOrchestrator
+
 
 class ActionPipeline:
     def __init__(self, browser_session):
@@ -68,11 +70,22 @@ class ActionPipeline:
             "verify_dialog": self._verify_dialog,
             "verify_element": self._verify_element,
         }
+        self._orchestrator = BrowserActionOrchestrator(
+            browser_session=self.browser_session,
+            legacy_execute=self._execute_legacy,
+            legacy_supports=self._supports_legacy,
+        )
 
     def supports(self, action_name: str) -> bool:
-        return str(action_name or "").strip() in self._handlers
+        return self._orchestrator.supports(action_name)
 
     def execute(self, action_name: str, args: Dict[str, Any] | None = None):
+        return self._orchestrator.execute(action_name, args)
+
+    def _supports_legacy(self, action_name: str) -> bool:
+        return str(action_name or "").strip() in self._handlers
+
+    def _execute_legacy(self, action_name: str, args: Dict[str, Any] | None = None):
         normalized = str(action_name or "").strip()
         if normalized not in self._handlers:
             raise ValueError(f"unsupported automation action: {normalized}")

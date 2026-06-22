@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from chromium_advanced.browser_engines.base import BrowserSession, BrowserSessionSummary
+from chromium_advanced.browser_capability_kernel import enrich_capability_payload
 from chromium_advanced.browser_session_kernel_diagnostics import ManagedSessionDiagnosticsMixin
 from chromium_advanced.browser_session_kernel_watchers import fallback_watch_page_state
 
@@ -79,10 +80,10 @@ class RuntimeCapabilities:
         )
 
     def to_public_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "engine_name": self.engine_name,
             "runtime_profile": self.runtime_profile,
-            "capability_version": 2,
+            "capability_version": 3,
             "supports_snapshot": self.snapshot,
             "supports_snapshot_refs": self.snapshot_refs,
             "supports_target_actions": self.target_actions,
@@ -130,12 +131,14 @@ class RuntimeCapabilities:
                 }.get(self.runtime_profile, ["general browser automation"]),
             },
         }
+        return enrich_capability_payload(payload)
 
 
 class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
     def __init__(self, raw_session: BrowserSession):
         self._raw = raw_session
         self._capabilities = RuntimeCapabilities.from_legacy(self._safe_raw_capabilities())
+        self.engine_name = self._capabilities.engine_name
         if callable(getattr(self._raw, "get_interaction_context", None)):
             self._capabilities.post_action_context = True
         self._snapshot_ref_map: Dict[str, Dict[str, Any]] = {}
@@ -1607,6 +1610,80 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
             "candidates": candidates,
         }
 
+    def _normalize_native_candidates(
+        self,
+        result: Dict[str, Any],
+        *,
+        target: str,
+        by: str,
+        text_filter: str,
+        limit: int,
+        include_boxes: bool,
+        tab_id: str,
+    ) -> Dict[str, Any]:
+        raw_candidates = result.get("candidates", [])
+        if not isinstance(raw_candidates, list):
+            raw_candidates = []
+        scope = self._build_resolution_scope("list_candidates", target, by, text_filter)
+        ranking_filter = str(text_filter or "") or (str(target or "") if str(by or "css") in {"link_text", "partial_link_text"} else "")
+        ranked_entries = self._rank_entries(raw_candidates, ranking_filter, scope)
+        normalized_candidates: list[Dict[str, Any]] = []
+        for score, _, entry in ranked_entries[: max(1, int(limit))]:
+            candidate = dict(entry)
+            candidate.setdefault("source", "native_engine")
+            candidate["match_score"] = score
+            deep_selector = str(candidate.get("deep_selector", "") or "").strip()
+            candidate.setdefault("by", "deep_css" if deep_selector else "css")
+            selector_value = str(candidate.get("selector", "") or "").strip()
+            if selector_value:
+                candidate.setdefault("target", selector_value)
+            if not include_boxes:
+                candidate.pop("box", None)
+            ref_value = str(candidate.get("ref", "") or "").strip()
+            if not ref_value:
+                ref_value = f"e{self._next_snapshot_ref}"
+                self._next_snapshot_ref += 1
+                candidate["ref"] = ref_value
+            normalized_candidates.append(candidate)
+        self._record_snapshot_refs(normalized_candidates)
+        trace = self._build_resolution_trace(
+            "list_candidates",
+            source="native_engine",
+            stage="native_candidates",
+            target=str(target or ""),
+            by=str(by or "css"),
+            text_filter=str(text_filter or ""),
+            candidate_count=len(normalized_candidates),
+            matched=bool(normalized_candidates),
+            scope=scope,
+        )
+        current = self._raw.get_current_url(tab_id=tab_id) if tab_id else self._raw.get_current_url()
+        payload = {
+            **current,
+            **{k: v for k, v in result.items() if k != "candidates"},
+            "target": str(target or ""),
+            "text_filter": str(text_filter or ""),
+            "resolution_trace": trace,
+            "count": len(normalized_candidates),
+            "candidates": normalized_candidates,
+        }
+        payload.setdefault(
+            "target_summary",
+            {
+                "target": str(target or "").strip(),
+                "by": str(by or "css"),
+                "text_filter": str(text_filter or ""),
+                "top_candidate_text": str(
+                    (normalized_candidates[0] or {}).get("text", "")
+                    or (normalized_candidates[0] or {}).get("aria_label", "")
+                    or ""
+                )
+                if normalized_candidates
+                else "",
+            },
+        )
+        return payload
+
     def _fallback_describe_target(self, target: str, element: str = "", by: str = "css", include_box: bool = True) -> Dict[str, Any]:
         resolution = self._resolve_target_pipeline(
             "describe_target",
@@ -1890,6 +1967,15 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
     def get_capabilities(self) -> Dict:
         return self._capabilities.to_public_dict()
 
+    def execute_native_action(self, action_name: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        executor = getattr(self._raw, "execute_native_action", None)
+        if not callable(executor):
+            raise ValueError(f"native action is not supported by engine: {self.engine_name}")
+        result = executor(str(action_name or "").strip(), dict(args or {}))
+        if isinstance(result, dict):
+            result.setdefault("engine_name", self.engine_name)
+        return result
+
     def list_tabs(self) -> Dict:
         return self._dispatch("list_tabs", lambda: self._raw.list_tabs())
 
@@ -2011,13 +2097,29 @@ class ManagedBrowserSession(ManagedSessionDiagnosticsMixin, BrowserSession):
         if isinstance(result, dict):
             candidates = result.get("candidates", [])
             if isinstance(candidates, list):
-                result.setdefault("count", len(candidates))
-                result.setdefault("target_summary", {
-                    "target": str(target or "").strip(),
-                    "by": str(by or "css"),
-                    "text_filter": str(text_filter or ""),
-                    "top_candidate_text": str((candidates[0] or {}).get("text", "") or (candidates[0] or {}).get("aria_label", "") or "") if candidates else "",
-                })
+                has_native_trace = isinstance(result.get("resolution_trace"), dict)
+                needs_normalization = any(
+                    not isinstance(item, dict) or "match_score" not in item or "by" not in item or "ref" not in item
+                    for item in candidates
+                )
+                if candidates and (needs_normalization or not has_native_trace):
+                    result = self._normalize_native_candidates(
+                        result,
+                        target=target,
+                        by=by,
+                        text_filter=text_filter,
+                        limit=limit,
+                        include_boxes=include_boxes,
+                        tab_id=tab_id,
+                    )
+                else:
+                    result.setdefault("count", len(candidates))
+                    result.setdefault("target_summary", {
+                        "target": str(target or "").strip(),
+                        "by": str(by or "css"),
+                        "text_filter": str(text_filter or ""),
+                        "top_candidate_text": str((candidates[0] or {}).get("text", "") or (candidates[0] or {}).get("aria_label", "") or "") if candidates else "",
+                    })
         return result
 
     def wait_for(self, selector: str, by: str = "css", timeout_seconds: int = 20, condition: str = "visible") -> Dict:
