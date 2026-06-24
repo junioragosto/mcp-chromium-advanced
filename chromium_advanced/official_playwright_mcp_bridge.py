@@ -31,11 +31,21 @@ def _hidden_kwargs() -> Dict[str, Any]:
 
 
 class OfficialPlaywrightMcpBridge:
-    def __init__(self, *, node_executable: str, chromium_binary: str, user_data_dir: str, profile_name: str, config: Dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        node_executable: str,
+        chromium_binary: str,
+        user_data_dir: str,
+        profile_name: str,
+        extension_dirs: List[str] | None = None,
+        config: Dict[str, Any] | None = None,
+    ) -> None:
         self.node_executable = str(node_executable or "").strip()
         self.chromium_binary = str(chromium_binary or "").strip()
         self.user_data_dir = str(user_data_dir or "").strip()
         self.profile_name = str(profile_name or "").strip()
+        self.extension_dirs = [str(item or "").strip() for item in (extension_dirs or []) if str(item or "").strip()]
         self.runtime_dir = os.path.abspath(get_bundled_playwright_mcp_dir(config))
         self.script_path = os.path.join(self.runtime_dir, "bridge.mjs")
         if not self.node_executable or not os.path.isfile(self.node_executable):
@@ -62,6 +72,7 @@ class OfficialPlaywrightMcpBridge:
                         "userDataDir": self.user_data_dir,
                         "profileName": self.profile_name,
                         "headless": False,
+                        "extensionDirs": list(self.extension_dirs),
                     },
                 },
                 fh,

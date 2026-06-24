@@ -223,6 +223,23 @@ def get_control_plugin_url(window, plugin_id: str) -> str:
     return _build_control_url(window, f"/plugins/{encoded_plugin_id}")
 
 
+def get_control_keepalive_sites_url(window) -> str:
+    return _build_control_url(window, "/keepalive/sites")
+
+
+def get_control_extensions_url(window) -> str:
+    return _build_control_url(window, "/extensions")
+
+
+def get_control_extension_url(window, extension_id: str) -> str:
+    normalized_extension_id = quote(str(extension_id or "").strip(), safe="")
+    return _build_control_url(window, f"/extensions/{normalized_extension_id}")
+
+
+def get_control_log_settings_url(window) -> str:
+    return _build_control_url(window, "/log-settings")
+
+
 def query_control_profiles(window, force: bool = False) -> Dict:
     now_ts = time.monotonic()
     if (
@@ -265,10 +282,15 @@ def query_control_events(window, limit: int = 80) -> Dict:
 
 def query_control_keepalive(window) -> Dict:
     now_ts = time.monotonic()
+    cache_ttl = getattr(window, "CONTROL_KEEPALIVE_REFRESH_INTERVAL_SECONDS", 10.0)
+    if window.gui_bootstrap_in_progress:
+        cache_ttl = min(cache_ttl, 2.0)
+    elif getattr(window, "current_ui_refresh_context", None):
+        cache_ttl = min(cache_ttl, 2.0)
     if (
         window.control_keepalive_cache
         and window.control_keepalive_last_query_at > 0
-        and (now_ts - window.control_keepalive_last_query_at) < getattr(window, "CONTROL_KEEPALIVE_REFRESH_INTERVAL_SECONDS", 10.0)
+        and (now_ts - window.control_keepalive_last_query_at) < cache_ttl
     ):
         return window.control_keepalive_cache
     try:
@@ -355,6 +377,59 @@ def query_control_plugins(window) -> Dict:
         return {}
 
 
+def query_control_keepalive_sites(window) -> Dict:
+    try:
+        payload = _fetch_json(
+            window,
+            get_control_keepalive_sites_url(window),
+            timeout=max(1.5, _safe_attr(window, "MCP_STATUS_QUERY_TIMEOUT_SECONDS", 0.6)),
+            headers=get_mcp_auth_headers(window),
+        )
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def query_control_extensions(window) -> Dict:
+    try:
+        payload = _fetch_json(
+            window,
+            get_control_extensions_url(window),
+            timeout=max(1.5, _safe_attr(window, "MCP_STATUS_QUERY_TIMEOUT_SECONDS", 0.6)),
+            headers=get_mcp_auth_headers(window),
+        )
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def query_control_log_settings(window) -> Dict:
+    try:
+        payload = _fetch_json(
+            window,
+            get_control_log_settings_url(window),
+            timeout=max(1.5, _safe_attr(window, "MCP_STATUS_QUERY_TIMEOUT_SECONDS", 0.6)),
+            headers=get_mcp_auth_headers(window),
+        )
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def update_control_log_settings(window, level: str, retention_days: int) -> Dict:
+    return _fetch_json(
+        window,
+        get_control_log_settings_url(window),
+        method="PUT",
+        headers=get_mcp_auth_headers(window),
+        json_payload={
+            "level": str(level or "info").strip().lower() or "info",
+            "retention_days": max(1, int(retention_days or 7)),
+        },
+        timeout=max(2.0, _safe_attr(window, "MCP_STATUS_QUERY_TIMEOUT_SECONDS", 0.6)),
+    )
+
+
 def refresh_mcp_status_ui(window):
     window.mcp_endpoint_label.setText(get_mcp_endpoint(window))
     window.mcp_worker_endpoint_label.setText(get_mcp_worker_endpoint(window))
@@ -364,6 +439,9 @@ def refresh_mcp_status_ui(window):
         f" / {str(window.config.get('app', {}).get('concurrency_mode', 'per_profile_live') or 'per_profile_live')}"
     )
     daemon_status = query_mcp_status(window)
+    daemon_running = bool(daemon_status)
+    if daemon_running and not window.mcp_startup_in_progress:
+        window.mcp_owned_process = True
     view_model = build_mcp_status_view_model(
         daemon_status,
         is_mcp_expected_enabled(window),
@@ -372,6 +450,9 @@ def refresh_mcp_status_ui(window):
     )
     window.mcp_status_label.setText(view_model["label"])
     window.mcp_status_detail_label.setText(view_model["detail"])
+    window.mcp_service_checkbox.blockSignals(True)
+    window.mcp_service_checkbox.setChecked(bool(window.config.get("mcp", {}).get("enabled", False) or daemon_running))
+    window.mcp_service_checkbox.blockSignals(False)
     window.refresh_bottom_stats()
 
 
@@ -498,6 +579,9 @@ def start_mcp_service(window):
         window.request_ui_refresh(mcp_status=True)
         return
     if query_mcp_status(window, force=True):
+        window.config.setdefault("mcp", {})
+        window.config["mcp"]["enabled"] = True
+        window.config = save_app_config(window.config, window.config_path)
         window.mcp_owned_process = True
         window.request_ui_refresh(mcp_status=True)
         return
@@ -588,6 +672,9 @@ def stop_mcp_service(window, update_checkbox: bool = True):
         window.mcp_service_checkbox.setChecked(False)
         window.mcp_service_checkbox.blockSignals(False)
     window.mcp_owned_process = bool(plan.get("owned_process", False))
+    window.config.setdefault("mcp", {})
+    window.config["mcp"]["enabled"] = False
+    window.config = save_app_config(window.config, window.config_path)
     if bool(plan.get("clear_status_cache", True)):
         window.mcp_status_cache = {}
     window.invalidate_control_profiles_cache()

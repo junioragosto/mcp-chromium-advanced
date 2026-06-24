@@ -56,6 +56,20 @@ GUI -> daemon http://127.0.0.1:28888 -> lazy worker http://127.0.0.1:28889
 MCP endpoint: http://127.0.0.1:28888/mcp
 ```
 
+Current control API additions that an installer/operator should expect:
+
+- keepalive site catalog: `GET/POST /_control/keepalive/sites`
+- keepalive site profile association:
+  - `GET /_control/profiles/{profile_name}/keepalive-sites`
+  - `PUT /_control/profiles/{profile_name}/keepalive-sites`
+- browser extension catalog: `GET/POST /_control/extensions`
+- browser extension profile association:
+  - `GET /_control/profiles/{profile_name}/extensions`
+  - `PUT /_control/profiles/{profile_name}/extensions`
+- control log settings:
+  - `GET/PUT /_control/log-settings`
+  - supported levels include `silent`
+
 Supported browser engines:
 
 - `official_playwright_mcp`: recommended default for normal MCP work and the main governed high-level path.
@@ -79,6 +93,11 @@ Practical engine-selection rule for AI operators:
 - choose `playwright_cli` only when a lightweight compatibility path is explicitly desired
 
 Changing the GUI default engine affects only future sessions. Existing sessions keep the engine used at startup.
+
+Extension loading rule:
+
+- configured browser extensions are managed separately from keepalive site plugins
+- profile-linked browser extensions are mounted into direct launch sessions, keepalive sessions, Patchright, Playwright CLI, and official Playwright MCP bridge sessions
 
 ## 2. Environment Detection Checklist
 
@@ -242,9 +261,11 @@ Keepalive uses real browser profiles to refresh selected sites. It now locks one
 Expected behavior:
 
 - Keepalive may run while other profiles remain available for MCP, as long as they are not the same locked profile.
+- The scheduled keepalive trigger is owned by the daemon/core, not by the GUI event loop.
 - After each finished profile run, the app automatically clears re-creatable cache, lock, and log artifacts from that profile's dedicated UserData root.
+- Temporary isolated `runtime` directories are execution-layer workspaces, not persistent profile assets. They may be recreated on demand and should be cleaned after session close or daemon housekeeping.
 - After keepalive completes successfully, backup snapshots are refreshed when mirror support is enabled.
-- Normal MCP sessions launch from the live per-profile root, not from extracted runtime clones.
+- Governed `official_playwright_mcp` sessions materialize a temporary isolated runtime from mirror/profile data; this is distinct from the persistent `UserDataProfile*` roots.
 - Same-profile parallelism is intentionally blocked.
 - In the GUI, a profile row's `Launch` button becomes `Close` while that profile's Chromium processes are still alive. If the user closes the browser window manually, the GUI flips back to `Launch` after process exit is detected.
 

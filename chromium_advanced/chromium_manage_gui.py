@@ -74,6 +74,8 @@ from chromium_advanced.chromium_profile_lib import (
     get_keepalive_site_icon_path,
     get_keepalive_site_ids,
     get_keepalive_site_label,
+    get_profile_extension_ids,
+    get_extension_catalog,
     get_profile_directory_path,
     get_profile_user_data_root,
     read_recent_jsonl_events,
@@ -95,7 +97,7 @@ from chromium_advanced.chromium_profile_lib import (
 )
 from chromium_advanced.browser_engines.constants import BROWSER_ENGINE_OPTIONS, DEFAULT_BROWSER_ENGINE
 from chromium_advanced.browser_engines.factory import normalize_browser_engine_name
-from chromium_advanced.gui.gui_dialogs import KeepalivePluginCreateDialog, ProfileEditDialog
+from chromium_advanced.gui.gui_dialogs import ExtensionEditDialog, KeepalivePluginCreateDialog, ProfileEditDialog
 from chromium_advanced.gui.gui_runtime import (
     acquire_single_instance_guard,
     can_connect,
@@ -196,6 +198,7 @@ UPDATE_CHECK_STARTUP_DELAY_MS = 4000
 UPDATE_CHECK_TIMER_MS = 15 * 60 * 1000
 MCP_TRANSPORT_OPTIONS = ["streamable-http", "http", "sse"]
 MCP_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"]
+CONTROL_LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error", "silent"]
 MCP_WORKER_POLICY_OPTIONS = ["lazy", "sticky", "always_on"]
 CONCURRENCY_MODE_OPTIONS = ["per_profile_live", "block"]
 LANGUAGE_OPTIONS = load_language_options()
@@ -624,6 +627,12 @@ class ChromiumManagerWindow(QMainWindow):
         self.plugin_layout.setSpacing(10)
         self.tabs.addTab(self.plugin_tab, "")
 
+        self.extensions_tab = QWidget()
+        self.extensions_layout = QVBoxLayout(self.extensions_tab)
+        self.extensions_layout.setContentsMargins(12, 12, 12, 12)
+        self.extensions_layout.setSpacing(10)
+        self.tabs.addTab(self.extensions_tab, "")
+
         self.log_tab = QWidget()
         self.log_layout = QVBoxLayout(self.log_tab)
         self.log_layout.setContentsMargins(12, 12, 12, 12)
@@ -660,6 +669,7 @@ class ChromiumManagerWindow(QMainWindow):
 
         self.build_keepalive_tab()
         self.build_plugin_tab()
+        self.build_extensions_tab()
         self.build_log_tab()
         self.build_occupancy_tab()
         self.build_mcp_log_tab()
@@ -856,6 +866,78 @@ class ChromiumManagerWindow(QMainWindow):
         self.plugin_source_editor.setReadOnly(True)
         self.refresh_keepalive_plugin_table()
 
+    def build_extensions_tab(self):
+        toolbar = QHBoxLayout()
+        self.btn_extensions_reload = QPushButton()
+        self.btn_extensions_new = QPushButton()
+        self.btn_extensions_edit = QPushButton()
+        self.btn_extensions_delete = QPushButton()
+        self.btn_extensions_reload.clicked.connect(self.refresh_extensions_table)
+        self.btn_extensions_new.clicked.connect(self.create_extension_record)
+        self.btn_extensions_edit.clicked.connect(self.edit_selected_extension_record)
+        self.btn_extensions_delete.clicked.connect(self.delete_selected_extension_record)
+        toolbar.addWidget(self.btn_extensions_reload)
+        toolbar.addWidget(self.btn_extensions_new)
+        toolbar.addWidget(self.btn_extensions_edit)
+        toolbar.addWidget(self.btn_extensions_delete)
+        toolbar.addStretch()
+        self.extensions_layout.addLayout(toolbar)
+
+        self.extensions_splitter = QSplitter(Qt.Horizontal)
+        self.extensions_table = QTableWidget(0, 5)
+        self.extensions_table.setHorizontalHeaderLabels(
+            [
+                self.tr("extensions_table_id", "Extension ID"),
+                self.tr("extensions_table_name", "Display Name"),
+                self.tr("extensions_table_status", "Status"),
+                self.tr("extensions_table_source_type", "Source Type"),
+                self.tr("extensions_table_source_path", "Source Path"),
+            ]
+        )
+        self.extensions_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.extensions_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.extensions_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.extensions_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.extensions_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.extensions_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.extensions_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.extensions_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.extensions_table.itemSelectionChanged.connect(self.on_extension_selection_changed)
+        self.extensions_splitter.addWidget(self.extensions_table)
+
+        detail_panel = QWidget()
+        detail_layout = QVBoxLayout(detail_panel)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(8)
+
+        self.extension_detail_group = QGroupBox()
+        self.extension_detail_layout = QFormLayout(self.extension_detail_group)
+        self.extension_detail_id = QLabel("-")
+        self.extension_detail_name = QLabel("-")
+        self.extension_detail_enabled = QLabel("-")
+        self.extension_detail_source_type = QLabel("-")
+        self.extension_detail_source_path = QLabel("-")
+        self.extension_detail_source_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.extension_detail_profiles = QLabel("-")
+        self.extension_detail_profiles.setWordWrap(True)
+        self.extension_detail_layout.addRow(self.tr("extensions_table_id", "Extension ID"), self.extension_detail_id)
+        self.extension_detail_layout.addRow(self.tr("extensions_table_name", "Display Name"), self.extension_detail_name)
+        self.extension_detail_layout.addRow(self.tr("extensions_table_status", "Status"), self.extension_detail_enabled)
+        self.extension_detail_layout.addRow(self.tr("extensions_table_source_type", "Source Type"), self.extension_detail_source_type)
+        self.extension_detail_layout.addRow(self.tr("extensions_table_source_path", "Source Path"), self.extension_detail_source_path)
+        self.extension_detail_layout.addRow(self.tr("extensions_detail_profiles", "Linked Profiles"), self.extension_detail_profiles)
+        detail_layout.addWidget(self.extension_detail_group)
+        detail_layout.addStretch()
+        self.extensions_splitter.addWidget(detail_panel)
+        self.extensions_splitter.setSizes([560, 420])
+        self.extensions_layout.addWidget(self.extensions_splitter, 1)
+
+        self.extension_records: List[Dict] = []
+        self.selected_extension_id = ""
+        self.btn_extensions_edit.setEnabled(False)
+        self.btn_extensions_delete.setEnabled(False)
+        self.refresh_extensions_table()
+
     def build_log_tab(self):
         log_toolbar = QHBoxLayout()
         self.btn_clear_logs = QPushButton()
@@ -863,6 +945,20 @@ class ChromiumManagerWindow(QMainWindow):
         log_toolbar.addWidget(self.btn_clear_logs)
         log_toolbar.addStretch()
         self.log_layout.addLayout(log_toolbar)
+
+        self.log_settings_group = QGroupBox()
+        self.log_settings_layout = QFormLayout(self.log_settings_group)
+        self.control_log_level_combo = QComboBox()
+        self.control_log_level_combo.addItems(CONTROL_LOG_LEVEL_OPTIONS)
+        self.control_log_retention_spin = FocusWheelSpinBox()
+        self.control_log_retention_spin.setRange(1, 365)
+        self.control_log_retention_spin.setSuffix(self.tr("unit_days", " d"))
+        self.btn_save_control_logs = QPushButton()
+        self.btn_save_control_logs.clicked.connect(self.save_control_log_settings)
+        self.log_settings_layout.addRow(self.tr("control_log_level", "Control Log Level"), self.control_log_level_combo)
+        self.log_settings_layout.addRow(self.tr("control_log_retention_days", "Retention Days"), self.control_log_retention_spin)
+        self.log_settings_layout.addRow("", self.btn_save_control_logs)
+        self.log_layout.addWidget(self.log_settings_group)
 
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
@@ -1391,10 +1487,12 @@ class ChromiumManagerWindow(QMainWindow):
         self.retranslate_ui(refresh_runtime=not initial_bootstrap)
         if not initial_bootstrap:
             self.refresh_keepalive_plugin_table()
+            self.refresh_extensions_table()
             self.refresh_occupancy_tab()
         self.load_keepalive_settings_to_ui()
         self.load_path_settings_to_ui()
         self.load_mcp_settings_to_ui(refresh_runtime=not initial_bootstrap)
+        self.load_control_log_settings_to_ui()
         self.load_update_settings_to_ui()
         self.refresh_app_auto_start_checkbox()
         self.refresh_close_to_tray_checkbox()
@@ -1411,9 +1509,13 @@ class ChromiumManagerWindow(QMainWindow):
 
     def complete_startup_refresh(self):
         self.gui_bootstrap_in_progress = False
+        daemon_status = self.query_mcp_status(force=True)
+        if daemon_status:
+            self.config.setdefault("mcp", {})
+            self.config["mcp"]["enabled"] = True
         if (
             bool(self.config.get("mcp", {}).get("enabled", False))
-            and not self.query_mcp_status(force=True)
+            and not daemon_status
             and not self.mcp_startup_in_progress
         ):
             self.start_mcp_service()
@@ -1932,8 +2034,11 @@ class ChromiumManagerWindow(QMainWindow):
         self.schedule_table_refresh()
 
     def refresh_keepalive_plugin_table(self):
-        plugins_payload = {} if self.gui_bootstrap_in_progress else self.query_control_plugins()
-        plugin_records = plugins_payload.get("plugins", []) if isinstance(plugins_payload.get("plugins", []), list) else []
+        sites_payload = {} if self.gui_bootstrap_in_progress else self.query_control_keepalive_sites()
+        plugin_records = sites_payload.get("sites", []) if isinstance(sites_payload.get("sites", []), list) else []
+        if not plugin_records:
+            plugins_payload = {} if self.gui_bootstrap_in_progress else self.query_control_plugins()
+            plugin_records = plugins_payload.get("plugins", []) if isinstance(plugins_payload.get("plugins", []), list) else []
         self.keepalive_plugin_records = plugin_records if plugin_records else get_keepalive_plugin_records(self.config)
         view_model = build_keepalive_plugin_table_view_model(
             self.keepalive_plugin_records,
@@ -1968,6 +2073,204 @@ class ChromiumManagerWindow(QMainWindow):
             self.plugin_detail_home_url.setText(str(empty_selection.get("detail_home_url", "-")))
             self.plugin_detail_icon_url.setText(str(empty_selection.get("detail_icon_url", "-")))
             self.plugin_source_status.setText(str(empty_selection.get("base_status", self.tr("plugin_status_empty"))))
+
+    def refresh_extensions_table(self):
+        payload = {} if self.gui_bootstrap_in_progress else self.query_control_extensions()
+        records = payload.get("extensions", []) if isinstance(payload.get("extensions", []), list) else []
+        profile_extension_map = payload.get("profile_extension_map", {}) if isinstance(payload.get("profile_extension_map", {}), dict) else {}
+        self.extension_records = records if records else get_extension_catalog(self.config)
+        self.extensions_table.blockSignals(True)
+        self.extensions_table.setRowCount(len(self.extension_records))
+        for row, record in enumerate(self.extension_records):
+            linked_profiles = []
+            extension_id = str(record.get("extension_id", "") or "").strip()
+            for profile_name, extension_ids in profile_extension_map.items():
+                if isinstance(extension_ids, list) and extension_id in [str(item or "").strip() for item in extension_ids]:
+                    linked_profiles.append(str(profile_name or "").strip())
+            values = [
+                extension_id,
+                str(record.get("display_name", "") or extension_id),
+                self.tr("state_enabled") if bool(record.get("enabled", True)) else self.tr("state_disabled"),
+                str(record.get("source_type", "") or ""),
+                str(record.get("source_path", "") or ""),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                if column in (2, 3):
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.extensions_table.setItem(row, column, item)
+            self.extensions_table.setVerticalHeaderItem(row, QTableWidgetItem(", ".join(linked_profiles) if linked_profiles else "-"))
+        self.extensions_table.blockSignals(False)
+        if self.extension_records:
+            selected_row = 0
+            if self.selected_extension_id:
+                for index, record in enumerate(self.extension_records):
+                    if str(record.get("extension_id", "") or "").strip() == self.selected_extension_id:
+                        selected_row = index
+                        break
+            self.extensions_table.selectRow(selected_row)
+            self.on_extension_selection_changed()
+        else:
+            self.selected_extension_id = ""
+            self.extension_detail_id.setText("-")
+            self.extension_detail_name.setText("-")
+            self.extension_detail_enabled.setText("-")
+            self.extension_detail_source_type.setText("-")
+            self.extension_detail_source_path.setText("-")
+            self.extension_detail_profiles.setText("-")
+        has_selection = bool(self.selected_extension_id)
+        if hasattr(self, "btn_extensions_edit"):
+            self.btn_extensions_edit.setEnabled(has_selection)
+            self.btn_extensions_delete.setEnabled(has_selection)
+
+    def on_extension_selection_changed(self):
+        selected_items = self.extensions_table.selectedItems()
+        if not selected_items:
+            self.selected_extension_id = ""
+            if hasattr(self, "btn_extensions_edit"):
+                self.btn_extensions_edit.setEnabled(False)
+                self.btn_extensions_delete.setEnabled(False)
+            return
+        row = selected_items[0].row()
+        if row < 0 or row >= len(self.extension_records):
+            self.selected_extension_id = ""
+            if hasattr(self, "btn_extensions_edit"):
+                self.btn_extensions_edit.setEnabled(False)
+                self.btn_extensions_delete.setEnabled(False)
+            return
+        record = self.extension_records[row]
+        extension_id = str(record.get("extension_id", "") or "").strip()
+        self.selected_extension_id = extension_id
+        payload = {} if self.gui_bootstrap_in_progress else self.query_control_extensions()
+        profile_extension_map = payload.get("profile_extension_map", {}) if isinstance(payload.get("profile_extension_map", {}), dict) else {}
+        linked_profiles = []
+        for profile_name, extension_ids in profile_extension_map.items():
+            if isinstance(extension_ids, list) and extension_id in [str(item or "").strip() for item in extension_ids]:
+                linked_profiles.append(str(profile_name or "").strip())
+        self.extension_detail_id.setText(extension_id or "-")
+        self.extension_detail_name.setText(str(record.get("display_name", "") or extension_id or "-"))
+        self.extension_detail_enabled.setText(self.tr("state_enabled") if bool(record.get("enabled", True)) else self.tr("state_disabled"))
+        self.extension_detail_source_type.setText(str(record.get("source_type", "") or "-"))
+        self.extension_detail_source_path.setText(str(record.get("source_path", "") or "-"))
+        self.extension_detail_profiles.setText(", ".join(linked_profiles) if linked_profiles else "-")
+        if hasattr(self, "btn_extensions_edit"):
+            self.btn_extensions_edit.setEnabled(True)
+            self.btn_extensions_delete.setEnabled(True)
+
+    def get_selected_extension_record(self) -> Optional[Dict]:
+        selected_items = self.extensions_table.selectedItems()
+        if not selected_items:
+            return None
+        row = selected_items[0].row()
+        if row < 0 or row >= len(self.extension_records):
+            return None
+        return self.extension_records[row]
+
+    def create_extension_record(self):
+        dialog = ExtensionEditDialog(parent=self, translator=self.tr)
+        if self.exec_modal_dialog(dialog) != QDialog.Accepted:
+            return
+        payload = dialog.get_data()
+        extension_id = str(payload.get("extension_id", "") or "").strip()
+        if not extension_id:
+            QMessageBox.warning(
+                self,
+                self.tr("error_generic_title"),
+                self.tr("extensions_error_id_required", "Extension ID is required."),
+            )
+            return
+        try:
+            result = fetch_json(
+                self.get_control_extensions_url(),
+                method="POST",
+                headers=self.get_mcp_admin_auth_headers(),
+                json_payload=payload,
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                self.tr("error_generic_title"),
+                self.trf("extensions_error_create_failed", error=exc),
+            )
+            return
+        created = result.get("extension", {}) if isinstance(result, dict) else {}
+        self.selected_extension_id = str(created.get("extension_id", "") or extension_id)
+        self.refresh_extensions_table()
+        self.append_log(
+            self.trf(
+                "extensions_log_created",
+                extension_id=self.selected_extension_id,
+                path=str(created.get("source_path", "") or ""),
+            )
+        )
+
+    def edit_selected_extension_record(self):
+        record = self.get_selected_extension_record()
+        if not record:
+            return
+        extension_id = str(record.get("extension_id", "") or "").strip()
+        dialog = ExtensionEditDialog(record, parent=self, translator=self.tr)
+        if self.exec_modal_dialog(dialog) != QDialog.Accepted:
+            return
+        payload = dialog.get_data()
+        try:
+            result = fetch_json(
+                self.get_control_extension_url(extension_id),
+                method="PUT",
+                headers=self.get_mcp_admin_auth_headers(),
+                json_payload=payload,
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                self.tr("error_generic_title"),
+                self.trf("extensions_error_save_failed", error=exc),
+            )
+            return
+        updated = result.get("extension", {}) if isinstance(result, dict) else {}
+        self.selected_extension_id = str(updated.get("extension_id", "") or extension_id)
+        self.refresh_extensions_table()
+        self.append_log(
+            self.trf(
+                "extensions_log_saved",
+                extension_id=self.selected_extension_id,
+                path=str(updated.get("source_path", "") or ""),
+            )
+        )
+
+    def delete_selected_extension_record(self):
+        record = self.get_selected_extension_record()
+        if not record:
+            return
+        extension_id = str(record.get("extension_id", "") or "").strip()
+        answer = QMessageBox.question(
+            self,
+            self.tr("extensions_delete_title", "Delete Extension"),
+            self.trf("extensions_delete_message", extension_id=extension_id),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            fetch_json(
+                self.get_control_extension_url(extension_id),
+                method="DELETE",
+                headers=self.get_mcp_admin_auth_headers(),
+                timeout=max(1.5, MCP_STATUS_QUERY_TIMEOUT_SECONDS),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                self.tr("error_generic_title"),
+                self.trf("extensions_error_delete_failed", error=exc),
+            )
+            return
+        self.selected_extension_id = ""
+        self.refresh_extensions_table()
+        self.append_log(self.trf("extensions_log_deleted", extension_id=extension_id))
 
     def get_selected_keepalive_plugin_record(self) -> Optional[Dict]:
         selected_items = self.plugin_table.selectedItems()
@@ -2187,6 +2490,7 @@ class ChromiumManagerWindow(QMainWindow):
             "account": "",
             "keepalive_enabled": False,
             "keepalive_sites": {},
+            "extensions": [],
             "notes": "",
         }
         dialog = ProfileEditDialog(new_profile, self.config, self, self.tr)
@@ -2201,6 +2505,8 @@ class ChromiumManagerWindow(QMainWindow):
             return
 
         self.config["profiles"].append(new_profile)
+        self.config.setdefault("profile_extensions", {})
+        self.config["profile_extensions"][profile_name] = list(new_profile.get("extensions", []) if isinstance(new_profile.get("extensions", []), list) else [])
         self.config = save_app_config(self.config, self.config_path)
         try:
             if ensure_profile_bookmarks_initialized(self.config, profile_name):
@@ -2227,6 +2533,8 @@ class ChromiumManagerWindow(QMainWindow):
             if item.get("profile_name") == profile.get("profile_name"):
                 item.update(updated)
                 break
+        self.config.setdefault("profile_extensions", {})
+        self.config["profile_extensions"][updated["profile_name"]] = list(updated.get("extensions", []) if isinstance(updated.get("extensions", []), list) else [])
         self.config = save_app_config(self.config, self.config_path)
         self.selected_profile_name = updated["profile_name"]
         self.schedule_table_refresh()
@@ -2336,6 +2644,8 @@ class ChromiumManagerWindow(QMainWindow):
         try:
             response = self.control_launch_profile(profile_name)
         except Exception as exc:
+            if self._confirm_profile_launch_after_control_timeout(profile_name, exc):
+                return
             QMessageBox.critical(self, self.tr("error_launch_failed_title"), str(exc))
             self.append_log(self.trf("log_profile_launch_failed", profile_name=profile_name, error=exc))
             return
@@ -2352,6 +2662,51 @@ class ChromiumManagerWindow(QMainWindow):
         self.append_log(self.trf("log_profile_launched", profile_name=profile_name, details=details))
         if returncode != 0:
             QMessageBox.warning(self, self.tr("warn_launch_return_title"), details)
+
+    def _confirm_profile_launch_after_control_timeout(self, profile_name: str, exc: Exception) -> bool:
+        message = str(exc or "").strip()
+        lowered = message.lower()
+        if "timed out" not in lowered and "timeout" not in lowered:
+            return False
+        deadline = time.time() + 12.0
+        self.append_log(
+            self.tr(
+                "log_profile_launch_pending_confirmation",
+                "{profile_name} launch request timed out; confirming backend launch state...",
+            ).format(profile_name=profile_name)
+        )
+        while time.time() < deadline:
+            time.sleep(0.5)
+            payload = self.query_control_profiles(force=True)
+            profiles = payload.get("profiles", []) if isinstance(payload.get("profiles", []), list) else []
+            control_profile = {}
+            for item in profiles:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("profile_name", "") or "").strip() == str(profile_name or "").strip():
+                    control_profile = item
+                    break
+            busy_state = str(control_profile.get("busy_state", "") or "").strip().lower()
+            occupancy_state = str(control_profile.get("occupancy_state", "") or "").strip().lower()
+            scene_type = str(control_profile.get("occupancy_scene_type", "") or "").strip().lower()
+            external_process_count = int(control_profile.get("external_process_count", 0) or 0)
+            if (
+                external_process_count > 0
+                or scene_type == "manual"
+                or busy_state not in {"", "idle", "released"}
+                or occupancy_state in {"active", "running"}
+            ):
+                self.selected_profile_name = str(profile_name or "").strip()
+                self.schedule_table_refresh()
+                self.update_selected_profile_status()
+                self.append_log(
+                    self.tr(
+                        "log_profile_launch_confirmed_after_timeout",
+                        "{profile_name} launch was confirmed after control timeout.",
+                    ).format(profile_name=profile_name)
+                )
+                return True
+        return False
 
     def close_profile_by_name(self, profile_name: str):
         profile_name = str(profile_name or "").strip()
@@ -2672,6 +3027,23 @@ class ChromiumManagerWindow(QMainWindow):
         self.update_last_notes_url_label.setText(str(update_settings.get("last_notes_url", "") or "-"))
         self.update_last_error_label.setText(str(update_settings.get("last_error", "") or "-"))
 
+    def load_control_log_settings_to_ui(self):
+        payload = {} if self.gui_bootstrap_in_progress else self.query_control_log_settings()
+        logging_settings = payload.get("logging", {}) if isinstance(payload.get("logging", {}), dict) else {}
+        level = str(logging_settings.get("level", "info") or "info").strip().lower()
+        if level not in CONTROL_LOG_LEVEL_OPTIONS:
+            level = "info"
+        self.control_log_level_combo.blockSignals(True)
+        for index in range(self.control_log_level_combo.count()):
+            if str(self.control_log_level_combo.itemText(index) or "").strip().lower() == level:
+                self.control_log_level_combo.setCurrentIndex(index)
+                break
+        self.control_log_level_combo.blockSignals(False)
+        try:
+            self.control_log_retention_spin.setValue(max(1, int(logging_settings.get("retention_days", 7) or 7)))
+        except Exception:
+            self.control_log_retention_spin.setValue(7)
+
     def load_path_settings_to_ui(self):
         paths = self.config.get("paths", {})
         for key, line_edit in self.path_editors.items():
@@ -2706,6 +3078,26 @@ class ChromiumManagerWindow(QMainWindow):
                     self.concurrency_mode_combo.setCurrentIndex(index)
                     break
             self.concurrency_mode_combo.blockSignals(False)
+
+    def save_control_log_settings(self):
+        try:
+            payload = gui_mcp_runtime.update_control_log_settings(
+                self,
+                self.control_log_level_combo.currentText().strip().lower() or "info",
+                int(self.control_log_retention_spin.value() or 7),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, self.tr("error_generic_title"), str(exc))
+            return
+        logging_settings = payload.get("logging", {}) if isinstance(payload.get("logging", {}), dict) else {}
+        self.append_log(
+            self.tr(
+                "log_control_log_settings_saved",
+                "Control log settings saved.",
+            )
+            + f" level={logging_settings.get('level', 'info')} retention_days={logging_settings.get('retention_days', 7)}"
+        )
+        self.load_control_log_settings_to_ui()
 
     def on_language_changed(self):
         if not hasattr(self, "language_combo"):
@@ -2783,6 +3175,7 @@ class ChromiumManagerWindow(QMainWindow):
         )
         self.tabs.setTabText(self.tabs.indexOf(self.keepalive_tab), self.tr("tab_keepalive"))
         self.tabs.setTabText(self.tabs.indexOf(self.plugin_tab), self.tr("tab_plugins"))
+        self.tabs.setTabText(self.tabs.indexOf(self.extensions_tab), self.tr("tab_extensions", "Extensions"))
         self.tabs.setTabText(self.tabs.indexOf(self.log_tab), self.tr("tab_logs"))
         self.tabs.setTabText(self.tabs.indexOf(self.occupancy_tab), self.tr("tab_occupancy"))
         self.tabs.setTabText(self.tabs.indexOf(self.mcp_log_tab), self.tr("tab_mcp_logs"))
@@ -2808,7 +3201,12 @@ class ChromiumManagerWindow(QMainWindow):
         self.btn_plugin_save.setText(self.tr("plugin_action_save"))
         self.btn_plugin_delete.setText(self.tr("plugin_action_delete"))
         self.btn_plugin_open_dir.setText(self.tr("plugin_action_open_dir"))
+        self.btn_extensions_reload.setText(self.tr("extensions_action_reload", "Reload Extensions"))
+        self.btn_extensions_new.setText(self.tr("extensions_action_new", "New Extension"))
+        self.btn_extensions_edit.setText(self.tr("extensions_action_edit", "Edit Extension"))
+        self.btn_extensions_delete.setText(self.tr("extensions_action_delete", "Delete Extension"))
         self.btn_clear_logs.setText(self.tr("clear_logs"))
+        self.btn_save_control_logs.setText(self.tr("control_log_save", "Save Log Settings"))
         self.btn_clear_mcp_logs.setText(self.tr("clear_mcp_logs"))
         self.btn_save_paths.setText(self.tr("save_paths"))
         self.btn_save_mcp.setText(self.tr("save_mcp"))
@@ -2868,6 +3266,7 @@ class ChromiumManagerWindow(QMainWindow):
         _safe_set_form_label(self.update_status_layout, self.update_last_notes_url_label, self.tr("update_last_notes_url"))
         _safe_set_form_label(self.update_status_layout, self.update_last_error_label, self.tr("update_last_error"))
         self.plugin_detail_group.setTitle(self.tr("plugin_group_detail"))
+        self.extension_detail_group.setTitle(self.tr("extensions_group_detail", "Extension Detail"))
         self.plugin_source_hint.setText(self.tr("plugin_source_hint"))
         self.plugin_source_editor.setPlaceholderText(self.tr("plugin_editor_placeholder"))
         _safe_set_form_label(self.plugin_detail_layout, self.plugin_detail_site_id, self.tr("plugin_table_site_id"))
@@ -2884,6 +3283,23 @@ class ChromiumManagerWindow(QMainWindow):
                 self.tr("plugin_table_source"),
             ]
         )
+        self.extensions_table.setHorizontalHeaderLabels(
+            [
+                self.tr("extensions_table_id", "Extension ID"),
+                self.tr("extensions_table_name", "Display Name"),
+                self.tr("extensions_table_status", "Status"),
+                self.tr("extensions_table_source_type", "Source Type"),
+                self.tr("extensions_table_source_path", "Source Path"),
+            ]
+        )
+        _safe_set_form_label(self.extension_detail_layout, self.extension_detail_id, self.tr("extensions_table_id", "Extension ID"))
+        _safe_set_form_label(self.extension_detail_layout, self.extension_detail_name, self.tr("extensions_table_name", "Display Name"))
+        _safe_set_form_label(self.extension_detail_layout, self.extension_detail_enabled, self.tr("extensions_table_status", "Status"))
+        _safe_set_form_label(self.extension_detail_layout, self.extension_detail_source_type, self.tr("extensions_table_source_type", "Source Type"))
+        _safe_set_form_label(self.extension_detail_layout, self.extension_detail_source_path, self.tr("extensions_table_source_path", "Source Path"))
+        _safe_set_form_label(self.extension_detail_layout, self.extension_detail_profiles, self.tr("extensions_detail_profiles", "Linked Profiles"))
+        _safe_set_form_label(self.log_settings_layout, self.control_log_level_combo, self.tr("control_log_level", "Control Log Level"))
+        _safe_set_form_label(self.log_settings_layout, self.control_log_retention_spin, self.tr("control_log_retention_days", "Retention Days"))
 
         _safe_set_form_label(self.summary_layout, self.global_last_run, self.tr("last_run"))
         _safe_set_form_label(self.summary_layout, self.global_last_status, self.tr("last_status"))
@@ -3115,6 +3531,18 @@ class ChromiumManagerWindow(QMainWindow):
     def get_control_plugin_url(self, plugin_id: str) -> str:
         return gui_mcp_runtime.get_control_plugin_url(self, plugin_id)
 
+    def get_control_keepalive_sites_url(self) -> str:
+        return gui_mcp_runtime.get_control_keepalive_sites_url(self)
+
+    def get_control_extensions_url(self) -> str:
+        return gui_mcp_runtime.get_control_extensions_url(self)
+
+    def get_control_extension_url(self, extension_id: str) -> str:
+        return gui_mcp_runtime.get_control_extension_url(self, extension_id)
+
+    def get_control_log_settings_url(self) -> str:
+        return gui_mcp_runtime.get_control_log_settings_url(self)
+
     def query_control_profiles(self, force: bool = False) -> Dict:
         return gui_mcp_runtime.query_control_profiles(self, force=force)
 
@@ -3144,6 +3572,15 @@ class ChromiumManagerWindow(QMainWindow):
 
     def query_control_plugins(self) -> Dict:
         return gui_mcp_runtime.query_control_plugins(self)
+
+    def query_control_keepalive_sites(self) -> Dict:
+        return gui_mcp_runtime.query_control_keepalive_sites(self)
+
+    def query_control_extensions(self) -> Dict:
+        return gui_mcp_runtime.query_control_extensions(self)
+
+    def query_control_log_settings(self) -> Dict:
+        return gui_mcp_runtime.query_control_log_settings(self)
 
     def refresh_mcp_status_ui(self):
         gui_mcp_runtime.refresh_mcp_status_ui(self)
@@ -3406,11 +3843,13 @@ class ChromiumManagerWindow(QMainWindow):
         previous_status = self.config.get("keepalive", {}).get("last_run_status")
         previous_run_at = self.config.get("keepalive", {}).get("last_run_at")
         self.reload_config_if_changed(force=False)
+        self.invalidate_control_keepalive_cache()
         keepalive_payload = self.query_control_keepalive()
         keepalive = dict(
             keepalive_payload.get("keepalive", {}) if isinstance(keepalive_payload.get("keepalive", {}), dict) else self.config["keepalive"]
         )
         runtime = keepalive_payload.get("runtime", {}) if isinstance(keepalive_payload.get("runtime", {}), dict) else {}
+        scheduler = keepalive_payload.get("scheduler", {}) if isinstance(keepalive_payload.get("scheduler", {}), dict) else {}
         self.global_last_run.setText(keepalive.get("last_run_at", "") or "-")
         self.global_last_status.setText(keepalive.get("last_run_status", "") or "-")
         self.global_last_message.setText(keepalive.get("last_run_message", "") or "-")
@@ -3423,17 +3862,56 @@ class ChromiumManagerWindow(QMainWindow):
         schedule_dt = schedule_time_to_datetime(keepalive.get("schedule_time", "09:00"), now_dt)
         today_text = now_dt.strftime("%Y-%m-%d")
         last_scheduled_date = str(keepalive.get("last_scheduled_run_date", "")).strip()
-        view_model = build_keepalive_schedule_view_model(
-            enabled_profile_count=len(enabled_profiles),
-            now_dt=now_dt,
-            schedule_dt=schedule_dt,
-            last_scheduled_date=last_scheduled_date,
-            keepalive_running=bool(runtime.get("running", False)),
-            triggered_today_text=today_text,
-            format_datetime=format_datetime_for_ui,
-            should_trigger_schedule=should_trigger_keepalive_schedule,
-            tr=self.tr,
-        )
+        if scheduler:
+            scheduler_running = bool(scheduler.get("running", False))
+            scheduler_decision = str(scheduler.get("last_decision", "") or "").strip()
+            triggered_at = str(scheduler.get("last_triggered_at", "") or "").strip()
+            if bool(runtime.get("running", False)):
+                view_model = {
+                    "status": self.tr("schedule_status_running", "Running"),
+                    "next_run": "-",
+                    "last_result": self.tr("schedule_result_triggered_today", "Triggered today: {today_text}").format(
+                        today_text=triggered_at[:10] if triggered_at else today_text
+                    ),
+                }
+            elif scheduler_running and scheduler_decision == "triggered":
+                view_model = {
+                    "status": self.tr("schedule_status_done_today", "Done today"),
+                    "next_run": format_datetime_for_ui(schedule_dt + datetime.timedelta(days=1)),
+                    "last_result": self.tr("schedule_result_triggered_today", "Triggered today: {today_text}").format(
+                        today_text=triggered_at[:10] if triggered_at else today_text
+                    ),
+                }
+            elif scheduler_running and scheduler_decision == "no_enabled_profiles":
+                view_model = {
+                    "status": self.tr("schedule_status_disabled", "Disabled"),
+                    "next_run": "-",
+                    "last_result": self.tr("schedule_result_enable_profiles", "Enable profiles first"),
+                }
+            else:
+                view_model = build_keepalive_schedule_view_model(
+                    enabled_profile_count=len(enabled_profiles),
+                    now_dt=now_dt,
+                    schedule_dt=schedule_dt,
+                    last_scheduled_date=last_scheduled_date,
+                    keepalive_running=bool(runtime.get("running", False)),
+                    triggered_today_text=today_text,
+                    format_datetime=format_datetime_for_ui,
+                    should_trigger_schedule=should_trigger_keepalive_schedule,
+                    tr=self.tr,
+                )
+        else:
+            view_model = build_keepalive_schedule_view_model(
+                enabled_profile_count=len(enabled_profiles),
+                now_dt=now_dt,
+                schedule_dt=schedule_dt,
+                last_scheduled_date=last_scheduled_date,
+                keepalive_running=bool(runtime.get("running", False)),
+                triggered_today_text=today_text,
+                format_datetime=format_datetime_for_ui,
+                should_trigger_schedule=should_trigger_keepalive_schedule,
+                tr=self.tr,
+            )
         self.global_task_status.setText(view_model["status"])
         self.global_task_next_run.setText(view_model["next_run"])
         self.global_task_last_result.setText(view_model["last_result"])
@@ -3445,24 +3923,7 @@ class ChromiumManagerWindow(QMainWindow):
             return
         if self.gui_bootstrap_in_progress:
             return
-
         self.refresh_scheduler_status()
-        scheduler_runtime = self.current_ui_refresh_context.get("scheduler_keepalive_runtime", {})
-        if bool((scheduler_runtime if isinstance(scheduler_runtime, dict) else {}).get("running", False)):
-            return
-
-        enabled_profiles = self.get_enabled_keepalive_profiles()
-        if not enabled_profiles:
-            return
-
-        keepalive = self.config["keepalive"]
-        now_dt = datetime.datetime.now()
-        schedule_dt = schedule_time_to_datetime(keepalive.get("schedule_time", "09:00"), now_dt)
-        last_scheduled_date = str(keepalive.get("last_scheduled_run_date", "")).strip()
-        if not should_trigger_keepalive_schedule(now_dt, schedule_dt, last_scheduled_date):
-            return
-
-        self.start_keepalive_run([], "internal-schedule", persist_ui_settings=False)
 
     def run_keepalive_for_selected(self):
         selected_profiles = self.get_selected_profile_names()

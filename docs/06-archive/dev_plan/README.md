@@ -32,6 +32,7 @@ For future plan writing:
 
 ## Plans
 
+- [20260623 GUI Core Full API Separation Plan](./20260623_gui_core_full_api_separation_plan.md)
 - [20260615 GUI Core Productization Plan](./20260615_gui_core_productization_plan.md)
 - [20260616 Patchright First Smoothness Upgrade Plan](./20260616_patchright_first_smoothness_upgrade_plan.md)
 - [20260616 Runtime Performance And Engine Rearchitecture Plan](./20260616_runtime_performance_and_engine_rearchitecture_plan.md)

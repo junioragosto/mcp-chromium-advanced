@@ -27,6 +27,7 @@ from chromium_advanced.chromium_profile_lib import (
     get_hidden_subprocess_kwargs,
     now_text,
     resolve_chromium_binary,
+    resolve_profile_extension_dirs,
     sanitize_chromium_launch_args,
 )
 from chromium_advanced.mcp_runtime_config import resolve_mcp_headless, resolve_mcp_start_minimized
@@ -1935,11 +1936,16 @@ class PlaywrightCliEngine(BrowserEngine):
         window_size = str(launch_settings.get("window_size", "") or "").strip()
         if window_size:
             launch_args.append(f"--window-size={window_size}")
-        extension_dir = ""
+        extension_dirs: List[str] = []
         if bool(launch_settings.get("load_fingerprint_extension", True)):
             extension_dir = detect_fingerprint_extension_dir(paths.get("fingerprint_zip_path", ""))
-            if extension_dir:
-                launch_args.append(f"--load-extension={extension_dir}")
+            if extension_dir and extension_dir not in extension_dirs:
+                extension_dirs.append(extension_dir)
+        for configured_extension_dir in resolve_profile_extension_dirs(config, profile_name):
+            if configured_extension_dir not in extension_dirs:
+                extension_dirs.append(configured_extension_dir)
+        if extension_dirs:
+            launch_args.append(f"--load-extension={','.join(extension_dirs)}")
         extra_args = launch_settings.get("extra_args", [])
         if isinstance(extra_args, list):
             launch_args.extend(sanitize_chromium_launch_args([str(item).strip() for item in extra_args if str(item).strip()]))

@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import ctypes
+import datetime
 import inspect
 from contextlib import asynccontextmanager
 import multiprocessing
@@ -14,7 +15,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 from urllib.parse import unquote, urlunsplit
 
 import httpx
@@ -30,9 +31,12 @@ from chromium_advanced.chromium_profile_lib import (
     delete_keepalive_plugin_source,
     ensure_profile_bookmarks_initialized,
     get_default_config_path,
+    get_extension_catalog,
+    get_extension_record,
     get_keepalive_plugin_records,
     get_keepalive_plugin_source_text,
     get_hidden_subprocess_kwargs,
+    get_profile_extension_ids,
     inspect_keepalive_plugin_source,
     get_packaged_app_root,
     get_project_root,
@@ -49,11 +53,13 @@ from chromium_advanced.chromium_profile_lib import (
     update_profile_launch_time,
     run_keepalive_job,
 )
+from chromium_advanced.gui.gui_runtime import schedule_time_to_datetime, should_trigger_keepalive_schedule
 from chromium_advanced.mcp_runtime_config import resolve_control_api_token, resolve_mcp_api_token
 from chromium_advanced.occupancy_registry import list_profile_occupancy_entries
 from chromium_advanced.session_manager import SessionManager
 from chromium_advanced.engine_strategy import resolve_engine_strategy
 from chromium_advanced.action_pipeline import ActionPipeline
+from chromium_advanced.mirror_manager import MirrorManager
 
 
 HEALTHCHECK_TIMEOUT_SECONDS = 0.5
@@ -150,6 +156,10 @@ class KeepaliveJobManager:
                 stop_controller=stop_controller,
                 progress_callback=_progress,
             )
+            try:
+                MirrorManager(normalize_config(load_app_config(self.config_path))).cleanup_stale_runtimes()
+            except Exception:
+                pass
             with self._lock:
                 self._runtime["last_summary"] = dict(summary or {})
                 self._runtime["finished_at"] = str(summary.get("finished_at", "") or now_text())
@@ -166,6 +176,89 @@ class KeepaliveJobManager:
             with self._lock:
                 self._thread = None
                 self._stop_controller = None
+
+
+class KeepaliveScheduler:
+    def __init__(self, config_path: str, keepalive_manager: "KeepaliveJobManager", invalidate_caches: Callable[[], None]):
+        self.config_path = config_path
+        self.keepalive_manager = keepalive_manager
+        self.invalidate_caches = invalidate_caches
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._runtime: Dict[str, object] = {
+            "running": False,
+            "last_tick_at": "",
+            "last_decision": "",
+            "last_triggered_at": "",
+            "last_error": "",
+        }
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._runtime["running"] = True
+            self._thread = threading.Thread(target=self._run_loop, name="chromium-keepalive-scheduler", daemon=True)
+            self._thread.start()
+
+    def shutdown(self) -> None:
+        self._stop.set()
+        thread = None
+        with self._lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+        with self._lock:
+            self._runtime["running"] = False
+            self._thread = None
+
+    def get_status(self) -> Dict:
+        with self._lock:
+            return dict(self._runtime)
+
+    def maybe_trigger_once(self) -> None:
+        config = normalize_config(load_app_config(self.config_path))
+        keepalive = dict(config.get("keepalive", {}) if isinstance(config.get("keepalive", {}), dict) else {})
+        profiles = list(config.get("profiles", []) if isinstance(config.get("profiles", []), list) else [])
+        enabled_profiles = [
+            item for item in profiles
+            if isinstance(item, dict) and str(item.get("profile_name", "")).strip() and bool(item.get("keepalive_enabled", False))
+        ]
+        now_dt = datetime.datetime.now()
+        schedule_dt = schedule_time_to_datetime(str(keepalive.get("schedule_time", "09:00") or "09:00"), now_dt)
+        last_scheduled_date = str(keepalive.get("last_scheduled_run_date", "") or "").strip()
+        decision = "idle"
+        if not enabled_profiles:
+            decision = "no_enabled_profiles"
+        elif self.keepalive_manager.is_running():
+            decision = "keepalive_running"
+        elif should_trigger_keepalive_schedule(now_dt, schedule_dt, last_scheduled_date):
+            today_text = now_dt.strftime("%Y-%m-%d")
+            keepalive["last_scheduled_run_date"] = today_text
+            config["keepalive"] = keepalive
+            save_app_config(config, self.config_path)
+            self.invalidate_caches()
+            self.keepalive_manager.start(selected_profiles=[], source="internal-schedule")
+            decision = "triggered"
+            with self._lock:
+                self._runtime["last_triggered_at"] = now_text()
+        else:
+            decision = "outside_window"
+        with self._lock:
+            self._runtime["last_tick_at"] = now_text()
+            self._runtime["last_decision"] = decision
+
+    def _run_loop(self) -> None:
+        while not self._stop.wait(15.0):
+            try:
+                self.maybe_trigger_once()
+            except Exception as exc:
+                with self._lock:
+                    self._runtime["last_tick_at"] = now_text()
+                    self._runtime["last_error"] = str(exc)
+                    self._runtime["last_decision"] = "error"
 
 
 class ManualProfileRuntimeManager:
@@ -847,6 +940,10 @@ def create_daemon_app(
                 return
             session_manager.reconcile_stale_profile_occupancy()
             session_manager.reap_expired_profile_occupancy()
+            try:
+                MirrorManager(normalize_config(load_app_config(config_path))).cleanup_stale_runtimes()
+            except Exception:
+                pass
             housekeeping_last_run_at = now_ts
 
     def get_runtime_status_cached(*, include_external_processes: bool = True, include_mirror_status: bool = True) -> Dict:
@@ -926,6 +1023,7 @@ def create_daemon_app(
     session_manager = SessionManager(config_path=config_path)
     manual_profile_manager = ManualProfileRuntimeManager(session_manager, config_path)
     keepalive_manager = KeepaliveJobManager(config_path)
+    keepalive_scheduler = KeepaliveScheduler(config_path, keepalive_manager, invalidate_runtime_caches)
     worker_manager = WorkerManager(
         session_manager=session_manager,
         config_path=config_path,
@@ -1042,9 +1140,14 @@ def create_daemon_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        keepalive_scheduler.start()
         try:
             yield
         finally:
+            try:
+                keepalive_scheduler.shutdown()
+            except Exception:
+                pass
             try:
                 keepalive_manager.request_stop()
             except Exception:
@@ -1226,6 +1329,7 @@ def create_daemon_app(
 
     @app.get("/_control/keepalive")
     def control_keepalive_status() -> Dict:
+        maybe_run_housekeeping(force=False)
         config = normalize_config(load_app_config(config_path))
         keepalive = dict(config.get("keepalive", {}) if isinstance(config.get("keepalive", {}), dict) else {})
         profiles = list(config.get("profiles", []) if isinstance(config.get("profiles", []), list) else [])
@@ -1250,6 +1354,97 @@ def create_daemon_app(
             "keepalive": keepalive,
             "enabled_profiles": enabled_profiles,
             "runtime": keepalive_manager.get_status(),
+            "scheduler": keepalive_scheduler.get_status(),
+        }
+
+    @app.get("/_control/keepalive/sites")
+    def control_keepalive_sites() -> Dict:
+        config = normalize_config(load_app_config(config_path))
+        return {
+            "ok": True,
+            "surface": "control",
+            "sites": get_keepalive_plugin_records(config),
+            "profile_keepalive_site_map": {
+                str(item.get("profile_name", "") or "").strip(): [
+                    site_id
+                    for site_id, enabled in dict(
+                        item.get("keepalive_sites", {}) if isinstance(item.get("keepalive_sites", {}), dict) else {}
+                    ).items()
+                    if bool(enabled)
+                ]
+                for item in config.get("profiles", [])
+                if str(item.get("profile_name", "") or "").strip()
+            },
+        }
+
+    @app.get("/_control/profiles/{profile_name}/keepalive-sites")
+    def control_profile_keepalive_sites(profile_name: str) -> Dict:
+        config = normalize_config(load_app_config(config_path))
+        normalized_profile_name = str(unquote(profile_name) or "").strip()
+        profile_record = next(
+            (
+                item
+                for item in config.get("profiles", [])
+                if str(item.get("profile_name", "") or "").strip() == normalized_profile_name
+            ),
+            {},
+        )
+        site_flags = dict(profile_record.get("keepalive_sites", {}) if isinstance(profile_record.get("keepalive_sites", {}), dict) else {})
+        site_ids = [site_id for site_id, enabled in site_flags.items() if bool(enabled)]
+        return {
+            "ok": True,
+            "surface": "control",
+            "profile_name": normalized_profile_name,
+            "site_ids": site_ids,
+        }
+
+    @app.put("/_control/profiles/{profile_name}/keepalive-sites")
+    async def control_update_profile_keepalive_sites(profile_name: str, request: Request) -> Dict:
+        normalized_profile_name = str(unquote(profile_name) or "").strip()
+        if not normalized_profile_name:
+            raise HTTPException(status_code=400, detail="profile_name is required")
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        site_ids = payload.get("site_ids", [])
+        if not isinstance(site_ids, list):
+            raise HTTPException(status_code=400, detail="site_ids must be a list")
+        normalized_site_ids = []
+        for item in site_ids:
+            value = str(item or "").strip()
+            if value and value not in normalized_site_ids:
+                normalized_site_ids.append(value)
+        config = normalize_config(load_app_config(config_path))
+        updated = False
+        for profile_record in config.get("profiles", []):
+            if str(profile_record.get("profile_name", "") or "").strip() != normalized_profile_name:
+                continue
+            current_flags = dict(profile_record.get("keepalive_sites", {}) if isinstance(profile_record.get("keepalive_sites", {}), dict) else {})
+            for known_site in list(current_flags.keys()):
+                current_flags[known_site] = known_site in normalized_site_ids
+            for site_id in normalized_site_ids:
+                current_flags[site_id] = True
+            profile_record["keepalive_sites"] = current_flags
+            updated = True
+            break
+        if not updated:
+            raise HTTPException(status_code=404, detail="profile not found")
+        config = save_app_config(config, config_path)
+        append_jsonl_event(
+            get_control_log_path(config_path),
+            {
+                "time": now_text(),
+                "source": "control",
+                "level": "info",
+                "event": "profile_keepalive_sites_updated",
+                "message": "profile keepalive site associations updated",
+                "detail": {"profile_name": normalized_profile_name, "site_ids": normalized_site_ids},
+            },
+        )
+        return {
+            "ok": True,
+            "surface": "control",
+            "profile_name": normalized_profile_name,
+            "site_ids": normalized_site_ids,
         }
 
     @app.post("/_control/profiles/{profile_name}/launch")
@@ -1353,7 +1548,7 @@ def create_daemon_app(
         config = normalize_config(load_app_config(config_path))
         config.setdefault("logging", {})
         level = str(payload.get("level", config["logging"].get("level", "info"))).strip().lower() or "info"
-        if level not in {"debug", "info", "warning", "error"}:
+        if level not in {"debug", "info", "warning", "error", "silent"}:
             raise HTTPException(status_code=400, detail="unsupported log level")
         retention_days = max(1, min(365, int(payload.get("retention_days", config["logging"].get("retention_days", 7)) or 7)))
         config["logging"]["level"] = level
@@ -1387,6 +1582,200 @@ def create_daemon_app(
             "surface": "control",
             "plugins": get_keepalive_plugin_records(config),
             "profile_plugin_map": profile_plugin_map,
+        }
+
+    @app.get("/_control/extensions")
+    def control_extensions() -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config
+
+        config = normalize_config(load_app_config(config_path))
+        profile_extension_map = dict(
+            config.get("profile_extensions", {}) if isinstance(config.get("profile_extensions", {}), dict) else {}
+        )
+        return {
+            "ok": True,
+            "surface": "control",
+            "extensions": get_extension_catalog(config),
+            "profile_extension_map": profile_extension_map,
+        }
+
+    @app.get("/_control/extensions/{extension_id}")
+    def control_extension_detail(extension_id: str) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config
+
+        normalized_extension_id = str(unquote(extension_id) or "").strip()
+        if not normalized_extension_id:
+            raise HTTPException(status_code=400, detail="extension_id is required")
+        config = normalize_config(load_app_config(config_path))
+        record = get_extension_record(config, normalized_extension_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="extension not found")
+        return {
+            "ok": True,
+            "surface": "control",
+            "extension": record,
+        }
+
+    @app.post("/_control/extensions")
+    async def control_create_extension(request: Request) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config, save_app_config
+
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        extension_id = str(payload.get("extension_id", "") or payload.get("id", "") or "").strip()
+        if not extension_id:
+            raise HTTPException(status_code=400, detail="extension_id is required")
+        config = normalize_config(load_app_config(config_path))
+        catalog = list(config.get("extensions", []) if isinstance(config.get("extensions", []), list) else [])
+        if any(str(item.get("extension_id", "") or "").strip() == extension_id for item in catalog if isinstance(item, dict)):
+            raise HTTPException(status_code=409, detail="extension already exists")
+        record = {
+            "extension_id": extension_id,
+            "display_name": str(payload.get("display_name", "") or extension_id).strip() or extension_id,
+            "source_type": str(payload.get("source_type", "zip") or "zip").strip().lower() or "zip",
+            "source_path": str(payload.get("source_path", "") or payload.get("path", "") or "").strip(),
+            "enabled": bool(payload.get("enabled", True)),
+            "notes": str(payload.get("notes", "") or "").strip(),
+        }
+        catalog.append(record)
+        config["extensions"] = catalog
+        config = save_app_config(config, config_path)
+        return {"ok": True, "surface": "control", "extension": record}
+
+    @app.put("/_control/extensions/{extension_id}")
+    async def control_update_extension(extension_id: str, request: Request) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config, save_app_config
+
+        normalized_extension_id = str(unquote(extension_id) or "").strip()
+        if not normalized_extension_id:
+            raise HTTPException(status_code=400, detail="extension_id is required")
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        config = normalize_config(load_app_config(config_path))
+        catalog = list(config.get("extensions", []) if isinstance(config.get("extensions", []), list) else [])
+        updated_record = None
+        for item in catalog:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("extension_id", "") or "").strip() != normalized_extension_id:
+                continue
+            item["display_name"] = str(payload.get("display_name", item.get("display_name", normalized_extension_id)) or normalized_extension_id).strip() or normalized_extension_id
+            item["source_type"] = str(payload.get("source_type", item.get("source_type", "zip")) or "zip").strip().lower() or "zip"
+            item["source_path"] = str(payload.get("source_path", item.get("source_path", "")) or "").strip()
+            item["enabled"] = bool(payload.get("enabled", item.get("enabled", True)))
+            item["notes"] = str(payload.get("notes", item.get("notes", "")) or "").strip()
+            updated_record = dict(item)
+            break
+        if updated_record is None:
+            raise HTTPException(status_code=404, detail="extension not found")
+        config["extensions"] = catalog
+        config = save_app_config(config, config_path)
+        return {"ok": True, "surface": "control", "extension": updated_record}
+
+    @app.delete("/_control/extensions/{extension_id}")
+    def control_delete_extension(extension_id: str) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config, save_app_config
+
+        normalized_extension_id = str(unquote(extension_id) or "").strip()
+        if not normalized_extension_id:
+            raise HTTPException(status_code=400, detail="extension_id is required")
+        config = normalize_config(load_app_config(config_path))
+        catalog = [item for item in (config.get("extensions", []) if isinstance(config.get("extensions", []), list) else []) if str(item.get("extension_id", "") or "").strip() != normalized_extension_id]
+        config["extensions"] = catalog
+        profile_extension_map = dict(config.get("profile_extensions", {}) if isinstance(config.get("profile_extensions", {}), dict) else {})
+        for profile_name, extension_ids in list(profile_extension_map.items()):
+            if not isinstance(extension_ids, list):
+                continue
+            profile_extension_map[profile_name] = [item for item in extension_ids if str(item or "").strip() != normalized_extension_id]
+        config["profile_extensions"] = profile_extension_map
+        config = save_app_config(config, config_path)
+        return {"ok": True, "surface": "control", "extension_id": normalized_extension_id}
+
+    @app.get("/_control/profiles/{profile_name}/extensions")
+    def control_profile_extensions(profile_name: str) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config
+
+        config = normalize_config(load_app_config(config_path))
+        normalized_profile_name = str(unquote(profile_name) or "").strip()
+        extension_ids = get_profile_extension_ids(config, normalized_profile_name)
+        return {
+            "ok": True,
+            "surface": "control",
+            "profile_name": normalized_profile_name,
+            "extension_ids": extension_ids,
+        }
+
+    @app.put("/_control/profiles/{profile_name}/extensions")
+    async def control_update_profile_extensions(profile_name: str, request: Request) -> Dict:
+        from chromium_advanced.chromium_profile_lib import load_app_config, normalize_config, save_app_config
+
+        normalized_profile_name = str(unquote(profile_name) or "").strip()
+        if not normalized_profile_name:
+            raise HTTPException(status_code=400, detail="profile_name is required")
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        extension_ids = payload.get("extension_ids", [])
+        if not isinstance(extension_ids, list):
+            raise HTTPException(status_code=400, detail="extension_ids must be a list")
+        normalized_extension_ids = []
+        for item in extension_ids:
+            value = str(item or "").strip()
+            if value and value not in normalized_extension_ids:
+                normalized_extension_ids.append(value)
+        config = normalize_config(load_app_config(config_path))
+        config.setdefault("profile_extensions", {})
+        config["profile_extensions"][normalized_profile_name] = normalized_extension_ids
+        config = save_app_config(config, config_path)
+        append_jsonl_event(
+            get_control_log_path(config_path),
+            {
+                "time": now_text(),
+                "source": "control",
+                "level": "info",
+                "event": "profile_extensions_updated",
+                "message": "profile extension associations updated",
+                "detail": {"profile_name": normalized_profile_name, "extension_ids": normalized_extension_ids},
+            },
+        )
+        return {
+            "ok": True,
+            "surface": "control",
+            "profile_name": normalized_profile_name,
+            "extension_ids": normalized_extension_ids,
+        }
+
+    @app.post("/_control/keepalive/sites/preview")
+    async def control_preview_keepalive_site(request: Request) -> Dict:
+        return await control_preview_plugin(request)
+
+    @app.post("/_control/keepalive/sites")
+    async def control_create_keepalive_site(request: Request) -> Dict:
+        payload = await control_create_plugin(request)
+        plugin_payload = dict(payload.get("plugin", {}) if isinstance(payload.get("plugin", {}), dict) else {})
+        return {
+            "ok": True,
+            "surface": "control",
+            "site": plugin_payload,
+        }
+
+    @app.put("/_control/keepalive/sites/{site_id}")
+    async def control_update_keepalive_site(site_id: str, request: Request) -> Dict:
+        payload = await control_update_plugin(site_id, request)
+        plugin_payload = dict(payload.get("plugin", {}) if isinstance(payload.get("plugin", {}), dict) else {})
+        return {
+            "ok": True,
+            "surface": "control",
+            "site": plugin_payload,
+        }
+
+    @app.delete("/_control/keepalive/sites/{site_id}")
+    def control_delete_keepalive_site(site_id: str) -> Dict:
+        payload = control_delete_plugin(site_id)
+        return {
+            "ok": True,
+            "surface": "control",
+            "site_id": str(payload.get("plugin_id", "") or ""),
+            "path": str(payload.get("path", "") or ""),
         }
 
     @app.post("/_control/plugins/preview")

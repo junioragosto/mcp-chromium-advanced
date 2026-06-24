@@ -1,9 +1,24 @@
-# Keepalive Plugin Guide
+# Keepalive Site Plugin Guide
 
 This project supports a lightweight keepalive plugin runtime for adding new
 site-specific keepalive logic without rebuilding the packaged application.
 
-中文说明：保活站点已经按插件化方向设计。这里提到的站点名称只属于“保活插件示例/内置插件”范围，不代表 MCP 默认业务站点，也不代表调用方必须检查这些站点。未来新增其他站点时，可以把 Python 插件放到插件目录，让 GUI 和保活任务自动发现。
+中文说明：这里的“插件”专指保活站点脚本，不是 Chromium 浏览器扩展。文中提到的站点名称只属于保活脚本示例/内置脚本范围，不代表 MCP 默认业务站点，也不代表调用方必须检查这些站点。未来新增其他站点时，可以把 Python 插件放到插件目录，让 GUI 和保活任务自动发现。
+
+## API Naming
+
+Keepalive site plugins and browser extensions are now separated across config,
+GUI, and control API:
+
+- keepalive site plugins:
+  - config keys: `keepalive`, `profile.keepalive_sites`
+  - control API: `/_control/keepalive/sites`
+- browser extensions:
+  - config keys: `extensions`, `profile_extensions`
+  - control API: `/_control/extensions`
+
+Legacy `/_control/plugins` remains only as a compatibility surface for older
+keepalive tooling. New integrations should use `/_control/keepalive/sites`.
 
 ## Plugin Directory
 
@@ -28,7 +43,7 @@ Additional directories can be configured in:
 The GUI also exposes this setting in the keepalive settings panel. Separate
 multiple directories with semicolons.
 
-Only load plugins from trusted local directories. A keepalive plugin is Python
+Only load plugins from trusted local directories. A keepalive site plugin is Python
 code and has the same local permissions as the application process.
 
 ## Minimal Plugin

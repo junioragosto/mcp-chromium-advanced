@@ -27,8 +27,13 @@
 - `Service Plane`：MCP 与 daemon automation 的业务面
 - `Core Runtime`：daemon、worker、会话治理、能力归一化
 - `Browser Engines`：四套浏览器引擎
-- `Ops Runtime`：keepalive、mirror、日志
+- `Ops Runtime`：keepalive、浏览器扩展装载、日志
 - `Data / Local Assets`：配置、UserData、运行时资源、本地资产
+
+补充语义：
+- `UserDataProfile*`：正式持久层，保存长期登录态与用户数据
+- `mirror_disk`：镜像层，用于生成受治理运行副本
+- `runtime`：临时执行层，用于 `official_playwright_mcp` 等隔离运行时，会后应清理
 
 ## 2. 控制面与业务面分层
 
@@ -37,6 +42,14 @@
 - GUI 控制面
 - MCP 业务面
 - daemon automation 业务面
+
+控制面下当前已稳定的核心命名空间包括：
+
+- `/_control/profiles/*`
+- `/_control/keepalive/*`
+- `/_control/keepalive/sites*`
+- `/_control/extensions*`
+- `/_control/log-settings`
 
 ```mermaid
 flowchart TB

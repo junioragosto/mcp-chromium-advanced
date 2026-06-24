@@ -1104,9 +1104,15 @@ def create_driver_for_profile(config: Dict, profile_name: str):
     if resolve_mcp_headless(config):
         options.add_argument("--headless=new")
 
+    extension_dirs = []
     extension_dir = _lib().detect_fingerprint_extension_dir(paths.get("fingerprint_zip_path", ""))
-    if extension_dir:
-        options.add_argument(f"--load-extension={extension_dir}")
+    if extension_dir and extension_dir not in extension_dirs:
+        extension_dirs.append(extension_dir)
+    for configured_extension_dir in _lib().resolve_profile_extension_dirs(config, profile_name):
+        if configured_extension_dir not in extension_dirs:
+            extension_dirs.append(configured_extension_dir)
+    if extension_dirs:
+        options.add_argument(f"--load-extension={','.join(extension_dirs)}")
 
     kwargs = {
         "driver_executable_path": chromedriver_binary,

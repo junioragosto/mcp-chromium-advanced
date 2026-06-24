@@ -115,6 +115,11 @@ Success response contains:
 - `runtime_root`
 - `reused`
 
+`user_data_dir` and `profile_dir` are returned from the configured profile root.
+They are not hard-coded paths. This allows non-browser consumers such as
+`yt-dlp --cookies-from-browser ...` to use the same governed profile lease
+without launching a browser window.
+
 `resource_only=true` means:
 
 - the daemon still acquires the same profile occupancy and runtime lock

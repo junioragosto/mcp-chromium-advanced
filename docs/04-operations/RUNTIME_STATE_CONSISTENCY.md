@@ -58,6 +58,7 @@ GUI is no longer allowed to assemble primary truth from local heuristics.
 GUI responsibilities:
 
 - read control API profile snapshots
+- read control API keepalive scheduler/runtime snapshots
 - render status labels/tooltips
 - subscribe to occupancy events
 - keep a local fallback occupancy cache only for temporary degradation
@@ -131,3 +132,5 @@ Key scenarios:
 - close manual launch -> GUI returns to idle quickly
 - MCP session start -> profile becomes busy without conflicting local fallback state
 - noise-only Chromium child processes do not block session startup
+- daemon-side keepalive scheduler can trigger without requiring the GUI process to be alive
+- stale isolated `runtime` directories are pruned by session close, daemon housekeeping, or keepalive cleanup

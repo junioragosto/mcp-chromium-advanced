@@ -28,8 +28,20 @@ MCP_WORKER_EXE_NAME = "ChromiumMcpWorker.exe"
 
 
 def get_resource_path(*parts) -> str:
-    base_dir = get_project_root()
-    return os.path.join(base_dir, *parts)
+    candidates = []
+    packaged_root = get_packaged_app_root()
+    if packaged_root:
+        candidates.append(packaged_root)
+    project_root = get_project_root()
+    if project_root and project_root not in candidates:
+        candidates.append(project_root)
+    for base_dir in candidates:
+        candidate = os.path.join(base_dir, *parts)
+        if os.path.exists(candidate):
+            return candidate
+    if candidates:
+        return os.path.join(candidates[0], *parts)
+    return os.path.join(get_project_root(), *parts)
 
 
 def show_single_instance_message() -> None:

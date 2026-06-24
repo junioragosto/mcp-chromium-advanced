@@ -10,10 +10,12 @@ from typing import Any, Dict, List, Optional
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
 from chromium_advanced.browser_capability_kernel import enrich_capability_payload
 from chromium_advanced.chromium_profile_lib import (
+    detect_fingerprint_extension_dir,
     get_profile_directory_path,
     get_profile_user_data_root,
     resolve_chromium_binary,
     resolve_official_playwright_mcp_runtime,
+    resolve_profile_extension_dirs,
 )
 
 
@@ -31,6 +33,7 @@ class _OfficialRuntimeSpec:
     chromium_binary: str
     user_data_dir: str
     profile_name: str
+    extension_dirs: List[str]
 
 
 class _OfficialPlaywrightMcpSessionThread:
@@ -56,6 +59,7 @@ class _OfficialPlaywrightMcpSessionThread:
                 chromium_binary=self._runtime_spec.chromium_binary,
                 user_data_dir=self._runtime_spec.user_data_dir,
                 profile_name=self._runtime_spec.profile_name,
+                extension_dirs=self._runtime_spec.extension_dirs,
                 config={},
             )
         except BaseException as exc:
@@ -504,6 +508,7 @@ class OfficialPlaywrightMcpEngine(BrowserEngine):
             chromium_binary=chromium_binary,
             user_data_dir=user_data_root,
             profile_name=profile_name,
+            extension_dirs=self._resolve_extension_dirs(config, profile_name),
         )
         return OfficialPlaywrightMcpBrowserSession(
             runtime_spec=runtime_spec,
@@ -511,3 +516,14 @@ class OfficialPlaywrightMcpEngine(BrowserEngine):
             runtime_root=runtime_root,
             mirror_generated_at=mirror_generated_at,
         )
+
+    @staticmethod
+    def _resolve_extension_dirs(config: Dict, profile_name: str) -> List[str]:
+        paths = config.get("paths", {}) if isinstance(config, dict) else {}
+        resolved = resolve_profile_extension_dirs(config, profile_name)
+        fingerprint_enabled = bool(config.get("launch", {}).get("load_fingerprint_extension", True)) if isinstance(config, dict) else True
+        if fingerprint_enabled:
+            fingerprint_dir = detect_fingerprint_extension_dir(paths.get("fingerprint_zip_path", ""))
+            if fingerprint_dir and fingerprint_dir not in resolved:
+                resolved.insert(0, fingerprint_dir)
+        return resolved

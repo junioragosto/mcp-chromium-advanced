@@ -119,6 +119,12 @@ class OfficialBridgeRuntime {
         },
       },
     });
+    const extensionDirs = Array.isArray(this.config?.browser?.extensionDirs)
+      ? this.config.browser.extensionDirs.map(item => String(item || "").trim()).filter(Boolean)
+      : [];
+    if (extensionDirs.length) {
+      this.server.options.browser.launchOptions.args.push(`--load-extension=${extensionDirs.join(",")}`);
+    }
     this.client = new Client({ name: "chromium-advanced-official-bridge", version: "0.1.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([this.server.connect(serverTransport), this.client.connect(clientTransport)]);

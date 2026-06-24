@@ -14,11 +14,14 @@ from chromium_advanced.browser_capability_kernel import enrich_capability_payloa
 from chromium_advanced.browser_engines.base import BrowserEngine, BrowserSession, BrowserSessionSummary
 from chromium_advanced.browser_engines import patchright_tabs_pages
 from chromium_advanced.chromium_profile_lib import (
+    detect_fingerprint_extension_dir,
     resolve_bundled_node_executable,
     resolve_bundled_playwright_cli_entrypoint,
     get_chromium_restore_prompt_suppression_args,
     get_profile_user_data_root,
     now_text,
+    resolve_chromium_binary,
+    resolve_profile_extension_dirs,
     sanitize_chromium_launch_args,
 )
 from chromium_advanced.mcp_runtime_config import resolve_mcp_headless, resolve_mcp_start_minimized
@@ -2239,6 +2242,13 @@ class PatchrightEngine(BrowserEngine):
         if launch_settings.get("no_default_browser_check", True):
             args.append("--no-default-browser-check")
         args.extend(get_chromium_restore_prompt_suppression_args())
+        extension_dirs = resolve_profile_extension_dirs(config, profile_name)
+        if launch_settings.get("load_fingerprint_extension", True):
+            fingerprint_extension_dir = detect_fingerprint_extension_dir(paths.get("fingerprint_zip_path", ""))
+            if fingerprint_extension_dir and fingerprint_extension_dir not in extension_dirs:
+                extension_dirs.insert(0, fingerprint_extension_dir)
+        if extension_dirs:
+            args.append(f"--load-extension={','.join(extension_dirs)}")
         extra_args = launch_settings.get("extra_args", [])
         if isinstance(extra_args, list):
             args.extend(sanitize_chromium_launch_args([item for item in extra_args if item]))

@@ -512,6 +512,8 @@ def build_default_config() -> Dict:
             "last_notes_url": "",
             "skipped_version": "",
         },
+        "extensions": [],
+        "profile_extensions": {},
         "profile_plugins": {},
     }
 
@@ -1477,6 +1479,14 @@ def normalize_profile_entry(entry: Dict, legacy_keepalive_sites: Optional[Dict] 
     normalized["user_data_dir_name"] = str(normalized.get("user_data_dir_name", "")).strip()
     normalized["account"] = str(normalized.get("account", "")).strip()
     normalized["notes"] = str(normalized.get("notes", "")).strip()
+    extension_ids = normalized.get("extensions", [])
+    if not isinstance(extension_ids, list):
+        extension_ids = []
+    normalized["extensions"] = []
+    for extension_id in extension_ids:
+        value = str(extension_id or "").strip()
+        if value and value not in normalized["extensions"]:
+            normalized["extensions"].append(value)
     normalized["keepalive_enabled"] = bool(normalized.get("keepalive_enabled", False))
     if "keepalive_sites" in normalized:
         normalized["keepalive_sites"] = normalize_keepalive_site_flags(normalized.get("keepalive_sites"), default=False)
@@ -1748,6 +1758,44 @@ def normalize_config(config: Optional[Dict]) -> Dict:
             if isinstance(item, dict) and str(item.get("profile_name", "")).strip()
         ])
 
+    loaded_extensions = loaded.get("extensions", [])
+    if isinstance(loaded_extensions, list):
+        normalized_extensions = []
+        seen_extension_ids = set()
+        for raw in loaded_extensions:
+            if not isinstance(raw, dict):
+                continue
+            extension_id = str(raw.get("extension_id", "") or raw.get("id", "") or "").strip()
+            if not extension_id or extension_id in seen_extension_ids:
+                continue
+            seen_extension_ids.add(extension_id)
+            normalized_extensions.append(
+                {
+                    "extension_id": extension_id,
+                    "display_name": str(raw.get("display_name", "") or extension_id).strip() or extension_id,
+                    "source_type": str(raw.get("source_type", "zip") or "zip").strip().lower() or "zip",
+                    "source_path": str(raw.get("source_path", "") or raw.get("path", "") or "").strip(),
+                    "enabled": bool(raw.get("enabled", True)),
+                    "notes": str(raw.get("notes", "") or "").strip(),
+                }
+            )
+        normalized["extensions"] = normalized_extensions
+
+    loaded_profile_extensions = loaded.get("profile_extensions", {})
+    if isinstance(loaded_profile_extensions, dict):
+        normalized_profile_extensions = {}
+        for profile_name, extension_ids in loaded_profile_extensions.items():
+            normalized_profile_name = str(profile_name or "").strip()
+            if not normalized_profile_name or not isinstance(extension_ids, list):
+                continue
+            values = []
+            for extension_id in extension_ids:
+                value = str(extension_id or "").strip()
+                if value and value not in values:
+                    values.append(value)
+            normalized_profile_extensions[normalized_profile_name] = values
+        normalized["profile_extensions"] = normalized_profile_extensions
+
     loaded_profile_plugins = loaded.get("profile_plugins", {})
     if isinstance(loaded_profile_plugins, dict):
         normalized_map = {}
@@ -1762,6 +1810,22 @@ def normalize_config(config: Optional[Dict]) -> Dict:
                     values.append(value)
             normalized_map[normalized_profile_name] = values
         normalized["profile_plugins"] = normalized_map
+        # Legacy bridge: historical profile_plugins really represented keepalive site associations.
+        profiles_by_name = {
+            str(item.get("profile_name", "") or "").strip(): item
+            for item in normalized.get("profiles", [])
+            if isinstance(item, dict) and str(item.get("profile_name", "") or "").strip()
+        }
+        for profile_name, site_ids in normalized_map.items():
+            profile_record = profiles_by_name.get(profile_name)
+            if not isinstance(profile_record, dict):
+                continue
+            keepalive_sites = dict(profile_record.get("keepalive_sites", {}) or {})
+            for site_id in site_ids:
+                normalized_site_id = str(site_id or "").strip()
+                if normalized_site_id:
+                    keepalive_sites[normalized_site_id] = True
+            profile_record["keepalive_sites"] = normalize_keepalive_site_flags(keepalive_sites, default=False)
 
     normalized["profiles"] = sort_profiles(normalized["profiles"])
     normalized["app"]["language"] = normalize_language_code(normalized["app"].get("language", detect_default_language()))
@@ -1817,9 +1881,27 @@ def normalize_config(config: Optional[Dict]) -> Dict:
     if not normalized["control"]["path"].startswith("/"):
         normalized["control"]["path"] = "/" + normalized["control"]["path"]
     normalized["logging"]["level"] = str(normalized["logging"].get("level", "info")).strip().lower() or "info"
-    if normalized["logging"]["level"] not in {"debug", "info", "warning", "error"}:
+    if normalized["logging"]["level"] not in {"debug", "info", "warning", "error", "silent"}:
         normalized["logging"]["level"] = "info"
     normalized["logging"]["retention_days"] = max(1, min(365, int(normalized["logging"].get("retention_days", 7))))
+    normalized["extensions"] = list(normalized.get("extensions", []) if isinstance(normalized.get("extensions", []), list) else [])
+    normalized["profile_extensions"] = dict(
+        normalized.get("profile_extensions", {}) if isinstance(normalized.get("profile_extensions", {}), dict) else {}
+    )
+    for profile_record in normalized.get("profiles", []):
+        profile_name = str(profile_record.get("profile_name", "") or "").strip()
+        if not profile_name:
+            continue
+        inline_extensions = profile_record.get("extensions", [])
+        if not isinstance(inline_extensions, list):
+            continue
+        values: List[str] = []
+        for extension_id in inline_extensions:
+            value = str(extension_id or "").strip()
+            if value and value not in values:
+                values.append(value)
+        if values and not normalized["profile_extensions"].get(profile_name):
+            normalized["profile_extensions"][profile_name] = values
     normalized["profile_plugins"] = dict(normalized.get("profile_plugins", {}) if isinstance(normalized.get("profile_plugins", {}), dict) else {})
     normalized["keepalive"]["headless"] = bool(normalized["keepalive"].get("headless", False))
     normalized["keepalive"]["page_timeout_seconds"] = max(10, int(normalized["keepalive"].get("page_timeout_seconds", 45)))
@@ -1985,6 +2067,57 @@ def get_profile_record(config: Dict, profile_name: str) -> Dict:
         if item.get("profile_name") == profile_name:
             return item
     return {}
+
+
+def get_extension_catalog(config: Dict) -> List[Dict]:
+    normalized = normalize_config(config)
+    catalog = normalized.get("extensions", [])
+    return list(catalog if isinstance(catalog, list) else [])
+
+
+def get_extension_record(config: Dict, extension_id: str) -> Dict:
+    normalized = normalize_config(config)
+    target = str(extension_id or "").strip()
+    for item in normalized.get("extensions", []):
+        if str(item.get("extension_id", "") or "").strip() == target:
+            return dict(item)
+    return {}
+
+
+def get_profile_extension_ids(config: Dict, profile_name: str) -> List[str]:
+    normalized = normalize_config(config)
+    associations = normalized.get("profile_extensions", {})
+    values = associations.get(str(profile_name or "").strip(), []) if isinstance(associations, dict) else []
+    if not isinstance(values, list):
+        return []
+    normalized_values: List[str] = []
+    for item in values:
+        value = str(item or "").strip()
+        if value and value not in normalized_values:
+            normalized_values.append(value)
+    return normalized_values
+
+
+def resolve_extension_source_dir(extension_record: Dict) -> str:
+    source_path = str(extension_record.get("source_path", "") or "").strip()
+    if not source_path:
+        return ""
+    candidate = os.path.abspath(os.path.expanduser(source_path))
+    if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "manifest.json")):
+        return candidate
+    return ""
+
+
+def resolve_profile_extension_dirs(config: Dict, profile_name: str) -> List[str]:
+    resolved: List[str] = []
+    for extension_id in get_profile_extension_ids(config, profile_name):
+        record = get_extension_record(config, extension_id)
+        if not record or not bool(record.get("enabled", True)):
+            continue
+        source_dir = resolve_extension_source_dir(record)
+        if source_dir and source_dir not in resolved:
+            resolved.append(source_dir)
+    return resolved
 
 
 def get_profile_user_data_dir_name(config: Dict, profile_name: str) -> str:
@@ -3274,10 +3407,16 @@ def build_direct_launch_command(profile_name: str, config: Dict, site: str = "")
     if launch_settings.get("force_webrtc_ip_handling_policy", False):
         command.append("--force-webrtc-ip-handling-policy")
 
+    extension_dirs: List[str] = []
     if launch_settings.get("load_fingerprint_extension", True):
-        extension_dir = detect_fingerprint_extension_dir(paths.get("fingerprint_zip_path", ""))
-        if extension_dir:
-            command.append(f"--load-extension={extension_dir}")
+        fingerprint_extension_dir = detect_fingerprint_extension_dir(paths.get("fingerprint_zip_path", ""))
+        if fingerprint_extension_dir and fingerprint_extension_dir not in extension_dirs:
+            extension_dirs.append(fingerprint_extension_dir)
+    for configured_extension_dir in resolve_profile_extension_dirs(normalized, profile_name):
+        if configured_extension_dir not in extension_dirs:
+            extension_dirs.append(configured_extension_dir)
+    if extension_dirs:
+        command.append(f"--load-extension={','.join(extension_dirs)}")
 
     if isinstance(launch_settings.get("extra_args", []), list):
         command.extend(sanitize_chromium_launch_args([item for item in launch_settings.get("extra_args", []) if item]))

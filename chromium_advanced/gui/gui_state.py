@@ -615,7 +615,8 @@ def build_mcp_status_view_model(
     startup_in_progress: bool,
     tr: TranslateFunc,
 ) -> Dict[str, str]:
-    if daemon_status and expected_enabled:
+    daemon_running = bool(daemon_status)
+    if daemon_running:
         worker_state = str(daemon_status.get("worker_state", "stopped"))
         worker_pid = daemon_status.get("worker_pid")
         active_requests = int(daemon_status.get("active_proxy_requests", 0) or 0)
@@ -625,7 +626,8 @@ def build_mcp_status_view_model(
         status_build_ms = int(daemon_status.get("status_build_ms", 0) or 0)
         server_status = daemon_status.get("server_status") if isinstance(daemon_status.get("server_status"), dict) else {}
         external_scan_ms = int((server_status or {}).get("external_scan_ms", 0) or 0)
-        suffix = f" policy={worker_policy}, status={status_build_ms}ms, scan={external_scan_ms}ms"
+        daemon_pid = int(daemon_status.get("daemon_pid", 0) or 0)
+        suffix = f" policy={worker_policy}, status={status_build_ms}ms, scan={external_scan_ms}ms, daemon={daemon_pid or '-'}"
         if worker_state == "running":
             return {
                 "label": tr("mcp_state_running", "Running"),
@@ -641,7 +643,7 @@ def build_mcp_status_view_model(
                 + suffix,
             }
         return {
-            "label": tr("mcp_state_guarding", "Guarding"),
+            "label": tr("mcp_state_guarding", "Guarding") if expected_enabled else tr("mcp_state_running", "Running"),
             "detail": tr(
                 "mcp_status_detail_guarding",
                 "worker stopped: {reason}",

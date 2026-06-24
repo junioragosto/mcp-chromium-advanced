@@ -29,7 +29,7 @@ If you are new to the project, use this order:
 ## 3. Integrations
 
 - [Daemon Automation Integration](./03-integrations/DAEMON_AUTOMATION_INTEGRATION.md)
-- [Keepalive Plugin Guide](./03-integrations/KEEPALIVE_PLUGIN_GUIDE.md)
+- [Keepalive Site Plugin Guide](./03-integrations/KEEPALIVE_PLUGIN_GUIDE.md)
 
 ## 4. Operations
 
